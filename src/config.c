@@ -125,6 +125,7 @@ void config_save() {
 	config_seti("client", "ui_spacing", settings.ui_spacing);
 	config_seti("client", "ui_padding", settings.ui_padding);
 	config_setf("client", "ao_multiplier", settings.ao_multiplier);
+	config_seti("client", "remove_fog_in_spec", settings.remove_fog_in_spec);
 
 	for(int k = 0; k < list_size(&config_keys); k++) {
 		struct config_key_pair* e = list_get(&config_keys, k);

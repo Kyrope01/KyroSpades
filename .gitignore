@@ -1,0 +1,1 @@
+Nothing should be ignored in this case, as only a source code file (`src/config.c`) was modified and there are no build artifacts, dependencies, or temporary files in the changes.
