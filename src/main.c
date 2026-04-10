@@ -105,7 +105,7 @@ void drawScene() {
 	matrix_upload();
 	chunk_draw_visible();
 
-	if(settings.smooth_fog) {
+	if(settings.smooth_fog && camera_mode != CAMERAMODE_SPECTATOR) {
 #ifdef OPENGL_ES
 		glFogx(GL_FOG_MODE, GL_EXP2);
 #else

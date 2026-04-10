@@ -1,0 +1,40 @@
+```
+# CMake build artifacts
+build/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+CPackConfig.cmake
+CPackSourceConfig.cmake
+
+# Compiled objects and executables
+*.o
+*.obj
+*.a
+*.so
+*.dll
+*.exe
+*.bin
+*.out
+
+# Dependency downloads and subprojects
+_deps/
+
+# Package config files
+*.pc
+
+# Temporary and cache files
+*.tmp
+*.log
+CMakeOutput.log
+CMakeError.log
+
+# IDE files
+.vscode/
+.idea/
+
+# System files
+.DS_Store
+Thumbs.db
+```

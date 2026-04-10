@@ -220,6 +220,10 @@ void glx_displaylist_draw(struct glx_displaylist* x, int type) {
 }
 
 void glx_enable_sphericalfog() {
+	if(camera_mode == CAMERAMODE_SPECTATOR) {
+		glx_fog = 1;
+		return;
+	}
 #ifndef OPENGL_ES
 	if(!settings.smooth_fog) {
 		glActiveTexture(GL_TEXTURE1);
