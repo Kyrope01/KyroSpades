@@ -1,5 +1,4 @@
 # KyroSpades (Enhanced ButterSpades)
-
 This project is a modified fork of [ButterSpades](https://github.com/utf-4096/butterspades). It introduces several new features and visual enhancements designed to make the client significantly more usable and customizable.
 
 ## New Features
