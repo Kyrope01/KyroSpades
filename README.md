@@ -5,5 +5,6 @@ This is a modification of the fork ButterSpades (https://github.com/utf-4096/but
 4) Player counter (displays a live count of alive players in both playing teams at the bottom of the screen).
 5) A folder named "bg" in png folder in working directory of executable file of client, where you can put any good screenshots or pictures and the game would set a random one as its wallpaper every time you start it, which makes the game look significantly better).
 6) Setting added to make player counter always visible when gmi enabled instead of only being visible in Areena gamemode (which itself did not always work, so this is in a way a fix to that too ig).
+7) Completely customisable game resolution (previously you would only be able to play in preset resolutions now it is completely customisable, you can set any value as width and height, it is better for older machienes with different aspect ratios).
 
 I am adding more features...
