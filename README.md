@@ -1,10 +1,13 @@
-This is a modification of the fork ButterSpades (https://github.com/utf-4096/butterspades) which adds few new features which make it a lot more usable, the features I added are:
-1) Strength multiplier for ambient occlusion (upto 5x).
-2) Spectator ESP (enables esp in spectator mode).
-3) Mention words (chat message containing at least one mention words are highlighted with a color wihich you can customise).
-4) Player counter (displays a live count of alive players in both playing teams at the bottom of the screen).
-5) A folder named "bg" in png folder in working directory of executable file of client, where you can put any good screenshots or pictures and the game would set a random one as its wallpaper every time you start it, which makes the game look significantly better).
-6) Setting added to make player counter always visible when gmi enabled instead of only being visible in Areena gamemode (which itself did not always work, so this is in a way a fix to that too ig).
-7) Completely customisable game resolution (previously you would only be able to play in preset resolutions now it is completely customisable, you can set any value as width and height, it is better for older machienes with different aspect ratios).
-
-I am adding more features...
+# KyroSpades (Enhanced ButterSpades)
+---
+This project is a modified fork of [ButterSpades](https://github.com/utf-4096/butterspades). It introduces several new features and visual enhancements designed to make the client significantly more usable and customizable.
+---
+## New Features
+* **Enhanced Ambient Occlusion:** Adjust the strength multiplier for ambient occlusion up to 5x for richer, deeper shadows.
+* **Spectator ESP:** Enables ESP visibility while in spectator mode.
+* **Custom Chat Highlights:** Never miss a message. Chat messages containing specific "mention words" are automatically highlighted in a custom color of your choice.
+* **Live Player Counter:** Displays a real-time count of alive players for both active teams at the bottom of the screen.
+* **Dynamic Wallpapers:** Customize your game's background! Simply place your favorite screenshots or pictures into the `png/bg` folder within the client's working directory. The game will automatically select a random image as your wallpaper every time you launch it.
+* **Persistent Counter Setting:** Added a new setting to keep the player counter visible at all times when GMI is enabled. This bypasses the old restriction where it only appeared in the Areena gamemode (which was previously inconsistent).
+---
+Active development is ongoing, and more features are currently in the works!
