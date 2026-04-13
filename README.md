@@ -1,12 +1,25 @@
 # KyroSpades (Enhanced ButterSpades)
-This project is a modified fork of [ButterSpades](https://github.com/utf-4096/butterspades). It introduces several new features and visual enhancements designed to make the client significantly more usable and customizable.
+This project is a modified fork of [ButterSpades](https://github.com/utf-4096/butterspades), introducing several quality-of-life improvements and visual enhancements.
 
 ## New Features
-* **Enhanced Ambient Occlusion:** Adjust the strength multiplier for ambient occlusion up to 5x for richer, deeper shadows.
-* **Spectator ESP:** Enables ESP visibility while in spectator mode.
-* **Custom Chat Highlights:** Never miss a message. Chat messages containing specific "mention words" are automatically highlighted in a custom color of your choice.
-* **Live Player Counter:** Displays a real-time count of alive players for both active teams at the bottom of the screen.
-* **Dynamic Wallpapers:** Customize your game's background! Simply place your favorite screenshots or pictures into the `png/bg` folder within the client's working directory. The game will automatically select a random image as your wallpaper every time you launch it.
-* **Persistent Counter Setting:** Added a new setting to keep the player counter visible at all times when GMI is enabled. This bypasses the old restriction where it only appeared in the Areena gamemode (which was previously inconsistent).
+| Feature | Description |
+| :--- | :--- |
+| **AO Multiplier** | Increases ambient occlusion strength (up to 5x) for deeper visual depth. |
+| **Spectator ESP** | Enables ESP functionality while in spectator mode. |
+| **Custom Mentions** | Highlight chat messages containing specific words with a customizable color. |
+| **Player Counter** | A live display of the number of players alive on both teams. |
+| **Dynamic Wallpapers** | Sets a random image from the `png/bg` folder as your background on startup. |
+| **Always Visible Live Player Counter** | Adds a setting that forces the player counter to remain visible whenever GMI is enabled. |
 
-Active development is ongoing, and more features are currently in the works!
+## Quick Setup: Dynamic Wallpapers
+To add custom wallpapers, in folder named `bg` inside the `png` folder in directory of your client. Drop any `.png` images you like into that folder, and the client will cycle through them randomly each time you start the game.
+
+<div align="center">
+ Active development is ongoing, and more features are currently in the works.
+</div>
+<div align="center">
+ Enjoy the enhanced Ace of Spades experience!
+</div>
+<div align="center">
+ Made with ❤️ by me, for the community :D
+ </div>
