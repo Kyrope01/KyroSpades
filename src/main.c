@@ -63,11 +63,7 @@ unsigned int chat_color[3][128];
 float chat_timer[3][128];
 unsigned int chat_history_pos;
 void chat_add(int channel, unsigned int color, const char* msg) {
-	for(int k = 127; k > 1; k--) {
-		strcpy(chat[channel][k], chat[channel][k - 1]);
-		chat_color[channel][k] = chat_color[channel][k - 1];
-		chat_timer[channel][k] = chat_timer[channel][k - 1];
-	}
+	memmove(chat[channel][2], chat[channel][1], sizeof(chat[channel][0]) * 126);
 	strcpy(chat[channel][1], msg);
 	chat_color[channel][1] = color;
 	chat_timer[channel][1] = window_time();
@@ -76,11 +72,7 @@ void chat_add(int channel, unsigned int color, const char* msg) {
 }
 
 void chat_clear(int channel) {
-	for(int k = 127; k > 1; k--) {
-		chat[channel][k][0] = '\0';
-		chat_color[channel][k] = 0x000000;
-		chat_timer[channel][k] = 0;
-	}
+	memset(chat[channel][2], 0, sizeof(chat[channel][0]) * 126);
 }
 
 char chat_popup[256] = {};
@@ -283,10 +275,8 @@ void display() {
 				default: pos = NULL;
 			}
 			if(pos != NULL && pos[1] > 1
-			   && (pow(pos[0] - camera_x, 2) + pow(pos[1] - camera_y, 2) + pow(pos[2] - camera_z, 2)) < 5 * 5) {
+			   && ((pos[0] - camera_x) * (pos[0] - camera_x) + (pos[1] - camera_y) * (pos[1] - camera_y) + (pos[2] - camera_z) * (pos[2] - camera_z)) < 5 * 5) {
 				matrix_upload();
-				glColor3f(1.0F, 0.0F, 0.0F);
-				glLineWidth(1.0F);
 				glDisable(GL_DEPTH_TEST);
 				glDepthMask(GL_FALSE);
 				struct Point cubes[64];
@@ -301,13 +291,14 @@ void display() {
 					cubes[0].y = pos[2];
 					cubes[0].z = 63 - pos[1];
 				}
+				glEnableClientState(GL_VERTEX_ARRAY);
+				float drag_active_f = (float)local_player_drag_active;
+				glColor3f(1.0F - drag_active_f, 1.0F - drag_active_f, 1.0F - drag_active_f);
+				glLineWidth(1.0F + 7.0F * drag_active_f);
 				while(amount > 0) {
 					int tmp = cubes[amount - 1].y;
 					cubes[amount - 1].y = 63 - cubes[amount - 1].z;
 					cubes[amount - 1].z = tmp;
-					if(amount <= (is_local ? local_player_blocks : 50))
-						glColor3f(1.0F, 1.0F, 1.0F);
-
 					short vertices[72] = {cubes[amount - 1].x,	   cubes[amount - 1].y,		cubes[amount - 1].z,
 										  cubes[amount - 1].x,	   cubes[amount - 1].y,		cubes[amount - 1].z + 1,
 										  cubes[amount - 1].x,	   cubes[amount - 1].y,		cubes[amount - 1].z,
@@ -334,18 +325,11 @@ void display() {
 										  cubes[amount - 1].x + 1, cubes[amount - 1].y + 1, cubes[amount - 1].z + 1,
 										  cubes[amount - 1].x,	   cubes[amount - 1].y,		cubes[amount - 1].z + 1,
 										  cubes[amount - 1].x,	   cubes[amount - 1].y + 1, cubes[amount - 1].z + 1};
-					if(local_player_drag_active) {
-						glLineWidth(8);
-					} else {
-						glLineWidth(1);
-					}
-
-					glEnableClientState(GL_VERTEX_ARRAY);
 					glVertexPointer(3, GL_SHORT, 0, vertices);
 					glDrawArrays(GL_LINES, 0, 24);
-					glDisableClientState(GL_VERTEX_ARRAY);
 					amount--;
 				}
+				glDisableClientState(GL_VERTEX_ARRAY);
 				glEnable(GL_DEPTH_TEST);
 				glDepthMask(GL_TRUE);
 			}
