@@ -63,7 +63,9 @@ unsigned int chat_color[3][128];
 float chat_timer[3][128];
 unsigned int chat_history_pos;
 void chat_add(int channel, unsigned int color, const char* msg) {
-	memmove(chat[channel][2], chat[channel][1], sizeof(chat[channel][0]) * 126);
+	memmove(chat[channel][2], chat[channel][1], sizeof(chat[channel][0]) * 125);
+	memmove(&chat_color[channel][2], &chat_color[channel][1], sizeof(chat_color[channel][0]) * 125);
+	memmove(&chat_timer[channel][2], &chat_timer[channel][1], sizeof(chat_timer[channel][0]) * 125);
 	strcpy(chat[channel][1], msg);
 	chat_color[channel][1] = color;
 	chat_timer[channel][1] = window_time();
