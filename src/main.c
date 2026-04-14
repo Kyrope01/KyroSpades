@@ -184,7 +184,7 @@ void display() {
 		glClearColor(fog_color[0], fog_color[1], fog_color[2], fog_color[3]);
 	}
 
-	if(hud_active->render_world) {
+	if(hud_active->render_world || network_connected) {
 		glEnable(GL_DEPTH_TEST);
 		glDepthRange(0.0F, 1.0F);
 
