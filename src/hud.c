@@ -3061,15 +3061,6 @@ static void hud_settings_render(mu_Context* ctx, float scalex, float scaley) {
 				}
 			}
 
-			mu_layout_row(ctx, 3, (int[]) {0.65F * width, -0.05F * width, -1}, 0);
-			mu_layout_next(ctx);
-
-			if(mu_button(ctx, "Apply changes")) {
-				memcpy(&settings, &settings_tmp, sizeof(struct RENDER_OPTIONS));
-				window_fromsettings();
-				sound_volume(settings.volume / 10.0F);
-				config_save();
-			}
 		}
 
 		if(mu_header_ex(ctx, "All settings", MU_OPT_EXPANDED)) {
