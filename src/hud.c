@@ -999,28 +999,33 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
 				float zoom_factor = fmax(
 					0.25F * (1.0F - ((window_time() - last_shot) / weapon_delay(players[local_id].weapon))) + 1.0F,
 					1.0F);
-		float ads_time = window_time() - players[local_id].input.buttons.rmb_start;
-		float ads_scale = fmin(ads_time / 0.15F, 1.0F);
-		// Use smoothstep for smoother zoom-in animation
-		float ads_scale_smooth = ads_scale * ads_scale * (3.0F - 2.0F * ads_scale);
-		float current_zoom_factor = 1.0F + (zoom_factor - 1.0F) * ads_scale_smooth;
-		float aspect_ratio = (float)zoom->width / (float)zoom->height;
-		// Scale the image size from 0.5x to 1.0x during ADS transition
-		float size_scale = 0.5F + 0.5F * ads_scale_smooth;
+				float current_zoom_factor = zoom_factor;
+				float aspect_ratio = (float)zoom->width / (float)zoom->height;
+				float size_scale = 1.0F;
 
-		texture_draw(zoom, (settings.window_width - settings.window_height * aspect_ratio * current_zoom_factor * size_scale) / 2.0F,
-					 settings.window_height * (current_zoom_factor * size_scale * 0.5F + 0.5F),
-					 settings.window_height * aspect_ratio * current_zoom_factor * size_scale, settings.window_height * current_zoom_factor * size_scale);
-		texture_draw_sector(zoom, 0, settings.window_height * (current_zoom_factor * size_scale * 0.5F + 0.5F),
-							(settings.window_width - settings.window_height * aspect_ratio * current_zoom_factor * size_scale)
-								/ 2.0F,
-							settings.window_height * current_zoom_factor * size_scale, 0.0F, 0.0F, 1.0F / (float)zoom->width, 1.0F);
-		texture_draw_sector(
-			zoom, (settings.window_width + settings.window_height * aspect_ratio * current_zoom_factor * size_scale) / 2.0F,
-			settings.window_height * (current_zoom_factor * size_scale * 0.5F + 0.5F),
-			(settings.window_width - settings.window_height * aspect_ratio * current_zoom_factor * size_scale) / 2.0F,
-			settings.window_height * current_zoom_factor * size_scale, (float)(zoom->width - 1) / (float)zoom->width, 0.0F,
-			1.0F / (float)zoom->width, 1.0F);
+				if(settings.ads_zoom_animation) {
+					float ads_time = window_time() - players[local_id].input.buttons.rmb_start;
+					float ads_scale = fmin(ads_time / 0.15F, 1.0F);
+					// Use smoothstep for smoother zoom-in animation
+					float ads_scale_smooth = ads_scale * ads_scale * (3.0F - 2.0F * ads_scale);
+					current_zoom_factor = 1.0F + (zoom_factor - 1.0F) * ads_scale_smooth;
+					// Scale the image size from 0.5x to 1.0x during ADS transition
+					size_scale = 0.5F + 0.5F * ads_scale_smooth;
+				}
+
+				texture_draw(zoom, (settings.window_width - settings.window_height * aspect_ratio * current_zoom_factor * size_scale) / 2.0F,
+							 settings.window_height * (current_zoom_factor * size_scale * 0.5F + 0.5F),
+							 settings.window_height * aspect_ratio * current_zoom_factor * size_scale, settings.window_height * current_zoom_factor * size_scale);
+				texture_draw_sector(zoom, 0, settings.window_height * (current_zoom_factor * size_scale * 0.5F + 0.5F),
+									(settings.window_width - settings.window_height * aspect_ratio * current_zoom_factor * size_scale)
+										/ 2.0F,
+									settings.window_height * current_zoom_factor * size_scale, 0.0F, 0.0F, 1.0F / (float)zoom->width, 1.0F);
+				texture_draw_sector(
+					zoom, (settings.window_width + settings.window_height * aspect_ratio * current_zoom_factor * size_scale) / 2.0F,
+					settings.window_height * (current_zoom_factor * size_scale * 0.5F + 0.5F),
+					(settings.window_width - settings.window_height * aspect_ratio * current_zoom_factor * size_scale) / 2.0F,
+					settings.window_height * current_zoom_factor * size_scale, (float)(zoom->width - 1) / (float)zoom->width, 0.0F,
+					1.0F / (float)zoom->width, 1.0F);
 			} else {
 				texture_draw(&texture_target, ceil((settings.window_width - texture_target.width) / 2.0F), ceil((settings.window_height + texture_target.height) / 2.0F),
 								 texture_target.width, texture_target.height);

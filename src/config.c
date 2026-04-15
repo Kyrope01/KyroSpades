@@ -126,6 +126,7 @@ void config_save() {
 	config_seti("client", "ui_padding", settings.ui_padding);
 	config_setf("client", "ao_multiplier", settings.ao_multiplier);
 	config_seti("client", "show_live_player_count", settings.show_live_player_count);
+	config_seti("client", "ads_zoom_animation", settings.ads_zoom_animation);
 
 	for(int k = 0; k < list_size(&config_keys); k++) {
 		struct config_key_pair* e = list_get(&config_keys, k);
@@ -197,8 +198,8 @@ static int config_read_key(void* user, const char* section, const char* name, co
 		IMPORT_SETTING(settings.ui_padding, ui_padding, atoi(value));
 		IMPORT_SETTING(settings.ao_multiplier, ao_multiplier, fmaxf(0.0F, atof(value)));
 		IMPORT_SETTING(settings.show_live_player_count, show_live_player_count, atoi(value));
+		IMPORT_SETTING(settings.ads_zoom_animation, ads_zoom_animation, atoi(value));
 	}
-
 	if(!strcmp(section, "controls")) {
 		for(int k = 0; k < list_size(&config_keys); k++) {
 			struct config_key_pair* key = list_get(&config_keys, k);
@@ -846,6 +847,16 @@ void config_reload() {
 				 .max = 32,
 				 .help = "Added padding for UI elements",
 				 .name = "UI Padding",
+			 });
+	list_add(&config_settings,
+			 &(struct config_setting) {
+				 .value = &settings_tmp.ads_zoom_animation,
+				 .type = CONFIG_TYPE_INT,
+				 .min = 0,
+				 .max = 1,
+				 .help = "Enable zoom animation when aiming down sights (ADS)",
+				 .name = "ADS zoom animation",
+				 .category = "KyroSpades Settings",
 			 });
 
 }

@@ -79,6 +79,7 @@ extern struct RENDER_OPTIONS {
 	int esp_in_spec;
 	float ao_multiplier;
 	int show_live_player_count;
+	int ads_zoom_animation;
 } settings, settings_tmp;
 
 extern struct list config_keys;
