@@ -999,21 +999,28 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
 				float zoom_factor = fmax(
 					0.25F * (1.0F - ((window_time() - last_shot) / weapon_delay(players[local_id].weapon))) + 1.0F,
 					1.0F);
-				float aspect_ratio = (float)zoom->width / (float)zoom->height;
+		float ads_time = window_time() - players[local_id].input.buttons.rmb_start;
+		float ads_scale = fmin(ads_time / 0.15F, 1.0F);
+		// Use smoothstep for smoother zoom-in animation
+		float ads_scale_smooth = ads_scale * ads_scale * (3.0F - 2.0F * ads_scale);
+		float current_zoom_factor = 1.0F + (zoom_factor - 1.0F) * ads_scale_smooth;
+		float aspect_ratio = (float)zoom->width / (float)zoom->height;
+		// Scale the image size from 0.5x to 1.0x during ADS transition
+		float size_scale = 0.5F + 0.5F * ads_scale_smooth;
 
-				texture_draw(zoom, (settings.window_width - settings.window_height * aspect_ratio * zoom_factor) / 2.0F,
-							 settings.window_height * (zoom_factor * 0.5F + 0.5F),
-							 settings.window_height * aspect_ratio * zoom_factor, settings.window_height * zoom_factor);
-				texture_draw_sector(zoom, 0, settings.window_height * (zoom_factor * 0.5F + 0.5F),
-									(settings.window_width - settings.window_height * aspect_ratio * zoom_factor)
-										/ 2.0F,
-									settings.window_height * zoom_factor, 0.0F, 0.0F, 1.0F / (float)zoom->width, 1.0F);
-				texture_draw_sector(
-					zoom, (settings.window_width + settings.window_height * aspect_ratio * zoom_factor) / 2.0F,
-					settings.window_height * (zoom_factor * 0.5F + 0.5F),
-					(settings.window_width - settings.window_height * aspect_ratio * zoom_factor) / 2.0F,
-					settings.window_height * zoom_factor, (float)(zoom->width - 1) / (float)zoom->width, 0.0F,
-					1.0F / (float)zoom->width, 1.0F);
+		texture_draw(zoom, (settings.window_width - settings.window_height * aspect_ratio * current_zoom_factor * size_scale) / 2.0F,
+					 settings.window_height * (current_zoom_factor * size_scale * 0.5F + 0.5F),
+					 settings.window_height * aspect_ratio * current_zoom_factor * size_scale, settings.window_height * current_zoom_factor * size_scale);
+		texture_draw_sector(zoom, 0, settings.window_height * (current_zoom_factor * size_scale * 0.5F + 0.5F),
+							(settings.window_width - settings.window_height * aspect_ratio * current_zoom_factor * size_scale)
+								/ 2.0F,
+							settings.window_height * current_zoom_factor * size_scale, 0.0F, 0.0F, 1.0F / (float)zoom->width, 1.0F);
+		texture_draw_sector(
+			zoom, (settings.window_width + settings.window_height * aspect_ratio * current_zoom_factor * size_scale) / 2.0F,
+			settings.window_height * (current_zoom_factor * size_scale * 0.5F + 0.5F),
+			(settings.window_width - settings.window_height * aspect_ratio * current_zoom_factor * size_scale) / 2.0F,
+			settings.window_height * current_zoom_factor * size_scale, (float)(zoom->width - 1) / (float)zoom->width, 0.0F,
+			1.0F / (float)zoom->width, 1.0F);
 			} else {
 				texture_draw(&texture_target, ceil((settings.window_width - texture_target.width) / 2.0F), ceil((settings.window_height + texture_target.height) / 2.0F),
 								 texture_target.width, texture_target.height);
@@ -1695,6 +1702,9 @@ static void hud_ingame_mouseclick(double x, double y, int button, int action, in
 		if(action == WINDOW_PRESS && players[local_player_id].held_item == TOOL_GUN && !settings.hold_down_sights
 		   && !players[local_player_id].items_show) {
 			players[local_player_id].input.buttons.rmb ^= 1;
+			if(players[local_player_id].input.buttons.rmb) {
+				players[local_player_id].input.buttons.rmb_start = window_time();
+			}
 		}
 		if(local_player_drag_active && action == WINDOW_RELEASE && players[local_player_id].held_item == TOOL_BLOCK) {
 			int* pos = camera_terrain_pick(0);

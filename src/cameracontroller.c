@@ -157,6 +157,9 @@ void cameracontroller_fps(float dt) {
 	if(players[local_player_id].held_item != TOOL_GUN
 	   || (settings.hold_down_sights && !players[local_player_id].items_show)) {
 		players[local_player_id].input.buttons.rmb = button_map[1];
+		if(button_map[1]) {
+			players[local_player_id].input.buttons.rmb_start = window_time();
+		}
 	}
 
 	if(chat_input_mode != CHAT_NO_INPUT) {
