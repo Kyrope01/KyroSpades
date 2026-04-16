@@ -48,8 +48,16 @@ float camera_fov_scaled() {
 	int local_id = (camera_mode == CAMERAMODE_FPS) ? local_player_id : cameracontroller_bodyview_player;
 
 	if(render_fpv && players[local_id].held_item == TOOL_GUN && players[local_id].input.buttons.rmb
-	   && !players[local_id].input.keys.sprint && players[local_id].alive)
-		return CAMERA_DEFAULT_FOV * atan(tan((CAMERA_DEFAULT_FOV / 180.0F * PI) / 2) / 2.0F) * 2.0F;
+	   && !players[local_id].input.keys.sprint && players[local_id].alive) {
+		float ads_fov = CAMERA_DEFAULT_FOV;
+		switch(players[local_id].weapon) {
+			case WEAPON_RIFLE: ads_fov = settings.rifle_ads_fov; break;
+			case WEAPON_SMG: ads_fov = settings.smg_ads_fov; break;
+			case WEAPON_SHOTGUN: ads_fov = settings.shotgun_ads_fov; break;
+			default: ads_fov = CAMERA_DEFAULT_FOV; break;
+		}
+		return ads_fov * atan(tan((ads_fov / 180.0F * PI) / 2) / 2.0F) * 2.0F;
+	}
 	return settings.camera_fov;
 }
 

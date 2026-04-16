@@ -127,6 +127,9 @@ void config_save() {
 	config_setf("client", "ao_multiplier", settings.ao_multiplier);
 	config_seti("client", "show_live_player_count", settings.show_live_player_count);
 	config_seti("client", "ads_zoom_animation", settings.ads_zoom_animation);
+	config_setf("client", "rifle_ads_fov", settings.rifle_ads_fov);
+	config_setf("client", "shotgun_ads_fov", settings.shotgun_ads_fov);
+	config_setf("client", "smg_ads_fov", settings.smg_ads_fov);
 
 	for(int k = 0; k < list_size(&config_keys); k++) {
 		struct config_key_pair* e = list_get(&config_keys, k);
@@ -199,6 +202,9 @@ static int config_read_key(void* user, const char* section, const char* name, co
 		IMPORT_SETTING(settings.ao_multiplier, ao_multiplier, fmaxf(0.0F, atof(value)));
 		IMPORT_SETTING(settings.show_live_player_count, show_live_player_count, atoi(value));
 		IMPORT_SETTING(settings.ads_zoom_animation, ads_zoom_animation, atoi(value));
+		IMPORT_SETTING(settings.rifle_ads_fov, rifle_ads_fov, fmaxf(5.0F, fminf(atof(value), CAMERA_DEFAULT_FOV)));
+		IMPORT_SETTING(settings.shotgun_ads_fov, shotgun_ads_fov, fmaxf(5.0F, fminf(atof(value), CAMERA_DEFAULT_FOV)));
+		IMPORT_SETTING(settings.smg_ads_fov, smg_ads_fov, fmaxf(5.0F, fminf(atof(value), CAMERA_DEFAULT_FOV)));
 	}
 	if(!strcmp(section, "controls")) {
 		for(int k = 0; k < list_size(&config_keys); k++) {
@@ -857,6 +863,39 @@ void config_reload() {
 				 .help = "Enable zoom animation when aiming down sights (ADS)",
 				 .name = "ADS zoom animation",
 				 .category = "KyroSpades Settings",
+			 });
+
+	list_add(&config_settings,
+			 &(struct config_setting) {
+				 .value = &settings_tmp.rifle_ads_fov,
+				 .type = CONFIG_TYPE_FLOAT,
+				 .min = 5,
+				 .max = CAMERA_DEFAULT_FOV,
+				 .help = "Field of View for rifles when aiming down sights",
+				 .name = "Rifle ADS FOV",
+				 .category = "Weapon Settings",
+			 });
+
+	list_add(&config_settings,
+			 &(struct config_setting) {
+				 .value = &settings_tmp.shotgun_ads_fov,
+				 .type = CONFIG_TYPE_FLOAT,
+				 .min = 5,
+				 .max = CAMERA_DEFAULT_FOV,
+				 .help = "Field of View for shotguns when aiming down sights",
+				 .name = "Shotgun ADS FOV",
+				 .category = "Weapon Settings",
+			 });
+
+	list_add(&config_settings,
+			 &(struct config_setting) {
+				 .value = &settings_tmp.smg_ads_fov,
+				 .type = CONFIG_TYPE_FLOAT,
+				 .min = 5,
+				 .max = CAMERA_DEFAULT_FOV,
+				 .help = "Field of View for SMGs when aiming down sights",
+				 .name = "SMG ADS FOV",
+				 .category = "Weapon Settings",
 			 });
 
 }

@@ -80,6 +80,9 @@ extern struct RENDER_OPTIONS {
 	float ao_multiplier;
 	int show_live_player_count;
 	int ads_zoom_animation;
+	float rifle_ads_fov;
+	float shotgun_ads_fov;
+	float smg_ads_fov;
 } settings, settings_tmp;
 
 extern struct list config_keys;
