@@ -749,10 +749,14 @@ void player_render(struct Player* p, int id) {
 
 	// Determine if arms should be rendered
 	// Arms are always rendered for other players, but for local player in FPV mode,
-	// it depends on the player_arms setting
+	// it depends on the player_arms setting and whether ADS is active
 	int render_arms = 1;
 	if(id == local_player_id && camera_mode == CAMERAMODE_FPS) {
 		render_arms = settings.player_arms;
+		// Hide arms when ADS is active (RMB pressed while holding gun)
+		if(p->held_item == TOOL_GUN && p->input.buttons.rmb) {
+			render_arms = 0;
+		}
 	}
 
 	// Render body parts (head, torso, legs) only when render_body is true
@@ -907,9 +911,8 @@ void player_render(struct Player* p, int id) {
 			kv6_render(&model_block, p->team);
 			break;
 		case TOOL_GUN:
-			// matrix_translate(matrix_model, 3.0F*0.1F-0.01F+0.025F,0.25F,-0.0625F);
-			// matrix_upload();
-			if(!(render_fpv && p->input.buttons.rmb)) {
+			// Don't render gun model for local player in FPV when ADS is active (RMB pressed)
+			if(!(render_fpv && id == local_player_id && p->input.buttons.rmb)) {
 				switch(p->weapon) {
 					case WEAPON_RIFLE: kv6_render(&model_semi, p->team); break;
 					case WEAPON_SMG: kv6_render(&model_smg, p->team); break;
