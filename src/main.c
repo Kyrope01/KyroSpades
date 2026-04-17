@@ -213,7 +213,10 @@ void display() {
 		camera_ExtractFrustum();
 
 		if(!network_map_transfer) {
-			glx_enable_sphericalfog();
+			if(network_connected)
+				glx_enable_sphericalfog();
+			else if(hud_active->render_world)
+				glx_enable_sphericalfog();
 			drawScene();
 
 			int render_fpv = (camera_mode == CAMERAMODE_FPS)

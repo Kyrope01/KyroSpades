@@ -1912,6 +1912,7 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
 				}
 				if(key == WINDOW_KEY_F3) {
 					camera_mode = CAMERAMODE_SPECTATOR;
+					cameracontroller_reset_spectator_velocity();
 				}
 				if(key == WINDOW_KEY_F4) {
 					camera_mode = CAMERAMODE_BODYVIEW;
@@ -3138,13 +3139,73 @@ static void hud_settings_render(mu_Context* ctx, float scalex, float scaley) {
 
 		}
 
+		if(mu_header_ex(ctx, "Spectator Mode Settings", MU_OPT_EXPANDED)) {
+			int width = mu_get_current_container(ctx)->body.w;
+
+			for(int k = 0; k < list_size(&config_settings); k++) {
+				struct config_setting* a = list_get(&config_settings, k);
+
+				if(strcmp(a->category, "Spectator Mode Settings") != 0)
+					continue;
+
+				mu_layout_row(ctx, 3, (int[]) {0.65F * width, -0.05F * width, -1}, 0);
+
+				switch(a->type) {
+					case CONFIG_TYPE_STRING:
+						mu_text(ctx, a->name);
+						mu_textbox(ctx, a->value, a->max + 1);
+						break;
+					case CONFIG_TYPE_INT:
+						if(a->max == 1 && a->min == 0) {
+							mu_text(ctx, a->name);
+							mu_checkbox(ctx, "", a->value);
+						} else if(a->defaults_length > 0) {
+							mu_text(ctx, a->name);
+							int_slider_defaults(ctx, a);
+						} else if(a->max == INT_MAX) {
+							mu_text(ctx, a->name);
+							int_number(ctx, a->value);
+						} else {
+							mu_text(ctx, a->name);
+							int_slider(ctx, a->value, a->min, a->max);
+						}
+						break;
+					case CONFIG_TYPE_FLOAT:
+						mu_text(ctx, a->name);
+						if(a->max == INT_MAX) {
+							mu_number(ctx, a->value, 0.1F);
+							*(float*)a->value = max(a->min, *(float*)a->value);
+						} else {
+							mu_slider(ctx, a->value, a->min, a->max);
+						}
+						break;
+				}
+
+				if(*a->help) {
+					mu_push_id(ctx, &a->value, sizeof(a->value));
+					if(mu_begin_popup(ctx, "Help")) {
+						mu_layout_row(ctx, 1, (int[]) {ctx->text_width(ctx->style->font, a->help, 0)}, 0);
+						mu_text(ctx, a->help);
+						mu_end_popup(ctx);
+					}
+
+					if(mu_button(ctx, "?"))
+						mu_open_popup(ctx, "Help");
+					mu_pop_id(ctx);
+				} else {
+					mu_layout_next(ctx);
+				}
+			}
+
+		}
+
 		if(mu_header_ex(ctx, "All settings", MU_OPT_EXPANDED)) {
 			int width = mu_get_current_container(ctx)->body.w;
 
 			for(int k = 0; k < list_size(&config_settings); k++) {
 				struct config_setting* a = list_get(&config_settings, k);
 
-				if(strcmp(a->category, "KyroSpades Settings") == 0 || strcmp(a->category, "Weapon Settings") == 0)
+				if(strcmp(a->category, "KyroSpades Settings") == 0 || strcmp(a->category, "Weapon Settings") == 0 || strcmp(a->category, "Spectator Mode Settings") == 0)
 					continue;
 
 				mu_layout_row(ctx, 3, (int[]) {0.65F * width, -0.05F * width, -1}, 0);

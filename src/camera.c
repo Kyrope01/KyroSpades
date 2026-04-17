@@ -99,6 +99,12 @@ void camera_update(float dt) {
 	}
 }
 
+// Reset spectator camera velocity (call when entering spectator mode)
+void cameracontroller_reset_spectator_velocity() {
+	extern void cameracontroller_reset_spectator_velocity_impl();
+	cameracontroller_reset_spectator_velocity_impl();
+}
+
 void camera_hit_fromplayer(struct Camera_HitType* hit, int player_id, float range) {
 	if(player_id != local_player_id) {
 		camera_hit(hit, player_id, players[player_id].physics.eye.x,

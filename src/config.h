@@ -71,6 +71,7 @@ extern struct RENDER_OPTIONS {
 	int chat_mention_g;
 	int chat_mention_b;
 	float spectator_speed;
+	float spectator_acceleration;
 	int iron_sight;
 	int gmi;
 	int disable_raw_input;

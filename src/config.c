@@ -119,6 +119,7 @@ void config_save() {
 	config_seti("client", "chat_mention_g", settings.chat_mention_g);
 	config_seti("client", "chat_mention_b", settings.chat_mention_b);
 	config_setf("client", "spectator_speed", settings.spectator_speed);
+	config_setf("client", "spectator_acceleration", settings.spectator_acceleration);
 	config_seti("client", "iron_sight", settings.iron_sight);
 	config_seti("client", "gmi", settings.gmi);
 	config_seti("client", "disable_raw_input", settings.disable_raw_input);
@@ -194,6 +195,7 @@ static int config_read_key(void* user, const char* section, const char* name, co
 		IMPORT_SETTING(settings.lighten_colors, lighten_colors, max(0, min(255, atoi(value))));
 		IMPORT_SETTING(settings.hud_shadows, hud_shadows, atoi(value));
 		IMPORT_SETTING(settings.spectator_speed, spectator_speed, max(0.1F, min(4.F, atof(value))));
+		IMPORT_SETTING(settings.spectator_acceleration, spectator_acceleration, max(10.0F, min(200.0F, atof(value))));
 		IMPORT_SETTING(settings.iron_sight, iron_sight, atoi(value));
 		IMPORT_SETTING(settings.gmi, gmi, atoi(value));
 		IMPORT_SETTING(settings.disable_raw_input, disable_raw_input, atoi(value));
@@ -798,6 +800,16 @@ void config_reload() {
 				 .max = 4.F,
 				 .help = "Speed of movement in spectator",
 				 .name = "Spectator speed",
+			 });
+	list_add(&config_settings,
+			 &(struct config_setting) {
+				 .value = &settings_tmp.spectator_acceleration,
+				 .type = CONFIG_TYPE_FLOAT,
+				 .min = 10,
+				 .max = 200,
+				 .help = "Rate of acceleration and deceleration for spectator camera",
+				 .name = "Spectator camera acceleration",
+				 .category = "Spectator Mode Settings",
 			 });
 	list_add(&config_settings,
 			 &(struct config_setting) {

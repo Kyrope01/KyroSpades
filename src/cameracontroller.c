@@ -193,76 +193,126 @@ void cameracontroller_fps_render() {
 				  camera_y + cos(camera_rot_y), camera_z + cos(camera_rot_x) * sin(camera_rot_y), 0.0F, 1.0F, 0.0F);
 }
 
+// Spectator camera velocity with smooth acceleration/deceleration
+static float spec_vel_x = 0.0F, spec_vel_y = 0.0F, spec_vel_z = 0.0F;
+
+void cameracontroller_reset_spectator_velocity_impl() {
+	spec_vel_x = 0.0F;
+	spec_vel_y = 0.0F;
+	spec_vel_z = 0.0F;
+}
+
 void cameracontroller_spectator(float dt) {
 	AABB camera = {0};
 	aabb_set_size(&camera, camera_size, camera_height, camera_size);
+	
+	// Use setting for accel/decel rates (with sensible defaults if not set)
+	float spec_accel = settings.spectator_acceleration > 0.0F ? settings.spectator_acceleration : 80.0F;
+	float spec_decel = spec_accel * 0.75F;  // Deceleration is 75% of acceleration
+	float spec_damping = 0.9F;              // Velocity damping factor
 	aabb_set_center(&camera, camera_x, camera_y - camera_eye_height, camera_z);
 
-	float x = 0.0F, y = 0.0F, z = 0.0F;
+	float input_x = 0.0F, input_y = 0.0F, input_z = 0.0F;
 
 	if(chat_input_mode == CHAT_NO_INPUT) {
 		if(window_key_down(WINDOW_KEY_UP)) {
-			x += sin(camera_rot_x) * sin(camera_rot_y);
+			input_x += sin(camera_rot_x) * sin(camera_rot_y);
 			if(!cameracontroller_yclamp) {
-				y += cos(camera_rot_y);
+				input_y += cos(camera_rot_y);
 			}
-			z += cos(camera_rot_x) * sin(camera_rot_y);
+			input_z += cos(camera_rot_x) * sin(camera_rot_y);
 		} else {
 			if(window_key_down(WINDOW_KEY_DOWN)) {
-				x -= sin(camera_rot_x) * sin(camera_rot_y);
+				input_x -= sin(camera_rot_x) * sin(camera_rot_y);
 				if(!cameracontroller_yclamp) {
-					y -= cos(camera_rot_y);
+					input_y -= cos(camera_rot_y);
 				}
-				z -= cos(camera_rot_x) * sin(camera_rot_y);
+				input_z -= cos(camera_rot_x) * sin(camera_rot_y);
 			}
 		}
 
 		if(window_key_down(WINDOW_KEY_LEFT)) {
-			x += sin(camera_rot_x + 1.57F);
-			z += cos(camera_rot_x + 1.57F);
+			input_x += sin(camera_rot_x + 1.57F);
+			input_z += cos(camera_rot_x + 1.57F);
 		} else {
 			if(window_key_down(WINDOW_KEY_RIGHT)) {
-				x += sin(camera_rot_x - 1.57F);
-				z += cos(camera_rot_x - 1.57F);
+				input_x += sin(camera_rot_x - 1.57F);
+				input_z += cos(camera_rot_x - 1.57F);
 			}
 		}
 
 		if(window_key_down(WINDOW_KEY_SPACE)) {
-			y++;
+			input_y++;
 		} else {
 			if(window_key_down(WINDOW_KEY_CROUCH)) {
-				y--;
+				input_y--;
 			}
 		}
 	}
 
-	float len = sqrt(x * x + y * y + z * z);
-	if(len > 0.0F) {
-		camera_movement_x = (x / len) * (camera_speed * settings.spectator_speed) * dt;
-		camera_movement_y = (y / len) * (camera_speed * settings.spectator_speed) * dt;
-		camera_movement_z = (z / len) * (camera_speed * settings.spectator_speed) * dt;
+	// Normalize input direction
+	float input_len = sqrt(input_x * input_x + input_y * input_y + input_z * input_z);
+	
+	// Calculate target velocity based on input
+	float target_speed = 0.0F;
+	if(input_len > 0.0F) {
+		target_speed = camera_speed * settings.spectator_speed;
+		input_x /= input_len;
+		input_y /= input_len;
+		input_z /= input_len;
 	}
 
-	if(abs(camera_movement_x) < 1.0F * settings.spectator_speed) {
-		camera_movement_x *= pow(0.0025F, dt);
+	// Smoothly accelerate/decelerate towards target velocity
+	if(target_speed > 0.0F) {
+		// Accelerate towards target velocity
+		float current_speed = sqrt(spec_vel_x * spec_vel_x + spec_vel_y * spec_vel_y + spec_vel_z * spec_vel_z);
+		float speed_diff = target_speed - current_speed;
+		
+		if(speed_diff > 0.0F) {
+			// Accelerating
+			float accel = spec_accel * dt;
+			if(accel > speed_diff) accel = speed_diff;
+			current_speed += accel;
+		} else {
+			// Decelerating (when changing direction)
+			float decel = spec_decel * dt;
+			if(decel > -speed_diff) decel = -speed_diff;
+			current_speed += decel;
+		}
+		
+		// Apply new speed in the input direction
+		spec_vel_x = input_x * current_speed;
+		spec_vel_y = input_y * current_speed;
+		spec_vel_z = input_z * current_speed;
+	} else {
+		// No input - apply damping for smooth deceleration
+		spec_vel_x *= spec_damping;
+		spec_vel_y *= spec_damping;
+		spec_vel_z *= spec_damping;
+		
+		// Stop completely when velocity is very small
+		if(fabs(spec_vel_x) < 0.01F) spec_vel_x = 0.0F;
+		if(fabs(spec_vel_y) < 0.01F) spec_vel_y = 0.0F;
+		if(fabs(spec_vel_z) < 0.01F) spec_vel_z = 0.0F;
 	}
-	if(abs(camera_movement_y) < 1.0F * settings.spectator_speed) {
-		camera_movement_y *= pow(0.0025F, dt);
-	}
-	if(abs(camera_movement_z) < 1.0F * settings.spectator_speed) {
-		camera_movement_z *= pow(0.0025F, dt);
-	}
+
+	// Apply velocity to position with collision detection
+	camera_movement_x = spec_vel_x * dt;
+	camera_movement_y = spec_vel_y * dt;
+	camera_movement_z = spec_vel_z * dt;
 
 	aabb_set_center(&camera, camera_x + camera_movement_x, camera_y - camera_eye_height, camera_z);
 
 	if(camera_x + camera_movement_x < 0 || camera_x + camera_movement_x > map_size_x
 	   || aabb_intersection_terrain(&camera, 0)) {
 		camera_movement_x = 0.0F;
+		spec_vel_x = 0.0F;
 	}
 
 	aabb_set_center(&camera, camera_x + camera_movement_x, camera_y + camera_movement_y - camera_eye_height, camera_z);
 	if(camera_y + camera_movement_y < 0 || aabb_intersection_terrain(&camera, 0)) {
 		camera_movement_y = 0.0F;
+		spec_vel_y = 0.0F;
 	}
 
 	aabb_set_center(&camera, camera_x + camera_movement_x, camera_y + camera_movement_y - camera_eye_height,
@@ -270,6 +320,7 @@ void cameracontroller_spectator(float dt) {
 	if(camera_z + camera_movement_z < 0 || camera_z + camera_movement_z > map_size_z
 	   || aabb_intersection_terrain(&camera, 0)) {
 		camera_movement_z = 0.0F;
+		spec_vel_z = 0.0F;
 	}
 
 	if(cameracontroller_bodyview_mode) {
@@ -291,6 +342,11 @@ void cameracontroller_spectator(float dt) {
 		camera_vx = p->physics.velocity.x;
 		camera_vy = p->physics.velocity.y;
 		camera_vz = p->physics.velocity.z;
+		
+		// Reset spectator velocity when in bodyview mode
+		spec_vel_x = 0.0F;
+		spec_vel_y = 0.0F;
+		spec_vel_z = 0.0F;
 	} else {
 		camera_x += camera_movement_x;
 		camera_y += camera_movement_y;

@@ -415,6 +415,10 @@ void read_PacketCreatePlayer(void* data, int len) {
 			camera_mode = (p->team == TEAM_SPECTATOR) ? CAMERAMODE_SPECTATOR : CAMERAMODE_FPS;
 			camera_rot_x = (p->team == TEAM_1) ? 0.5F * PI : 1.5F * PI;
 			camera_rot_y = 0.5F * PI;
+			// Reset spectator velocity when entering spectator mode
+			if(camera_mode == CAMERAMODE_SPECTATOR) {
+				cameracontroller_reset_spectator_velocity();
+			}
 			network_logged_in = 1;
 			local_player_health = 100;
 			local_player_blocks = 50;
