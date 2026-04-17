@@ -15,6 +15,7 @@ This project is a modified fork of [ButterSpades](https://github.com/utf-4096/bu
 | **Fov Max Limit 130** | Maximum value for horizontal fov is now increased to 130, its the highest value till which the game looks good, past that it gets a bit messy.|
 | **Smooth Transition to ADS** | Zoom in effect added to scope pngs. |
 | **Adjustable ADS FOV** | ADS FOV (zoom) of each weapon could be individually adjusted in settings now (this is the only client I know that has this feature :D |
+| **Smooth acceleration of spectator camera** | Spectator camera now uniformly accelerates upto maximum speed rahter than starting off abruptly at maximum set speed. |
 
 ## Quick Setup: Dynamic Wallpapers
 To add custom wallpapers, in folder named `bg` inside the `png` folder in directory of your client. Drop any `.png` images you like into that folder, and the client will cycle through them randomly each time you start the game.
