@@ -17,6 +17,7 @@ Latest compiled verion for Windows:https://drive.google.com/file/d/1Ha9Zs-CZEiJ1
 | **Smooth Transition to ADS** | Zoom in effect added to scope pngs. |
 | **Adjustable ADS FOV** | ADS FOV (zoom) of each weapon could be individually adjusted in settings now (this is the only client I know that has this feature :D |
 | **Smooth acceleration of spectator camera** | Spectator camera now uniformly accelerates upto maximum speed rahter than starting off abruptly at maximum set speed. |
+| **Roll Controll for Spectator Mode With Removed movement Limitations** | Limitations in movement have been removed and the camera can roll too, making it pretty similar to how a FPV drone would feel. |
 
 ## Quick Setup: Dynamic Wallpapers
 To add custom wallpapers, in folder named `bg` inside the `png` folder in directory of your client. Drop any `.png` images you like into that folder, and the client will cycle through them randomly each time you start the game.
