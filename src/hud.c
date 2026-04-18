@@ -1674,8 +1674,26 @@ static void hud_ingame_mouselocation(double x, double y) {
 	if(settings.invert_y)
 		dy *= -1.0F;
 
-	camera_rot_x -= dx * settings.mouse_sensitivity / 5.0F * (float)MOUSE_SENSITIVITY * s;
-	camera_rot_y += dy * settings.mouse_sensitivity / 5.0F * (float)MOUSE_SENSITIVITY * s;
+	// In spectator mode with roll, apply mouse movement relative to rolled camera orientation
+	if(camera_mode == CAMERAMODE_SPECTATOR) {
+		extern float cameracontroller_get_roll(void);
+		float roll = cameracontroller_get_roll();
+		
+		// Rotate the mouse delta by the roll angle
+		// When rolled 90°, mouse Y should affect yaw (left/right), not pitch
+		float cos_roll = cos(roll);
+		float sin_roll = sin(roll);
+		
+		// Transform mouse deltas: rotate by negative roll to get camera-relative movement
+		float dx_rotated = dx * cos_roll + dy * sin_roll;
+		float dy_rotated = dy * cos_roll - dx * sin_roll;
+		
+		camera_rot_x -= dx_rotated * settings.mouse_sensitivity / 5.0F * (float)MOUSE_SENSITIVITY * s;
+		camera_rot_y += dy_rotated * settings.mouse_sensitivity / 5.0F * (float)MOUSE_SENSITIVITY * s;
+	} else {
+		camera_rot_x -= dx * settings.mouse_sensitivity / 5.0F * (float)MOUSE_SENSITIVITY * s;
+		camera_rot_y += dy * settings.mouse_sensitivity / 5.0F * (float)MOUSE_SENSITIVITY * s;
+	}
 
 	camera_overflow_adjust();
 }

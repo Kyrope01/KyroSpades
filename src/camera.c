@@ -62,12 +62,15 @@ float camera_fov_scaled() {
 }
 
 void camera_overflow_adjust() {
-	if(camera_rot_y < EPSILON) {
-		camera_rot_y = EPSILON;
-	}
+	// Only clamp pitch in FPS mode, not in spectator mode (for FPV-style free rotation)
+	if(camera_mode == CAMERAMODE_FPS) {
+		if(camera_rot_y < EPSILON) {
+			camera_rot_y = EPSILON;
+		}
 
-	if(camera_rot_y > 3.14F) {
-		camera_rot_y = 3.14F;
+		if(camera_rot_y > 3.14F) {
+			camera_rot_y = 3.14F;
+		}
 	}
 
 	if(camera_rot_x > DOUBLEPI) {

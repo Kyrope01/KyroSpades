@@ -27,6 +27,9 @@ extern float cameracontroller_bodyview_zoom;
 
 void cameracontroller_reset_spectator_velocity(void);
 
+// Get current spectator camera roll angle
+float cameracontroller_get_roll(void);
+
 void cameracontroller_death_init(int player, float x, float y, float z);
 
 void cameracontroller_fps(float dt);

@@ -196,10 +196,18 @@ void cameracontroller_fps_render() {
 // Spectator camera velocity with smooth acceleration/deceleration
 static float spec_vel_x = 0.0F, spec_vel_y = 0.0F, spec_vel_z = 0.0F;
 
+// Spectator camera roll angle
+static float camera_roll = 0.0F;
+
 void cameracontroller_reset_spectator_velocity_impl() {
 	spec_vel_x = 0.0F;
 	spec_vel_y = 0.0F;
 	spec_vel_z = 0.0F;
+	camera_roll = 0.0F;
+}
+
+float cameracontroller_get_roll(void) {
+	return camera_roll;
 }
 
 void cameracontroller_spectator(float dt) {
@@ -215,38 +223,92 @@ void cameracontroller_spectator(float dt) {
 	float input_x = 0.0F, input_y = 0.0F, input_z = 0.0F;
 
 	if(chat_input_mode == CHAT_NO_INPUT) {
+		// Calculate forward direction vector from yaw and pitch
+		float forward_x = sin(camera_rot_x) * sin(camera_rot_y);
+		float forward_y = cos(camera_rot_y);
+		float forward_z = cos(camera_rot_x) * sin(camera_rot_y);
+		
+		// Calculate right vector (perpendicular to forward and world up)
+		float right_x = sin(camera_rot_x + 1.57079632679F); // sin(yaw + 90°)
+		float right_y = 0.0F;
+		float right_z = cos(camera_rot_x + 1.57079632679F); // cos(yaw + 90°)
+		
+		// Calculate base up vector (perpendicular to forward and right)
+		float up_x = -forward_x * forward_y;
+		float up_y = 1.0F - forward_y * forward_y;
+		float up_z = -forward_z * forward_y;
+		
+		// Normalize the base up vector
+		float up_len = sqrt(up_x * up_x + up_y * up_y + up_z * up_z);
+		if(up_len > 0.0001F) {
+			up_x /= up_len;
+			up_y /= up_len;
+			up_z /= up_len;
+		} else {
+			// Forward is pointing straight up or down
+			up_x = 0.0F;
+			up_y = 0.0F;
+			up_z = 1.0F;
+		}
+		
+		// Apply roll: rotate up and right vectors around forward axis
+		float cos_roll = cos(camera_roll);
+		float sin_roll = sin(camera_roll);
+		
+		// Rotated right = right * cos(roll) - up * sin(roll)
+		// Rotated up = up * cos(roll) + right * sin(roll)
+		float rolled_right_x = right_x * cos_roll - up_x * sin_roll;
+		float rolled_right_y = right_y * cos_roll - up_y * sin_roll;
+		float rolled_right_z = right_z * cos_roll - up_z * sin_roll;
+		
+		float rolled_up_x = up_x * cos_roll + right_x * sin_roll;
+		float rolled_up_y = up_y * cos_roll + right_y * sin_roll;
+		float rolled_up_z = up_z * cos_roll + right_z * sin_roll;
+		
+		// Now use rolled vectors for movement input (FPV-style)
 		if(window_key_down(WINDOW_KEY_UP)) {
-			input_x += sin(camera_rot_x) * sin(camera_rot_y);
-			if(!cameracontroller_yclamp) {
-				input_y += cos(camera_rot_y);
-			}
-			input_z += cos(camera_rot_x) * sin(camera_rot_y);
+			input_x += forward_x;
+			input_y += forward_y;
+			input_z += forward_z;
 		} else {
 			if(window_key_down(WINDOW_KEY_DOWN)) {
-				input_x -= sin(camera_rot_x) * sin(camera_rot_y);
-				if(!cameracontroller_yclamp) {
-					input_y -= cos(camera_rot_y);
-				}
-				input_z -= cos(camera_rot_x) * sin(camera_rot_y);
+				input_x -= forward_x;
+				input_y -= forward_y;
+				input_z -= forward_z;
 			}
 		}
 
 		if(window_key_down(WINDOW_KEY_LEFT)) {
-			input_x += sin(camera_rot_x + 1.57F);
-			input_z += cos(camera_rot_x + 1.57F);
+			input_x += rolled_right_x;
+			input_y += rolled_right_y;
+			input_z += rolled_right_z;
 		} else {
 			if(window_key_down(WINDOW_KEY_RIGHT)) {
-				input_x += sin(camera_rot_x - 1.57F);
-				input_z += cos(camera_rot_x - 1.57F);
+				input_x -= rolled_right_x;
+				input_y -= rolled_right_y;
+				input_z -= rolled_right_z;
 			}
 		}
 
 		if(window_key_down(WINDOW_KEY_SPACE)) {
-			input_y++;
+			input_x += rolled_up_x;
+			input_y += rolled_up_y;
+			input_z += rolled_up_z;
 		} else {
 			if(window_key_down(WINDOW_KEY_CROUCH)) {
-				input_y--;
+				input_x -= rolled_up_x;
+				input_y -= rolled_up_y;
+				input_z -= rolled_up_z;
 			}
+		}
+
+		// Handle camera roll input
+		float roll_speed = 2.0F; // radians per second
+		if(window_key_down(WINDOW_KEY_ROLL_CW)) {
+			camera_roll -= roll_speed * dt;
+		}
+		if(window_key_down(WINDOW_KEY_ROLL_CCW)) {
+			camera_roll += roll_speed * dt;
 		}
 	}
 
@@ -368,8 +430,51 @@ void cameracontroller_spectator_render() {
 		matrix_lookAt(matrix_view, camera_x, camera_y, camera_z, camera_x + ox, camera_y + oy, camera_z + oz, 0.0F,
 					  1.0F, 0.0F);
 	} else {
-		matrix_lookAt(matrix_view, camera_x, camera_y, camera_z, camera_x + sin(camera_rot_x) * sin(camera_rot_y),
-					  camera_y + cos(camera_rot_y), camera_z + cos(camera_rot_x) * sin(camera_rot_y), 0.0F, 1.0F, 0.0F);
+		// Calculate forward direction from yaw and pitch
+		float forward_x = sin(camera_rot_x) * sin(camera_rot_y);
+		float forward_y = cos(camera_rot_y);
+		float forward_z = cos(camera_rot_x) * sin(camera_rot_y);
+		
+		// Calculate right vector (perpendicular to forward and world up)
+		float right_x = sin(camera_rot_x + 1.57079632679F); // sin(yaw + 90°)
+		float right_y = 0.0F;
+		float right_z = cos(camera_rot_x + 1.57079632679F); // cos(yaw + 90°)
+		
+		// Calculate up vector with roll applied (FPV-style roll around forward axis)
+		// Start with world up projected perpendicular to forward
+		float up_x = -forward_x * forward_y;
+		float up_y = 1.0F - forward_y * forward_y;
+		float up_z = -forward_z * forward_y;
+		
+		// Normalize the base up vector
+		float up_len = sqrt(up_x * up_x + up_y * up_y + up_z * up_z);
+		if(up_len > 0.0001F) {
+			up_x /= up_len;
+			up_y /= up_len;
+			up_z /= up_len;
+		} else {
+			// Forward is pointing straight up or down, use alternative up
+			up_x = 0.0F;
+			up_y = 0.0F;
+			up_z = 1.0F;
+		}
+		
+		// Apply roll: rotate up vector around forward axis
+		// Using Rodrigues' rotation formula components
+		float cos_roll = cos(camera_roll);
+		float sin_roll = sin(camera_roll);
+		
+		// Rotated up = up * cos(roll) + (forward × up) * sin(roll) + forward * (forward · up) * (1 - cos(roll))
+		// Since forward · up = 0 (they're perpendicular), the last term is zero
+		// forward × up = right (by construction)
+		float rolled_up_x = up_x * cos_roll + right_x * sin_roll;
+		float rolled_up_y = up_y * cos_roll + right_y * sin_roll;
+		float rolled_up_z = up_z * cos_roll + right_z * sin_roll;
+		
+		// Use the rolled up vector in lookAt
+		matrix_lookAt(matrix_view, camera_x, camera_y, camera_z, 
+					  camera_x + forward_x, camera_y + forward_y, camera_z + forward_z, 
+					  rolled_up_x, rolled_up_y, rolled_up_z);
 	}
 }
 
