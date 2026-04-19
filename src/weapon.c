@@ -263,8 +263,11 @@ void weapon_shoot() {
 			hit.type = CAMERA_HITTYPE_NONE;
 		switch(hit.type) {
 			case CAMERA_HITTYPE_PLAYER: {
-				sound_create_sticky((hit.player_section == HITTYPE_HEAD) ? &sound_spade_whack : &sound_hitplayer,
-									players + hit.player_id, hit.player_id);
+				if(hit.player_section == HITTYPE_HEAD) {
+					sound_create(SOUND_LOCAL, &sound_headshot, 0.0F, 0.0F, 0.0F);
+				} else {
+					sound_create(SOUND_LOCAL, &sound_hitbody, 0.0F, 0.0F, 0.0F);
+				}
 				particle_create(0x0000FF, players[hit.player_id].physics.eye.x,
 								players[hit.player_id].physics.eye.y + player_section_height(hit.player_section),
 								players[hit.player_id].physics.eye.z, 3.5F, 1.0F, 8, 0.1F, 0.4F);

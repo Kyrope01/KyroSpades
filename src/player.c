@@ -453,9 +453,13 @@ void player_render_all() {
 					particle_create_casing(&players[k]);
 					switch(hit.type) {
 						case CAMERA_HITTYPE_PLAYER: {
-							sound_create_sticky((hit.player_section == HITTYPE_HEAD) ? &sound_spade_whack :
-																					   &sound_hitplayer,
-												players + hit.player_id, hit.player_id);
+       if(k == local_player_id) {
+           if(hit.player_section == HITTYPE_HEAD) {
+               sound_create(SOUND_LOCAL, &sound_headshot, 0.0F, 0.0F, 0.0F);
+           } else {
+               sound_create(SOUND_LOCAL, &sound_hitbody, 0.0F, 0.0F, 0.0F);
+           }
+       }
 							particle_create(0x0000FF, players[hit.player_id].physics.eye.x,
 											players[hit.player_id].physics.eye.y
 												+ player_section_height(hit.player_section),
