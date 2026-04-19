@@ -6,6 +6,7 @@ Compiled for Windows:https://drive.google.com/file/d/1KBqxb0LFNCcn3ZPOHFKpV4GuML
 ## New Features
 | Feature | Description |
 | :--- | :--- |
+| **Demo Recording** | Auto record demo setting added, is turned off by default, but when enabled starts recording demo automatically. |
 | **AO Multiplier** | Increases ambient occlusion strength (up to 5x) for deeper visual depth. |
 | **Spectator ESP** | Enables ESP functionality while in spectator mode. |
 | **Custom Mentions** | Highlight chat messages containing specific words with a customizable color. |
