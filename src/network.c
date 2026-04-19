@@ -39,6 +39,7 @@
 #include "chunk.h"
 #include "gmi.h"
 #include "config.h"
+#include "demo.h"
 
 void (*packets[256])(void* data, int len) = {NULL};
 
@@ -1030,6 +1031,9 @@ int network_connect(char* ip, int port) {
 	if(network_connected) {
 		network_disconnect();
 	}
+	if(settings.auto_demo_recording) {
+		demo_start_record();
+	}
 	if(network_connect_sub(ip, port, VERSION_075)) {
 		return 1;
 	}
@@ -1037,6 +1041,9 @@ int network_connect(char* ip, int port) {
 		return 1;
 	}
 	network_connected = 0;
+	if(settings.auto_demo_recording) {
+		demo_stop_record();
+	}
 	return 0;
 }
 
@@ -1093,6 +1100,7 @@ int network_update() {
 					} else {
 						log_error("Invalid packet id %i, length: %i", id, (int)event.packet->dataLength - 1);
 					}
+					register_demo_packet(event.packet);
 					network_received_packets++;
 					enet_packet_destroy(event.packet);
 					break;
