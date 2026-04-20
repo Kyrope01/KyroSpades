@@ -97,6 +97,9 @@ struct Sound_wav sound_debris;
 struct Sound_wav sound_bounce;
 struct Sound_wav sound_impact;
 
+struct Sound_wav sound_zoomin;
+struct Sound_wav sound_zoomout;
+
 void sound_volume(float vol) {
 #ifdef USE_SOUND
 	if(sound_enabled)
@@ -322,5 +325,8 @@ void sound_init() {
 	sound_load(&sound_debris, "wav/debris.wav", 0.1F, 53.0F);
 	sound_load(&sound_bounce, "wav/bounce.wav", 0.1F, 32.0F);
 	sound_load(&sound_impact, "wav/impact.wav", 0.1F, 53.0F);
+
+	sound_load(&sound_zoomin, "wav/zoomin.wav", 0.1F, 1024.0F);
+	sound_load(&sound_zoomout, "wav/zoomout.wav", 0.1F, 1024.0F);
 #endif
 }

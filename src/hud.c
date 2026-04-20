@@ -48,6 +48,7 @@
 #include "weapon.h"
 #include "tracer.h"
 #include "font.h"
+#include "sound.h"
 #include "gmi.h"
 
 struct hud* hud_active;
@@ -1724,9 +1725,17 @@ static void hud_ingame_mouseclick(double x, double y, int button, int action, in
 	if(button == WINDOW_MOUSE_RMB) {
 		if(action == WINDOW_PRESS && players[local_player_id].held_item == TOOL_GUN && !settings.hold_down_sights
 		   && !players[local_player_id].items_show) {
+			int was_aiming = players[local_player_id].input.buttons.rmb;
 			players[local_player_id].input.buttons.rmb ^= 1;
 			if(players[local_player_id].input.buttons.rmb) {
 				players[local_player_id].input.buttons.rmb_start = window_time();
+#ifdef USE_SOUND
+				sound_create(SOUND_LOCAL, &sound_zoomin, 0, 0, 0);
+#endif
+			} else {
+#ifdef USE_SOUND
+				sound_create(SOUND_LOCAL, &sound_zoomout, 0, 0, 0);
+#endif
 			}
 		}
 		if(local_player_drag_active && action == WINDOW_RELEASE && players[local_player_id].held_item == TOOL_BLOCK) {
