@@ -230,13 +230,33 @@ void display() {
 
 			if(camera_mode == CAMERAMODE_FPS) {
 				weapon_update();
+				
+				/* Check for pending block placement when landing */
+				if(local_player_pending_block_active && !players[local_player_id].physics.airborne) {
+					int* pos = camera_terrain_pick(0);
+					if(pos != NULL && pos[1] > 1
+					   && chebyshev(pos[0] - camera_x, pos[1] - camera_y, pos[2] - camera_z) < 3.0F
+					   && !overlaps_with_player(pos[0], pos[1], pos[2])) {
+						players[local_player_id].item_showup = window_time();
+						local_player_blocks = max(local_player_blocks - 1, 0);
+
+						struct PacketBlockAction blk;
+						blk.player_id = local_player_id;
+						blk.action_type = ACTION_BUILD;
+						blk.x = pos[0];
+						blk.y = pos[2];
+						blk.z = 63 - pos[1];
+						network_send(PACKET_BLOCKACTION_ID, &blk, sizeof(blk));
+					}
+					local_player_pending_block_active = 0;
+				}
+				
 				if(players[local_player_id].input.buttons.lmb && players[local_player_id].held_item == TOOL_BLOCK
 				   && (window_time() - players[local_player_id].item_showup) >= 0.5F && local_player_blocks > 0) {
 					int* pos = camera_terrain_pick(0);
 					if(pos != NULL && pos[1] > 1
-					   && distance3D(camera_x, camera_y, camera_z, pos[0], pos[1], pos[2]) < 5.0F * 5.0F
-					   && !(pos[0] == (int)camera_x && pos[1] == (int)camera_y + 0 && pos[2] == (int)camera_z)
-					   && !(pos[0] == (int)camera_x && pos[1] == (int)camera_y - 1 && pos[2] == (int)camera_z)) {
+					   && chebyshev(pos[0] - camera_x, pos[1] - camera_y, pos[2] - camera_z) < 3.0F
+					   && !overlaps_with_player(pos[0], pos[1], pos[2])) {
 						players[local_player_id].item_showup = window_time();
 						local_player_blocks = max(local_player_blocks - 1, 0);
 
@@ -248,6 +268,15 @@ void display() {
 						blk.z = 63 - pos[1];
 						network_send(PACKET_BLOCKACTION_ID, &blk, sizeof(blk));
 						// read_PacketBlockAction(&blk,sizeof(blk));
+					} else if(pos != NULL && pos[1] > 1
+					          && chebyshev(pos[0] - camera_x, pos[1] - camera_y, pos[2] - camera_z) < 3.0F
+					          && overlaps_with_player(pos[0], pos[1], pos[2])
+					          && !local_player_pending_block_active) {
+						/* Queue block placement for when we land */
+						local_player_pending_block_active = 1;
+						local_player_pending_block_x = pos[0];
+						local_player_pending_block_y = pos[1];
+						local_player_pending_block_z = pos[2];
 					}
 				}
 				if(players[local_player_id].input.buttons.lmb && players[local_player_id].held_item == TOOL_GRENADE
@@ -280,7 +309,8 @@ void display() {
 				default: pos = NULL;
 			}
 			if(pos != NULL && pos[1] > 1
-			   && ((pos[0] - camera_x) * (pos[0] - camera_x) + (pos[1] - camera_y) * (pos[1] - camera_y) + (pos[2] - camera_z) * (pos[2] - camera_z)) < 5 * 5) {
+                           && chebyshev(pos[0] - camera_x, pos[1] - camera_y, pos[2] - camera_z) < 3.0F
+                           && !overlaps_with_player(pos[0], pos[1], pos[2])) {
 				matrix_upload();
 				glDisable(GL_DEPTH_TEST);
 				glDepthMask(GL_FALSE);
@@ -298,7 +328,19 @@ void display() {
 				}
 				glEnableClientState(GL_VERTEX_ARRAY);
 				float drag_active_f = (float)local_player_drag_active;
-				glColor3f(1.0F - drag_active_f, 1.0F - drag_active_f, 1.0F - drag_active_f);
+                                int line_invalid = 0;
+                                if(amount > local_player_blocks) {
+                                        line_invalid = 1;
+                                }
+                                float r, g, b;
+                                if(line_invalid) {
+                                        r = 1.0F; g = 0.0F; b = 0.0F;
+                                } else if(drag_active_f > 0.5F) {
+                                        r = 1.0F; g = 1.0F; b = 0.0F;
+                                } else {
+                                        r = 1.0F - drag_active_f; g = 1.0F - drag_active_f; b = 1.0F - drag_active_f;
+                                }
+                                glColor3f(r, g, b);
 				glLineWidth(1.0F + 7.0F * drag_active_f);
 				while(amount > 0) {
 					int tmp = cubes[amount - 1].y;

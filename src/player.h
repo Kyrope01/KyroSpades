@@ -70,6 +70,12 @@ extern int local_player_drag_x;
 extern int local_player_drag_y;
 extern int local_player_drag_z;
 
+/* Pending block placement when airborne */
+extern char local_player_pending_block_active;
+extern int local_player_pending_block_x;
+extern int local_player_pending_block_y;
+extern int local_player_pending_block_z;
+
 extern int player_intersection_type;
 extern int player_intersection_player;
 extern float player_intersection_dist;
@@ -177,5 +183,6 @@ void player_collision(const struct Player* p, Ray* ray, struct player_intersecti
 void player_reset(struct Player* p);
 int player_move(struct Player* p, float fsynctics, int id);
 int player_uncrouch(struct Player* p);
+int overlaps_with_player(int bx, int by, int bz);
 
 #endif

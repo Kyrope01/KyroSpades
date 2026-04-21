@@ -54,6 +54,42 @@ static int player_in_view(struct Player* p) {
                        <= pow(settings.render_distance + 2.0F, 2.0F);
 }
 
+/* Check if a block position overlaps with the local player's AABB */
+int overlaps_with_player(int bx, int by, int bz) {
+        if(camera_mode != CAMERAMODE_FPS || local_player_id >= PLAYERS_MAX) {
+                return 0;
+        }
+        
+        struct Player* p = &players[local_player_id];
+        if(!p->alive || p->team == TEAM_SPECTATOR) {
+                return 0;
+        }
+        
+        /* Build player AABB based on crouch state */
+        AABB player_box;
+        float half_width = 0.45F; /* Half of player width (0.9 total) */
+        float height = p->input.keys.crouch ? 0.9F : 1.85F;
+        
+        /* Player box centered at player position (feet level) */
+        player_box.min_x = p->pos.x - half_width;
+        player_box.max_x = p->pos.x + half_width;
+        player_box.min_z = p->pos.z - half_width;
+        player_box.max_z = p->pos.z + half_width;
+        player_box.min_y = p->pos.y;
+        player_box.max_y = p->pos.y + height;
+        
+        /* Block is a 1x1x1 cube at integer coordinates */
+        AABB block_box;
+        block_box.min_x = (float)bx;
+        block_box.max_x = (float)bx + 1.0F;
+        block_box.min_z = (float)bz;
+        block_box.max_z = (float)bz + 1.0F;
+        block_box.min_y = (float)by;
+        block_box.max_y = (float)by + 1.0F;
+        
+        return aabb_intersection(&player_box, &block_box);
+}
+
 int button_map[3];
 
 unsigned char local_player_id = 0;
@@ -76,6 +112,12 @@ char local_player_drag_active = 0;
 int local_player_drag_x;
 int local_player_drag_y;
 int local_player_drag_z;
+
+/* Pending block placement when airborne */
+char local_player_pending_block_active = 0;
+int local_player_pending_block_x;
+int local_player_pending_block_y;
+int local_player_pending_block_z;
 
 int player_intersection_type = -1;
 int player_intersection_player = 0;

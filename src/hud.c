@@ -1741,10 +1741,11 @@ static void hud_ingame_mouseclick(double x, double y, int button, int action, in
 		if(local_player_drag_active && action == WINDOW_RELEASE && players[local_player_id].held_item == TOOL_BLOCK) {
 			int* pos = camera_terrain_pick(0);
 			if(pos != NULL && pos[1] > 1
-			   && (pow(pos[0] - camera_x, 2) + pow(pos[1] - camera_y, 2) + pow(pos[2] - camera_z, 2)) < 5 * 5) {
+			   && chebyshev(pos[0] - camera_x, pos[1] - camera_y, pos[2] - camera_z) < 3.0F
+			   && !overlaps_with_player(pos[0], pos[1], pos[2])) {
 				int amount = map_cube_line(local_player_drag_x, local_player_drag_z, 63 - local_player_drag_y, pos[0],
 										   pos[2], 63 - pos[1], NULL);
-				if(amount <= local_player_blocks) {
+				if(amount > 0 && amount <= local_player_blocks) {
 					struct PacketBlockLine line;
 					line.player_id = local_player_id;
 					line.sx = local_player_drag_x;
@@ -1764,7 +1765,8 @@ static void hud_ingame_mouseclick(double x, double y, int button, int action, in
 		   && window_time() - players[local_player_id].item_showup >= 0.5F) {
 			int* pos = camera_terrain_pick(0);
 			if(pos != NULL && pos[1] > 1
-			   && distance3D(camera_x, camera_y, camera_z, pos[0], pos[1], pos[2]) < 5.0F * 5.0F) {
+			   && chebyshev(pos[0] - camera_x, pos[1] - camera_y, pos[2] - camera_z) < 3.0F
+			   && !overlaps_with_player(pos[0], pos[1], pos[2])) {
 				local_player_drag_active = 1;
 				local_player_drag_x = pos[0];
 				local_player_drag_y = pos[1];
