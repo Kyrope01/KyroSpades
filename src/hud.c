@@ -550,10 +550,20 @@ static inline void hud_font_render_centered(float x, float y, float h, char* tex
 }
 
 static int chat_messages = 16;
+static int chat_scroll_offset = 0;
 
 static void hud_render_message(unsigned int channel, unsigned int k) {
 char *c;
 float x, y;
+
+/* For the global chat channel, allow scrolling back through history
+ * while the chat input is open. The offset is driven by the scroll
+ * wheel (see hud_ingame_scroll). */
+unsigned int idx = k + 1;
+if(channel == 0)
+	idx += chat_scroll_offset;
+if(idx > 127)
+	idx = 127;
 
 if(channel == 0) {
 x = 16.F;
@@ -568,9 +578,9 @@ y = settings.window_height - 22.0F - 10.0F * k - k * 8.F;
 
 // Check if this message contains any mention word
 int is_mentioned = 0;
-if(settings.chat_mention_words[0] != '\0' && channel == 0 && *chat[channel][k + 1] != '\0') {
+if(settings.chat_mention_words[0] != '\0' && channel == 0 && *chat[channel][idx] != '\0') {
 char msg_copy[256];
-strncpy(msg_copy, chat[channel][k + 1], 255);
+strncpy(msg_copy, chat[channel][idx], 255);
 msg_copy[255] = '\0';
 
 // Convert message to lowercase for comparison
@@ -603,11 +613,11 @@ token = strtok(NULL, ", ");
 }
 
 
-if(channel == 0 && *chat[channel][k + 1] != '\0') {
+if(channel == 0 && *chat[channel][idx] != '\0') {
 if(is_mentioned) {
 glColor3ub(settings.chat_mention_r, settings.chat_mention_g, settings.chat_mention_b);
 } else {
-glColor3ub(red(chat_color[channel][k + 1]), green(chat_color[channel][k + 1]), blue(chat_color[channel][k + 1]));
+glColor3ub(red(chat_color[channel][idx]), green(chat_color[channel][idx]), blue(chat_color[channel][idx]));
 }
 glLineWidth(3);
 glBegin(GL_LINES);
@@ -623,7 +633,7 @@ glColor3ub(255, 255, 255);
 
 char buffer[512];
 unsigned int i = 0;
-for(c = chat[channel][k + 1]; *c != '\0'; c++) {
+for(c = chat[channel][idx]; *c != '\0'; c++) {
 // Chat color
 if(*c > 7) {
 buffer[i++] = *c;
@@ -1182,9 +1192,11 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
 				float chat_width = 0;
 				int chat_height = 0;
 				for(int k = 0; k < chat_messages; k++) {
-					if((window_time() - chat_timer[0][k + 1] < 10.0F || chat_input_mode != CHAT_NO_INPUT)
-					   && strlen(chat[0][k + 1]) > 0) {
-						chat_width = fmaxf(font_length(16.0F, chat[0][k + 1]), chat_width);
+					int idx = k + 1 + chat_scroll_offset;
+					if(idx > 127) idx = 127;
+					if((window_time() - chat_timer[0][idx] < 10.0F || chat_input_mode != CHAT_NO_INPUT)
+					   && strlen(chat[0][idx]) > 0) {
+						chat_width = fmaxf(font_length(16.0F, chat[0][idx]), chat_width);
 						chat_height = k + 1;
 					}
 
@@ -1254,7 +1266,9 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
 
 			for(int k = 0; k < chat_messages; k++) {
 				glColor3ub(255, 255, 255);
-				if(window_time() - chat_timer[0][k + 1] < 10.0F || chat_input_mode != CHAT_NO_INPUT) {
+				int idx0 = k + 1 + chat_scroll_offset;
+				if(idx0 > 127) idx0 = 127;
+				if(window_time() - chat_timer[0][idx0] < 10.0F || chat_input_mode != CHAT_NO_INPUT) {
 					hud_render_message(0, k);
 				}
 
@@ -1634,6 +1648,23 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
 }
 
 static void hud_ingame_scroll(double yoffset) {
+	/* While the chat input is open, the scroll wheel pages through the
+	 * chat history instead of switching weapons. yoffset > 0 scrolls
+	 * toward older messages; yoffset < 0 scrolls back toward the newest. */
+	if(chat_input_mode != CHAT_NO_INPUT && yoffset != 0.0F) {
+		int max_offset = 127 - chat_messages;
+		if(max_offset < 0) max_offset = 0;
+		static float scroll_accum = 0.0F;
+		scroll_accum += (yoffset > 0) ? 0.5F : -0.5F;
+		int step = (int)scroll_accum;
+		if(step != 0) {
+			scroll_accum -= step;
+			chat_scroll_offset += step;
+			if(chat_scroll_offset < 0) chat_scroll_offset = 0;
+			if(chat_scroll_offset > max_offset) chat_scroll_offset = max_offset;
+		}
+		return;
+	}
 	if(camera_mode == CAMERAMODE_FPS && yoffset != 0.0F) {
 		int h = players[local_player_id].held_item;
 		if(!players[local_player_id].items_show)
@@ -1967,6 +1998,7 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
 				} else if(!window_key_down(WINDOW_KEY_CROUCH)) {
 					window_textinput(1);
 					chat_input_mode = CHAT_TEAM_INPUT;
+					chat_scroll_offset = 0;
 				}
 			}
 
@@ -1997,12 +2029,14 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
 			if(key == WINDOW_KEY_COMMAND && !window_key_down(WINDOW_KEY_CROUCH)) {
 				window_textinput(1);
 				chat_input_mode = CHAT_ALL_INPUT;
+				chat_scroll_offset = 0;
 				strcpy(chat[0][0], "/");
 			}
 
 			if(key == WINDOW_KEY_CHAT && !window_key_down(WINDOW_KEY_CROUCH)) {
 				window_textinput(1);
 				chat_input_mode = CHAT_ALL_INPUT;
+				chat_scroll_offset = 0;
 			}
 
 			if((key == WINDOW_KEY_CURSOR_UP || key == WINDOW_KEY_CURSOR_DOWN || key == WINDOW_KEY_CURSOR_LEFT
@@ -2270,6 +2304,7 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
 				}
 				window_textinput(0);
 				chat_input_mode = CHAT_NO_INPUT;
+				chat_scroll_offset = 0;
 				chat[0][0][0] = 0;
 			}
 			if(key == WINDOW_KEY_BACKSPACE) {
