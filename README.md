@@ -20,6 +20,7 @@ Compiled for Windows:https://drive.google.com/file/d/1KBqxb0LFNCcn3ZPOHFKpV4GuML
 | **Smooth acceleration of spectator camera** | Spectator camera now uniformly accelerates upto maximum speed rahter than starting off abruptly at maximum set speed. |
 | **Roll Controll for Spectator Mode With Removed movement Limitations** | Limitations in movement have been removed and the camera can roll too, making it pretty similar to how a FPV drone would feel. |
 | **Hit Indicators Added** | Hit indicator sounds have been added. |
+| **Chat Scroll Added** | Can scroll chat using scroll wheel when chat window is opened. |
 
 ## Quick Setup: Dynamic Wallpapers
 To add custom wallpapers, in folder named `bg` inside the `png` folder in directory of your client. Drop any `.png` images you like into that folder, and the client will cycle through them randomly each time you start the game.
