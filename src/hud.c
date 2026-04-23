@@ -1190,7 +1190,7 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
 
 				}
 
-				if(chat != CHAT_NO_INPUT) {
+				if(chat_input_mode != CHAT_NO_INPUT) {
 					chat_width = fmaxf(chat_width, font_length(16.0F, chat[0][0]));
 				}
 
@@ -1952,9 +1952,6 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
 					players[local_player_id].pos.y = 63.0F;
 					players[local_player_id].pos.z = 256.0F;
 				}
-				if(key == WINDOW_KEY_CROUCH) {
-					players[local_player_id].alive = !players[local_player_id].alive;
-				}
 			}
 
 			if(key == WINDOW_KEY_NO || (show_exit && key == WINDOW_KEY_ESCAPE)) {
@@ -1964,7 +1961,7 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
 			} else if(key == WINDOW_KEY_YES) {
 				if(show_exit) {
 					hud_change(&hud_serverlist);
-				} else if(!window_key_down(WINDOW_KEY_CROUCH)) {
+				} else {
 					window_textinput(1);
 					chat_input_mode = CHAT_TEAM_INPUT;
 				}
@@ -1994,13 +1991,13 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
 				chat_add(0, 0x00FFFF, volstr);
 			}
 
-			if(key == WINDOW_KEY_COMMAND && !window_key_down(WINDOW_KEY_CROUCH)) {
+			if(key == WINDOW_KEY_COMMAND) {
 				window_textinput(1);
 				chat_input_mode = CHAT_ALL_INPUT;
 				strcpy(chat[0][0], "/");
 			}
 
-			if(key == WINDOW_KEY_CHAT && !window_key_down(WINDOW_KEY_CROUCH)) {
+			if(key == WINDOW_KEY_CHAT) {
 				window_textinput(1);
 				chat_input_mode = CHAT_ALL_INPUT;
 			}
