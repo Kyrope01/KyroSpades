@@ -46,7 +46,7 @@ void cameracontroller_death_init(int player, float x, float y, float z) {
 }
 
 void cameracontroller_death(float dt) {
-	AABB box;
+	AABB box = {0};
 	aabb_set_size(&box, camera_size, camera_height, camera_size);
 	aabb_set_center(&box, camera_x + cameracontroller_death_velocity_x * dt,
 					camera_y + (cameracontroller_death_velocity_y - dt * 32.0F) * dt,
