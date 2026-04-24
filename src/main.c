@@ -49,6 +49,8 @@
 
 int fps = 0;
 
+float dt_float = 0.0F;
+
 int ms_seed = 1;
 int ms_rand() {
 	ms_seed = ms_seed * 0x343FD + 0x269EC3;
@@ -196,7 +198,7 @@ void display() {
 
 		if(settings.opengl14) {
 			matrix_identity(matrix_projection);
-			matrix_perspective(matrix_projection, camera_fov_scaled(),
+			matrix_perspective(matrix_projection, camera_fov_scaled(dt_float),
 							   ((float)settings.window_width) / ((float)settings.window_height), 0.1F,
 							   settings.render_distance + CHUNK_SIZE * 4.0F);
 			matrix_upload_p();
@@ -828,6 +830,7 @@ int main(int argc, char** argv) {
 	while(!window_closed()) {
 		double dt = window_time() - last_frame_start;
 		last_frame_start = window_time();
+		dt_float = (float)dt;
 
 		if(hud_active->render_world) {
 			physics_time_fast += dt;

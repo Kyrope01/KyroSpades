@@ -41,11 +41,28 @@ float camera_eye_height = 0.0F;
 float camera_movement_x = 0.0F, camera_movement_y = 0.0F, camera_movement_z = 0.0F;
 float camera_speed = 32.0F;
 
-float camera_fov_scaled() {
+float camera_fov_scaled(float dt) {
 	int render_fpv = (camera_mode == CAMERAMODE_FPS)
 		|| ((camera_mode == CAMERAMODE_BODYVIEW || camera_mode == CAMERAMODE_SPECTATOR)
 			&& cameracontroller_bodyview_mode);
 	int local_id = (camera_mode == CAMERAMODE_FPS) ? local_player_id : cameracontroller_bodyview_player;
+
+	// Calculate target FOV offset based on sprint and crouch state
+	// Only apply FOV changes when in first-person view as the local player
+	float target_fov_offset = 0.0F;
+	if(camera_mode == CAMERAMODE_FPS && local_id < PLAYERS_MAX && players[local_id].alive) {
+		if(players[local_id].input.keys.sprint) {
+			target_fov_offset += 20.0F;
+		}
+		if(players[local_id].input.keys.crouch) {
+			target_fov_offset -= 10.0F;
+		}
+	}
+
+	// Smoothly interpolate current FOV offset towards target (zoom in/out effect)
+	static float current_fov_offset = 0.0F;
+	float lerp_speed = 5.0F * dt; // Adjust this value to control smoothness
+	current_fov_offset = current_fov_offset + (target_fov_offset - current_fov_offset) * fminf(lerp_speed, 1.0F);
 
 	if(render_fpv && players[local_id].held_item == TOOL_GUN && players[local_id].input.buttons.rmb
 	   && !players[local_id].input.keys.sprint && players[local_id].alive) {
@@ -58,7 +75,7 @@ float camera_fov_scaled() {
 		}
 		return ads_fov * atan(tan((ads_fov / 180.0F * PI) / 2) / 2.0F) * 2.0F;
 	}
-	return settings.camera_fov;
+	return settings.camera_fov + current_fov_offset;
 }
 
 void camera_overflow_adjust() {

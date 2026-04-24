@@ -32,6 +32,10 @@ int cameracontroller_bodyview_player = 0;
 int cameracontroller_yclamp = 0;
 float cameracontroller_bodyview_zoom = 0.0F;
 
+// Smooth crouch interpolation for local player
+static float crouch_offset = 0.0F;
+static float target_crouch_offset = 0.0F;
+
 float cameracontroller_death_velocity_x, cameracontroller_death_velocity_y, cameracontroller_death_velocity_z;
 
 void cameracontroller_death_init(int player, float x, float y, float z) {
@@ -121,13 +125,33 @@ void cameracontroller_fps(float dt) {
 		}
 
 		if(window_key_down(WINDOW_KEY_CROUCH)) {
+			// Smooth crouch transition with interpolation
+			target_crouch_offset = 0.9F;
+		} else {
+			target_crouch_offset = 0.0F;
+		}
+		
+		// Quick smooth crouch transition (~100ms)
+		float crouch_lerp_speed = 40.0F * dt;
+		crouch_offset = crouch_offset + (target_crouch_offset - crouch_offset) * fminf(crouch_lerp_speed, 1.0F);
+		
+		// Apply smooth crouch offset to player position and eye
+		if(window_key_down(WINDOW_KEY_CROUCH)) {
 			// following if-statement disables smooth crouching on local player
 			if(!players[local_player_id].input.keys.crouch && !players[local_player_id].physics.airborne) {
-				players[local_player_id].pos.y -= 0.9F;
-				players[local_player_id].physics.eye.y -= 0.9F;
-				last_cy -= 0.9F;
+				players[local_player_id].pos.y -= crouch_offset;
+				players[local_player_id].physics.eye.y -= crouch_offset;
+				last_cy -= crouch_offset;
 			}
 			players[local_player_id].input.keys.crouch = 1;
+		} else {
+			// Uncrouching - raise back up smoothly
+			if(players[local_player_id].input.keys.crouch && crouch_offset > 0.01F) {
+				// Check if we can uncrouch
+				if(player_uncrouch(&players[local_player_id])) {
+					players[local_player_id].input.keys.crouch = 0;
+				}
+			}
 		}
 
 		players[local_player_id].input.keys.sprint = window_key_down(WINDOW_KEY_SPRINT);
