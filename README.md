@@ -1,11 +1,12 @@
 # KyroSpades (Enhanced ButterSpades)
 This project is a modified fork of [ButterSpades](https://github.com/utf-4096/butterspades), introducing several quality-of-life improvements and visual enhancements. Link: https://github.com/Kyrope01/KyroSpades
-#### Date of latest update: 17th April 2026
+#### Date of latest update: 24th April 2026
 
 ## New Features
 | Feature | Description |
 | :--- | :--- |
 | **Demo Recording** | Auto record demo setting added, is turned off by default, but when enabled starts recording demo automatically. |
+| **Dynamic FOV** | Fov increases while running and decreases while crouching (has smooth animations) making gameplay feel much better. |
 | **AO Multiplier** | Increases ambient occlusion strength (up to 5x) for deeper visual depth. |
 | **Spectator ESP** | Enables ESP functionality while in spectator mode. |
 | **Custom Mentions** | Highlight chat messages containing specific words with a customizable color. |
