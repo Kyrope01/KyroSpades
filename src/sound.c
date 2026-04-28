@@ -122,8 +122,20 @@ static void sound_createEx(enum sound_space option, struct Sound_wav* w, float x
 	alGenSources(1, &s.openal_handle);
 
 	if(alGetError() == AL_NO_ERROR) {
-		alSourcef(s.openal_handle, AL_PITCH, 1.0F);
-		alSourcef(s.openal_handle, AL_GAIN, 1.0F);
+		// Apply random pitch and gain variation for gun sounds to reduce repetitiveness
+		float pitch = 1.0F;
+		float gain = 1.0F;
+		
+		// Check if this is a gun shoot sound (rifle, smg, or shotgun)
+		if(w == &sound_rifle_shoot || w == &sound_smg_shoot || w == &sound_shotgun_shoot) {
+			// Random pitch variation between 0.9 and 1.1 (±10%)
+			pitch = 0.9F + (ms_rand() / 32767.0F) * 0.2F;
+			// Random gain variation between 0.85 and 1.0 (±7.5%)
+			gain = 0.85F + (ms_rand() / 32767.0F) * 0.15F;
+		}
+		
+		alSourcef(s.openal_handle, AL_PITCH, pitch);
+		alSourcef(s.openal_handle, AL_GAIN, gain);
 		alSourcef(s.openal_handle, AL_REFERENCE_DISTANCE, s.local ? 0.0F : w->min * SOUND_SCALE);
 		alSourcef(s.openal_handle, AL_MAX_DISTANCE, s.local ? 2048.0F : w->max * SOUND_SCALE);
 		alSource3f(s.openal_handle, AL_POSITION, s.local ? 0.0F : x * SOUND_SCALE, s.local ? 0.0F : y * SOUND_SCALE,
