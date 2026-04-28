@@ -217,7 +217,7 @@ void display() {
 		if(!network_map_transfer) {
 			if(network_connected)
 				glx_enable_sphericalfog();
-			else if(hud_active->render_world || camera_mode == CAMERAMODE_SPECTATOR)
+			else if(hud_active->render_world || camera_mode == CAMERAMODE_SPECTATOR || camera_mode == CAMERAMODE_BODYVIEW)
 				glx_enable_sphericalfog();
 			drawScene();
 

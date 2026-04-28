@@ -856,9 +856,6 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
 				font_centered(settings.window_width / 2.0F, settings.window_height - 4.F, 16.F, ping_str);
 			}
 
-			glColor3f(1.0F, 1.0F, 1.0F);
-			texture_draw(&texture_splash, (settings.window_width - 210 * scalef) * 0.5F, 599 * scalef, 210 * scalef,
-						 150 * scalef);
 
 			int count_team1 = 1;
 			int count_team2 = 1;
