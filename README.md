@@ -21,6 +21,7 @@ This project is a modified fork of [ButterSpades](https://github.com/utf-4096/bu
 | **Roll Controll for Spectator Mode With Removed movement Limitations** | Limitations in movement have been removed and the camera can roll too, making it pretty similar to how a FPV drone would feel. |
 | **Hit Indicators Added** | Hit indicator sounds have been added. |
 | **Chat Scroll Added** | Can scroll chat using scroll wheel when chat window is opened. |
+| **Visible Team Scores at Top** | Score table does not need to be opened for seeing score of teams, a small score display is always visible. |
 
 ## Quick Setup: Dynamic Wallpapers
 To add custom wallpapers, in folder named `bg` inside the `png` folder in directory of your client. Drop any `.png` images you like into that folder, and the client will cycle through them randomly each time you start the game.
