@@ -796,6 +796,58 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
 			glColor3f(1.0F, 1.0F, 1.0F);
 		}
 
+		// Always render team scores at top of screen
+		if(network_connected && network_logged_in) {
+			for(int i = 0; i < 2; i++) {
+				struct Team team;
+				float x_offset;
+
+				float r, g, b;
+
+				switch(i) {
+					case 0: team = gamestate.team_1; x_offset = settings.window_width / 2.F - 75.F; break;
+					case 1: team = gamestate.team_2; x_offset = settings.window_width / 2.F; break;
+				}
+
+				r = team.red / 255.F;
+				g = team.green / 255.F;
+				b = team.blue / 255.F;
+
+				char score_str[8];
+				glColor3ub(team.red, team.green, team.blue);
+
+				switch(gamestate.gamemode_type) {
+					case GAMEMODE_CTF:
+						sprintf(score_str, "%i-%i",
+								i == 0 ? gamestate.gamemode.ctf.team_1_score:
+															   gamestate.gamemode.ctf.team_2_score,
+								gamestate.gamemode.ctf.capture_limit);
+						break;
+					case GAMEMODE_TC: {
+						int t = 0;
+						for(int k = 0; k < gamestate.gamemode.tc.territory_count; k++)
+							if(gamestate.gamemode.tc.territory[k].team == TEAM_1)
+								t++;
+						sprintf(score_str, "%i-%i", t, gamestate.gamemode.tc.territory_count);
+						break;
+					}
+				}
+
+				float score_width = font_length(16.F, score_str);
+				float box_width = score_width + 20.F;
+
+				glColor4f(0, 0, 0, 0.5F);
+				glEnable(GL_BLEND);
+				glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+				glColor4f(r, g, b, 1.F);
+				texture_draw_empty(x_offset, settings.window_height - 24.F, box_width, 24.F);
+				glDisable(GL_BLEND);
+
+				glColor3ub(255, 255, 255);
+				font_render(x_offset + 10.F, settings.window_height - 27.F, 16.0F, score_str);
+			}
+		}
+
 		if(chat_input_mode == CHAT_NO_INPUT && window_key_down(WINDOW_KEY_TAB) || camera_mode == CAMERAMODE_SELECTION) {
 			if(network_connected && network_logged_in) {
 				char ping_str[16];
