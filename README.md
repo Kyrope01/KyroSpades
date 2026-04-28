@@ -6,7 +6,7 @@ This project is a modified fork of [ButterSpades](https://github.com/utf-4096/bu
 | Feature | Description |
 | :--- | :--- |
 | **Demo Recording** | Auto record demo setting added, is turned off by default, but when enabled starts recording demo automatically. |
-| **Gun Sound Variablility** | Each time a shot is fired the sound's pitch and loudness are changed randomly to give it a slightly different but similar sound every time, which is a lot better than the very same sound every time. |
+| **Gun Sound Variability** | Each time a shot is fired the sound's pitch and loudness are changed randomly to give it a slightly different but similar sound every time, which is a lot better than the very same sound every time. |
 | **Dynamic FOV** | Fov increases while running and decreases while crouching (has smooth animations) making gameplay feel much better. |
 | **AO Multiplier** | Increases ambient occlusion strength (up to 5x) for deeper visual depth. |
 | **Spectator ESP** | Enables ESP functionality while in spectator mode. |
