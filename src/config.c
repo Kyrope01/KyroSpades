@@ -1788,7 +1788,7 @@ void config_reload() {
                                  .min = 500,
                                  .max = 50000,
                                  .name = "Recording bitrate (kbps)",
-                                  .help = "Video bitrate in kilobits per second. Higher = better quality, larger file",
+                                  .help = "Higher bitrate improves quality but creates larger files",
                                     .category = "Recording & Replay",
 
                         });
