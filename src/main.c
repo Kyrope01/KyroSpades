@@ -2177,7 +2177,8 @@ int main(int argc, char** argv) {
         settings.ui_accent_b = 200;
         settings.ui_rgb = 0;
         settings.ui_rgb_speed = 1.0F;
-        settings.healthbar = 0;
+        settings.healthbar = 1;
+        settings.ammo_crosshair = 0;
         settings.greedy_meshing = 0;
         /* The look formula is `setting / 5.0F * MOUSE_SENSITIVITY`, so the
            neutral value of this setting is 5 — NOT the raw radians/pixel

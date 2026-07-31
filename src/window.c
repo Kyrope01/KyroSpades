@@ -872,22 +872,17 @@ static int window_aim_zone(float x, float y) {
 	/* Exclude the top menu bar. */
 	if(y < settings.window_height * 0.18F)
 		return 0;
-	/* Exclude the block-colour palette (bottom-right) ONLY while the block tool
-	   is held in FPS — that's when the grid is drawn and tappable. Any other
-	   time (other tools, spectator, dead) this corner is normal look space.
-	   Fractions mirror hud.c's palette_*() helpers — keep in sync. x,y are
-	   screen coords (y DOWN); the GL-space grid (y UP) is converted by
-	   subtracting from window_height. */
+	/* Exclude the centered bottom block-colour palette ONLY while the block
+	   tool is held in FPS. Fractions mirror hud.c's palette helpers. x,y are
+	   screen coordinates (y DOWN), so convert the GL-space vertical bounds. */
 	if(camera_mode == CAMERAMODE_FPS && players[local_player_id].held_item == TOOL_BLOCK) {
-		float psize = settings.window_height * 0.032F * 8.0F;
-		float pright = settings.window_width - settings.window_height * 0.025F;
+		float psize = settings.window_height * 0.024F * 8.0F;
+		float pleft = (settings.window_width - psize) * 0.5F;
+		float pright = pleft + psize;
 		float pbottom_gl = settings.window_height * 0.045F;
 		float ptop_sc = settings.window_height - (pbottom_gl + psize);
 		float pbot_sc = settings.window_height - pbottom_gl;
-		/* Right bound extended to the screen edge so the rightmost column's
-		   catch zone (which the hud hit-test also extends to the edge) is kept
-		   out of the camera-look zone. */
-		if(x >= pright - psize && x <= settings.window_width && y >= ptop_sc && y <= pbot_sc)
+		if(x >= pleft && x <= pright && y >= ptop_sc && y <= pbot_sc)
 			return 0;
 	}
 	return 1;

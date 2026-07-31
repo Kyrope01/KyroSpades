@@ -56,6 +56,7 @@ extern struct RENDER_OPTIONS {
         int show_names_in_spec;
         int hud_shadows;
         int healthbar;
+        int ammo_crosshair;
         int greedy_meshing;
         int vsync;
         float mouse_sensitivity;

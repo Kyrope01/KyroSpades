@@ -288,6 +288,7 @@ void config_save() {
         config_seti("client", "esp_in_spec", settings.esp_in_spec);
         config_seti("client", "hud_shadows", settings.hud_shadows);
         config_seti("client", "healthbar", settings.healthbar);
+        config_seti("client", "ammo_crosshair", settings.ammo_crosshair);
         config_seti("client", "multisamples", settings.multisamples);
         config_seti("client", "greedy_meshing", settings.greedy_meshing);
         config_seti("client", "vsync", settings.vsync);
@@ -465,6 +466,7 @@ IMPORT_SETTING(settings.camera_movement, camera_movement, atoi(value));
                 IMPORT_SETTING(settings.lighten_colors, lighten_colors, max(0, min(255, atoi(value))));
                 IMPORT_SETTING(settings.hud_shadows, hud_shadows, atoi(value));
                 IMPORT_SETTING(settings.healthbar, healthbar, atoi(value) ? 1 : 0);
+                IMPORT_SETTING(settings.ammo_crosshair, ammo_crosshair, atoi(value) ? 1 : 0);
                 IMPORT_SETTING(settings.spectator_speed, spectator_speed, max(0.1F, min(4.F, atof(value))));
                 IMPORT_SETTING(settings.spectator_acceleration, spectator_acceleration, max(10.0F, min(200.0F, atof(value))));
                 IMPORT_SETTING(settings.spectator_fog_distance, spectator_fog_distance, max(5.f, min(512.f, atof(value))));
@@ -1403,6 +1405,16 @@ void config_reload() {
                                  .max = 1,
                                  .name = "Healthbar",
                                  .help = "Show a smooth segmented health bar below the health display",
+                                 .category = "HUD/UI Settings",
+                         });
+        list_add(&config_settings,
+                         &(struct config_setting) {
+                                 .value = &settings_tmp.ammo_crosshair,
+                                 .type = CONFIG_TYPE_INT,
+                                 .min = 0,
+                                 .max = 1,
+                                 .name = "Display ammo around crosshair",
+                                 .help = "Show segmented magazine ammo around the crosshair",
                                  .category = "HUD/UI Settings",
                          });
         list_add(&config_settings,
