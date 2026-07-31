@@ -1,3 +1,4 @@
+
 on:
   workflow_dispatch:
 
@@ -79,7 +80,7 @@ jobs:
         run: |
           sed -i '1s/^/#include <stdint.h>\n/' src/network.h || true
           sed -i '1s/^/#include <sys\/stat.h>\n/' src/texture.c || true
-          sed -i 's/mkdir(dir_path, 0755)/mkdir(dir_path)/' src/demo.c || true
+          # demo.c now uses portable ks_mkdir(path, mode); do not rewrite it.
           sed -i '1s/^/#include <sys\/stat.h>\n/' src/skins.c || true
           sed -i 's/if(entry->d_type == DT_REG || entry->d_type == DT_UNKNOWN) {/struct stat st; char _stat_path[512]; snprintf(_stat_path, sizeof(_stat_path), "kv6\/%s", entry->d_name); stat(_stat_path, \&st); if(S_ISREG(st.st_mode)) {/g' src/skins.c || true
 
@@ -486,9 +487,60 @@ jobs:
           path: build/*.apk
 
 
+
+  build-ios:
+    name: Build for iOS
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode (iPhoneOS SDK)
+        run: |
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Install ninja
+        run: brew install ninja || true
+
+      - name: Cache iOS native deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            build-ios/prefix
+            build-ios/deps-src
+            build-ios/SDL
+            build-ios/openal-soft
+            build-ios/enet
+            build-ios/libdeflate
+          key: ios-arm64-sdl2.30.10-openal1.23.1-enet1.3.18-libdeflate1.20
+
+      - name: Build unsigned .app
+        run: |
+          chmod +x build_ios.sh
+          ./build_ios.sh
+
+      - name: Package unsigned .ipa
+        run: |
+          set -euo pipefail
+          rm -rf Payload
+          mkdir Payload
+          cp -R "build-ios/KyroSpades.app" Payload/
+          mkdir -p build
+          # This IPA is unsigned. Install it through AltStore, Sideloadly,
+          # TrollStore, or re-sign it with an Apple developer certificate.
+          zip -9qry "build/KS-Beta iOS (unsigned).ipa" Payload
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build
+          path: build/*.ipa
+
   release:
     name: Create GitHub Release
-    needs: [build, build-android]
+    needs: [build, build-android, build-ios]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -514,6 +566,7 @@ jobs:
             release-artifacts/KS-Beta Linux.zip
             release-artifacts/KS-Beta MacOS.zip
             release-artifacts/KS-Beta Android.apk
-          body: Latest version of KyroSpades Beta compiled for Windows, Linux, and macOS.
+            release-artifacts/KS-Beta iOS (unsigned).ipa
+          body: Latest KyroSpades Beta build for Windows, Linux, macOS, Android and iOS. The iOS IPA is unsigned and must be sideloaded or re-signed.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
