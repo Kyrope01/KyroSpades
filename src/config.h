@@ -1,3 +1,4 @@
+
 /*
         Copyright (c) 2017-2020 ByteBit
 
@@ -49,9 +50,12 @@ extern struct RENDER_OPTIONS {
         int ui_accent_r;
         int ui_accent_g;
         int ui_accent_b;
+        int ui_rgb;
+        float ui_rgb_speed;
         int lighten_colors;
         int show_names_in_spec;
         int hud_shadows;
+        int healthbar;
         int greedy_meshing;
         int vsync;
         float mouse_sensitivity;

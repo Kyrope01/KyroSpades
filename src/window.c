@@ -1,3 +1,4 @@
+
 /*
 	Copyright (c) 2017-2020 ByteBit
 
@@ -296,7 +297,7 @@ float window_time() {
 	return glfwGetTime();
 }
 
-int window_pressed_keys[64] = {0};
+int window_pressed_keys[WINDOW_KEY_COUNT] = {0};
 
 const char* window_clipboard() {
 	return glfwGetClipboardString(hud_window->impl);
@@ -632,7 +633,7 @@ float window_time() {
 	return ((double)SDL_GetTicks()) / 1000.0F;
 }
 
-int window_pressed_keys[64] = {0};
+int window_pressed_keys[WINDOW_KEY_COUNT] = {0};
 
 const char* window_clipboard() {
 	return SDL_HasClipboardText() ? SDL_GetClipboardText() : NULL;
@@ -991,9 +992,15 @@ void window_update() {
 			case SDL_MOUSEMOTION: {
 				if(event.motion.which == SDL_TOUCH_MOUSEID && hud_active == &hud_ingame) break; /* drop touch-synth only ingame */
 				if(SDL_GetRelativeMouseMode()) {
-					static int x, y;
-					x += (int)(event.motion.xrel * mouse_scale_x);
-					y += (int)(event.motion.yrel * mouse_scale_y);
+					/* Preserve fractional drawable-scaled motion. The old integer
+					   accumulator truncated every individual SDL event before it
+					   reached the camera. Small/slow movements were therefore lost
+					   and later arrived as visible one-pixel steps (especially with
+					   High-DPI scaling), which felt much less obvious at half-speed
+					   ADS sensitivity. */
+					static double x, y;
+					x += (double)event.motion.xrel * mouse_scale_x;
+					y += (double)event.motion.yrel * mouse_scale_y;
 					mouse(hud_window, x, y);
 				} else {
 					mouse(hud_window, event.motion.x * mouse_scale_x, event.motion.y * mouse_scale_y);

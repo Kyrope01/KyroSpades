@@ -1,3 +1,4 @@
+
 /*
  * Asynchronous loader for previous-session chat replayed from log files.
  * Reads up to 30 days of history per call, filtered to the currently

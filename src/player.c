@@ -1,3 +1,4 @@
+
 /*
 	Copyright (c) 2017-2020 ByteBit
 
@@ -42,6 +43,10 @@
 #include <math.h>
 #include "cameracontroller.h"
 static float os_sprint_state=0, os_sprint_smooth=0, os_raise_state=1, os_last_time=0, os_aim_state=0, os_aim_smooth=0;
+/* First-person look sway state. Keeping this across render frames lets mouse
+   deltas be filtered instead of snapping the arms once per input event. */
+static float os_sway_x=0, os_sway_y=0, os_last_rot_x=0, os_last_rot_y=0;
+static int os_sway_initialized=0;
 static float os_lerp_smooth(float cur,float tgt,float dt,float p){float f=1.0f-powf(p,dt);return cur+(tgt-cur)*f;}
 
 
@@ -1086,14 +1091,49 @@ void player_render(struct Player* p, int id) {
 		float raiseTarget = 1.0f;
 		if(curTime - p->item_showup < 0.15f) { raiseTarget = (curTime - p->item_showup) / 0.15f; if(raiseTarget < 0) raiseTarget = 0; if(raiseTarget > 1) raiseTarget = 1; }
 		os_raise_state = os_lerp_smooth(os_raise_state, raiseTarget, dt, 0.0005f);
-		float aimTarget = (p->held_item == TOOL_GUN && p->input.buttons.rmb && !p->input.keys.sprint) ? 1.0f : 0.0f;
+		/* Crouching takes priority over a stale sprint input (common with the
+		   touch joystick), so it must not suppress the ADS animation. */
+		float aimTarget = (p->held_item == TOOL_GUN && p->input.buttons.rmb
+			&& (!p->input.keys.sprint || p->input.keys.crouch)) ? 1.0f : 0.0f;
 		os_aim_state = aimTarget;
 		os_aim_smooth = os_lerp_smooth(os_aim_smooth, os_aim_state, dt, 0.0008f);
 		float speed = sqrtf(powf(p->physics.velocity.x, 2) + powf(p->physics.velocity.z, 2)) / 0.25f;
 		if(speed > 2.5f) speed = 2.5f;
 		float* f = player_tool_translate_func(p);
 		float swayX=0, swayY=0;
-		if(p == &players[local_player_id]) { static float last_rx=0, last_ry=0; float dX = camera_rot_x - last_rx; float dY = camera_rot_y - last_ry; if(dX > 3.14f) dX-=6.283f; if(dX < -3.14f) dX+=6.283f; swayX = dX * 0.30f; swayY = dY * 0.22f; last_rx = camera_rot_x; last_ry = camera_rot_y; if(swayX>0.03f) swayX=0.03f; if(swayX<-0.03f) swayX=-0.03f; if(swayY>0.03f) swayY=0.03f; if(swayY<-0.03f) swayY=-0.03f; }
+		if(p == &players[local_player_id]) {
+			if(!os_sway_initialized) {
+				os_last_rot_x = camera_rot_x;
+				os_last_rot_y = camera_rot_y;
+				os_sway_initialized = 1;
+			}
+
+			float dX = camera_rot_x - os_last_rot_x;
+			float dY = camera_rot_y - os_last_rot_y;
+			if(dX > PI) dX -= DOUBLEPI;
+			if(dX < -PI) dX += DOUBLEPI;
+			os_last_rot_x = camera_rot_x;
+			os_last_rot_y = camera_rot_y;
+
+			/* The old code applied the latest mouse-event delta directly to
+			   the model. Input events do not arrive evenly between rendered
+			   frames, so the arms alternated between a jump and no movement;
+			   ADS looked smooth only because it hides the arms. Convert the
+			   delta to its 60 Hz equivalent, clamp it, then use a fast
+			   frame-rate-independent low-pass filter. This preserves responsive
+			   weapon sway without exposing event timing as visible jitter. */
+			float frame_scale = 1.0F / fmaxf(dt * 60.0F, 0.25F);
+			frame_scale = fminf(frame_scale, 4.0F);
+			float target_x = dX * 0.30F * frame_scale;
+			float target_y = dY * 0.22F * frame_scale;
+			target_x = fmaxf(-0.03F, fminf(0.03F, target_x));
+			target_y = fmaxf(-0.03F, fminf(0.03F, target_y));
+			float sway_alpha = 1.0F - expf(-30.0F * dt);
+			os_sway_x += (target_x - os_sway_x) * sway_alpha;
+			os_sway_y += (target_y - os_sway_y) * sway_alpha;
+			swayX = os_sway_x;
+			swayY = os_sway_y;
+		}
 		float s = os_sprint_smooth;
 		if(p->held_item == TOOL_GUN) { matrix_rotate(matrix_model, s * -3.5f, 0.0f, 1.0f, 0.0f); matrix_rotate(matrix_model, s * 10.0f, 1.0f, 0.0f, 0.0f); matrix_rotate(matrix_model, s * -15.0f, 0.0f, 0.0f, 1.0f); matrix_translate(matrix_model, s * 0.08f, s * -0.028f, s * 0.06f); matrix_translate(matrix_model, sinf(curTime*14.0f)*0.007f*s, fabsf(sinf(curTime*14.0f))*-0.006f*s, 0); }
 		else if(p->held_item == TOOL_SPADE) { matrix_rotate(matrix_model, s * 32.0f, 0.0f, 1.0f, 0.0f); matrix_translate(matrix_model, s * 0.10f, s * -0.14f, s * -0.03f); }
@@ -1110,8 +1150,18 @@ void player_render(struct Player* p, int id) {
 				if(t < 0) t = 0; if(t > 1) t = 1;
 				float kick = t * t * (3.0f - 2.0f * t);
 				float pitch=0, yaw=0, roll=0, back=0, up=0;
-				float rnd = ((float)rand()/RAND_MAX - 0.5f);
-				float rnd2 = ((float)rand()/RAND_MAX - 0.5f);
+				/* Pick recoil variation once per shot, deterministically from the
+				   shot timestamp. Calling rand() here every render frame changed
+				   yaw and roll throughout one recoil animation, making the gun and
+				   arms visibly vibrate until the animation ended. */
+				unsigned int recoil_seed = (unsigned int)(p->weapon_last_shot * 1000000.0F)
+					^ ((unsigned int)p->weapon * 0x9E3779B9u);
+				recoil_seed ^= recoil_seed >> 16;
+				recoil_seed *= 0x7FEB352Du;
+				recoil_seed ^= recoil_seed >> 15;
+				float rnd = (float)(recoil_seed & 0xFFFFu) / 65535.0F - 0.5F;
+				recoil_seed = recoil_seed * 1664525u + 1013904223u;
+				float rnd2 = (float)(recoil_seed & 0xFFFFu) / 65535.0F - 0.5F;
 				if(p->weapon == WEAPON_RIFLE) { pitch = 12.0f; yaw = rnd*4.0f; roll = rnd2*3.0f; back = 0.22f; up = 0.10f; }
 				else if(p->weapon == WEAPON_SMG) { pitch = 6.0f; yaw = rnd*5.0f; roll = rnd2*2.5f; back = 0.10f; up = 0.05f; }
 				else { pitch = 18.0f; yaw = rnd*6.0f; roll = rnd2*5.0f; back = 0.32f; up = 0.16f; }

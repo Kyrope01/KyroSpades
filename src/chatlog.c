@@ -1,3 +1,4 @@
+
 /*
 	Copyright (c) 2017-2020 ByteBit
 
@@ -689,7 +690,7 @@ static void linkmodal_render(mu_Context* ctx) {
 	int hov_visit  = linkmodal_hit(linkmodal_visit_btn,  mx, my);
 	int hov_cancel = linkmodal_hit(linkmodal_cancel_btn, mx, my);
 
-	int ar = settings.ui_accent_r, ag = settings.ui_accent_g, ab = settings.ui_accent_b;
+	int ar = hud_accent_red(), ag = hud_accent_green(), ab = hud_accent_blue();
 	mu_Color visit_bg     = mu_color(hov_visit ? ar : (ar * 7) / 10,
 									 hov_visit ? ag : (ag * 7) / 10,
 									 hov_visit ? ab : (ab * 7) / 10, 255);
@@ -1616,8 +1617,8 @@ static void render_chat_line(mu_Context* ctx, int line_index) {
 		int ue = vl->urls[u].end;
 		float x0 = plain_prefix_width(vl->plain, us);
 		float x1 = plain_prefix_width(vl->plain, ue);
-		mu_Color link = mu_color(settings.ui_accent_r, settings.ui_accent_g,
-								 settings.ui_accent_b, 255);
+		mu_Color link = mu_color(hud_accent_red(), hud_accent_green(),
+								 hud_accent_blue(), 255);
 
 		char tmp[256];
 		int n = ue - us;

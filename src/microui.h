@@ -1,3 +1,4 @@
+
 /*
 ** Copyright (c) 2020 rxi
 **
@@ -102,7 +103,15 @@ enum {
   MU_KEY_CTRL         = (1 << 1),
   MU_KEY_ALT          = (1 << 2),
   MU_KEY_BACKSPACE    = (1 << 3),
-  MU_KEY_RETURN       = (1 << 4)
+  MU_KEY_RETURN       = (1 << 4),
+  MU_KEY_LEFT         = (1 << 5),
+  MU_KEY_RIGHT        = (1 << 6),
+  MU_KEY_HOME         = (1 << 7),
+  MU_KEY_END          = (1 << 8),
+  MU_KEY_DELETE       = (1 << 9),
+  MU_KEY_SELECT_ALL   = (1 << 10),
+  MU_KEY_COPY         = (1 << 11),
+  MU_KEY_CUT          = (1 << 12)
 };
 
 
@@ -174,6 +183,8 @@ struct mu_Context {
   int (*text_width)(mu_Font font, const char *str, int len);
   int (*text_height)(mu_Font font);
   void (*draw_frame)(mu_Context *ctx, mu_Rect rect, int colorid);
+  const char *(*get_clipboard)(void);
+  void (*set_clipboard)(const char *text);
   /* core state */
   mu_Style _style;
   mu_Style *style;
@@ -189,6 +200,11 @@ struct mu_Context {
   mu_Container *scroll_target;
   char number_edit_buf[MU_MAX_FMT];
   mu_Id number_edit;
+  /* Shared editor state for the currently focused textbox. */
+  mu_Id textbox_edit;
+  int textbox_cursor;
+  int textbox_anchor;
+  int textbox_scroll;
   /* stacks */
   mu_stack(char, MU_COMMANDLIST_SIZE) command_list;
   mu_stack(mu_Container*, MU_ROOTLIST_SIZE) root_list;
@@ -210,7 +226,8 @@ struct mu_Context {
   int hover_is_draggable;
   int key_down;
   int key_pressed;
-  char input_text[32];
+  /* Large enough for ordinary clipboard pastes; mu_input_text truncates safely. */
+  char input_text[1024];
 };
 
 

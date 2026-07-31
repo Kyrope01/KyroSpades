@@ -1,3 +1,4 @@
+
 /*
 	Copyright (c) 2017-2020 ByteBit
 
@@ -74,6 +75,10 @@ extern struct window_instance* hud_window;
 
 void hud_change(struct hud* new);
 float hud_ui_scale(void);
+void hud_accent_rgb(int* r, int* g, int* b);
+int hud_accent_red(void);
+int hud_accent_green(void);
+int hud_accent_blue(void);
 void hud_init();
 void hud_ime_update();
 void hud_mousemode(int mode);
