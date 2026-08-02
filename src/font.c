@@ -1,3 +1,4 @@
+
 /*
 	Copyright (c) 2017-2020 ByteBit
 
@@ -393,5 +394,3 @@ void font_centered(float x, float y, float h, char* text) {
 void font_centered_shadow(float x, float y, float h, char* text, float a) {
 	font_render_shadow(x - font_length(h, text) / 2.0F, y, h, text, a);
 }
-
-

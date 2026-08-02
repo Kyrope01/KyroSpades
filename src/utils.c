@@ -1,3 +1,4 @@
+
 /*
 	Copyright (c) 2017-2020 ByteBit
 
@@ -123,5 +124,3 @@ bool ht_iterate(HashTable* ht, void* user, bool (*callback)(void* key, void* val
 
 	return false;
 }
-
-

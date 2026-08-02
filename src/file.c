@@ -1,3 +1,4 @@
+
 /*
 	Copyright (c) 2017-2020 ByteBit
 
@@ -315,5 +316,3 @@ unsigned short buffer_read16(unsigned char* buffer, int index) {
 unsigned char buffer_read8(unsigned char* buffer, int index) {
 	return buffer[index];
 }
-
-

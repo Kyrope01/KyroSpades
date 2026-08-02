@@ -1,3 +1,4 @@
+
 #ifndef RECORDER_H
 #define RECORDER_H
 
@@ -30,5 +31,3 @@ void recorder_set_bitrate(int kbps);
 int recorder_get_bitrate(void);
 
 #endif
-
-

@@ -1,3 +1,4 @@
+
 /*
 	Copyright (c) 2017-2020 ByteBit
 
@@ -57,5 +58,3 @@ void entitysys_add(struct entity_system* es, void* object) {
 
 	memcpy((uint8_t*)es->buffer + es->object_size * (es->count++), object, es->object_size);
 }
-
-

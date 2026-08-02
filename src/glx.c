@@ -1,3 +1,4 @@
+
 /*
         Copyright (c) 2017-2020 ByteBit
 
@@ -857,4 +858,3 @@ void glx_disable_sphericalfog() {
 #endif
         glx_fog = 0;
 }
-

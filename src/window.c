@@ -1,3 +1,4 @@
+
 /*
 	Copyright (c) 2017-2020 ByteBit
 
@@ -1271,5 +1272,3 @@ int window_cpucores() {
 #endif
 return 1;
 }
-
-

@@ -1,3 +1,4 @@
+
 #include "gles_immediate_stubs.h"
 /*
         Copyright (c) 2017-2020 ByteBit
@@ -5876,5 +5877,3 @@ void hud_common_render_for_chatlog(mu_Context* ctx) {
 void hud_common_sidebar_for_chatlog(mu_Context* ctx, float scalex, float scaley) {
         hud_common_sidebar(ctx, scalex, scaley);
 }
-
-

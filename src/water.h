@@ -1,3 +1,4 @@
+
 /*
         Copyright (c) 2017-2020 ByteBit
 
@@ -31,5 +32,3 @@ void water_reflection_pass(void);
 void water_render(void);
 
 #endif
-
-

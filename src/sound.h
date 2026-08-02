@@ -1,3 +1,4 @@
+
 /*
         Copyright (c) 2017-2020 ByteBit
 
@@ -97,6 +98,7 @@ extern struct Sound_wav sound_spade_woosh;
 extern struct Sound_wav sound_spade_whack;
 
 extern struct Sound_wav sound_death;
+extern struct Sound_wav sound_kill;
 extern struct Sound_wav sound_beep1;
 extern struct Sound_wav sound_beep2;
 extern struct Sound_wav sound_chat;
@@ -127,5 +129,3 @@ void sound_load(struct Sound_wav* wav, char* name, float min, float max);
 void sound_init(void);
 
 #endif
-
-

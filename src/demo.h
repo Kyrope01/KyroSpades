@@ -1,3 +1,4 @@
+
 /*
     Demo recording and playback for KyroSpades.
 
@@ -125,5 +126,3 @@ int   demo_list_files(char*** out);
 /* Called from read_PacketStateData() when the map is first decompressed.
    Saves a copy of the VXL bytes so backward seeks can restore world state. */
 void  demo_playback_save_initial_map(const void* data, size_t size);
-
-

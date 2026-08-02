@@ -1,3 +1,4 @@
+
 /* inih -- simple .INI file parser
 
 SPDX-License-Identifier: BSD-3-Clause
@@ -176,5 +177,3 @@ INI_API int ini_parse_string(const char* string, ini_handler handler, void* user
 #endif
 
 #endif /* INI_H */
-
-

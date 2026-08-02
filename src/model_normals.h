@@ -1,3 +1,4 @@
+
 /*
 	Copyright (c) 2017-2020 ByteBit
 
@@ -109,5 +110,3 @@ float kv6_normals[256][3]
 	   {0.00000, 0.00000, 1.00000}};
 
 #endif
-
-

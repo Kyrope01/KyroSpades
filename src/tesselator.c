@@ -1,3 +1,4 @@
+
 /*
         Copyright (c) 2017-2020 ByteBit
 
@@ -492,5 +493,3 @@ void tesselator_addf_cube_face_uv(struct tesselator* t, enum tesselator_cube_fac
                         break;
         }
 }
-
-

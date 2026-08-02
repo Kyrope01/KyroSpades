@@ -1,3 +1,4 @@
+
 /*
 	Copyright (c) 2017-2020 ByteBit
 
@@ -71,5 +72,3 @@ void camera_apply(void);
 void camera_update(float dt);
 
 #endif
-
-

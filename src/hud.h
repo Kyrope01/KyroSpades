@@ -1,3 +1,4 @@
+
 /*
 	Copyright (c) 2017-2020 ByteBit
 
@@ -90,5 +91,3 @@ extern int player_stats_jumps;
 void player_stats_reset(void);
 
 #endif
-
-

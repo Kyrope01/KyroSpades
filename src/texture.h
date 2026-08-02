@@ -1,3 +1,4 @@
+
 /*
         Copyright (c) 2017-2020 ByteBit
 
@@ -98,5 +99,3 @@ unsigned int texture_block_color(int x, int y);
 void texture_gradient_fog(unsigned int* gradient);
 
 #endif
-
-

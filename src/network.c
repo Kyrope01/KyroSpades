@@ -1,3 +1,4 @@
+
 /*
         Copyright (c) 2017-2020 ByteBit
 
@@ -791,6 +792,14 @@ void read_PacketKillAction(void* data, int len) {
                         players[p->killer_id].score++;
                 }
 
+                /* Kill confirm sound when the local player gets a kill
+                 * (skips suicides and fake kills such as team switches) */
+                if(p->killer_id == local_player_id && p->player_id != p->killer_id
+                        && p->kill_type != KILLTYPE_TEAMCHANGE && p->kill_type != KILLTYPE_CLASSCHANGE) {
+                        if(!demo_mute_effects())
+                                sound_create(SOUND_LOCAL, &sound_kill, 0.0F, 0.0F, 0.0F);
+                }
+
                 if(settings.player_stats) {
                         if(p->killer_id == local_player_id) {
                                 player_stats_kills++;
@@ -1519,5 +1528,3 @@ void network_init() {
         packets[PACKET_EXTINFO_ID] = read_PacketExtInfo;
         packets[PACKET_EXT_BASE + EXT_PLAYER_PROPERTIES] = read_PacketPlayerProperties;
 }
-
-

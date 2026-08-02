@@ -1,3 +1,4 @@
+
 /*
 	Copyright (c) 2017-2020 ByteBit
 
@@ -35,5 +36,3 @@ void grenade_update(float dt);
 void grenade_render(void);
 
 #endif
-
-

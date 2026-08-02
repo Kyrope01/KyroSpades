@@ -1,3 +1,4 @@
+
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -1455,5 +1456,3 @@ void recorder_shutdown(void) {
 }
 
 #endif /* NO_FFMPEG */
-
-

@@ -1,3 +1,4 @@
+
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
@@ -125,5 +126,3 @@ int list_size(struct list* l) {
 
 	return l->elements;
 }
-
-

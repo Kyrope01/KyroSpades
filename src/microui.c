@@ -1,3 +1,4 @@
+
 /*
 ** Copyright (c) 2020 rxi
 **
@@ -1214,5 +1215,3 @@ void mu_end_panel(mu_Context *ctx) {
   mu_pop_clip_rect(ctx);
   pop_container(ctx);
 }
-
-

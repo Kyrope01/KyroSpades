@@ -1,3 +1,4 @@
+
 /*
 	Copyright (c) 2017-2020 ByteBit
 
@@ -57,5 +58,3 @@ void chunk_draw_visible(void);
 void chunk_queue_blocks();
 
 #endif
-
-

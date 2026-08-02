@@ -1,3 +1,4 @@
+
 /*
 	Copyright (c) 2017-2020 ByteBit
 
@@ -438,5 +439,3 @@ int camera_CubeInFrustum(float x, float y, float z, float size, float size_y) {
 
 	return (c2 == 6) ? 2 : 1;
 }
-
-

@@ -1,3 +1,4 @@
+
 /*
 	Copyright (c) 2017-2020 ByteBit
 
@@ -2264,5 +2265,3 @@ struct hud hud_chatlog = {
 	0,
 	NULL,
 };
-
-

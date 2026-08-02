@@ -1,3 +1,4 @@
+
 /* inih -- simple .INI file parser
 
 SPDX-License-Identifier: BSD-3-Clause
@@ -302,5 +303,3 @@ int ini_parse_string(const char* string, ini_handler handler, void* user) {
     return ini_parse_stream((ini_reader)ini_reader_string, &ctx, handler,
                             user);
 }
-
-

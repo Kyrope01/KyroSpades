@@ -1,3 +1,4 @@
+
 /*
 	Copyright (c) 2017-2020 ByteBit
 
@@ -790,4 +791,3 @@ void kv6_render(struct kv6_t* kv6, unsigned char team) {
 #endif
 	}
 }
-

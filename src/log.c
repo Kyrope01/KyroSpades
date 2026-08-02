@@ -1,3 +1,4 @@
+
 /*
  * Copyright (c) 2017 rxi
  *
@@ -150,5 +151,3 @@ void log_log(int level, const char* file, int line, const char* fmt, ...) {
 	/* Release lock */
 	unlock();
 }
-
-

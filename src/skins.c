@@ -1,3 +1,4 @@
+
 #include <stdlib.h>
 #include <string.h>
 #include <dirent.h>
@@ -333,5 +334,3 @@ void skins_init(void) {
 
 	skins_apply_all(1);
 }
-
-

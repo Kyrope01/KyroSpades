@@ -1,3 +1,4 @@
+
 /*
         Copyright (c) 2017-2020 ByteBit
 
@@ -52,5 +53,3 @@ void particle_create_rain(void);
 void particle_create_snow(void);
 
 #endif
-
-

@@ -1,3 +1,4 @@
+
 /*
  SPDX-License-Identifier: MIT
 
@@ -272,5 +273,3 @@ int             json_boolean(const JSON_Value *value);
 #endif
 
 #endif
-
-

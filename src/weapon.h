@@ -1,3 +1,4 @@
+
 /*
 	Copyright (c) 2017-2020 ByteBit
 
@@ -47,5 +48,3 @@ extern float weapon_reload_start, weapon_last_shot;
 extern unsigned char weapon_reload_inprogress;
 
 #endif
-
-

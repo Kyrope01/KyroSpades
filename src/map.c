@@ -1,3 +1,4 @@
+
 /*
         Copyright (c) 2017-2020 ByteBit
 
@@ -812,5 +813,3 @@ float map_sun_shadow(int x, int y, int z, int steps) {
 
         return 1.0F;
 }
-
-

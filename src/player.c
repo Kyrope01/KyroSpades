@@ -1,3 +1,4 @@
+
 /*
 	Copyright (c) 2017-2020 ByteBit
 
@@ -1524,5 +1525,3 @@ int player_uncrouch(struct Player* p) {
 	player_coordsystem_adjust2(p);
 	return 0;
 }
-
-

@@ -1,3 +1,4 @@
+
 /*
 	Copyright (c) 2017-2020 ByteBit
 
@@ -669,5 +670,3 @@ void cameracontroller_selection_render() {
 	matrix_rotate(matrix_view, 90.0F, 1.0F, 0.0F, 0.0F);
 	matrix_translate(matrix_view, -camera_x, -camera_y, -camera_z);
 }
-
-
