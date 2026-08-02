@@ -281,10 +281,14 @@ void config_save() {
         config_seti("client", "ui_accent_r", settings.ui_accent_r);
         config_seti("client", "ui_accent_g", settings.ui_accent_g);
         config_seti("client", "ui_accent_b", settings.ui_accent_b);
+        config_seti("client", "ui_rgb", settings.ui_rgb);
+        config_setf("client", "ui_rgb_speed", settings.ui_rgb_speed);
         config_seti("client", "lighten_colors", settings.lighten_colors);
         config_seti("client", "show_names_in_spec", settings.show_names_in_spec);
         config_seti("client", "esp_in_spec", settings.esp_in_spec);
         config_seti("client", "hud_shadows", settings.hud_shadows);
+        config_seti("client", "healthbar", settings.healthbar);
+        config_seti("client", "ammo_crosshair", settings.ammo_crosshair);
         config_seti("client", "multisamples", settings.multisamples);
         config_seti("client", "greedy_meshing", settings.greedy_meshing);
         config_seti("client", "vsync", settings.vsync);
@@ -457,8 +461,12 @@ IMPORT_SETTING(settings.camera_movement, camera_movement, atoi(value));
                 IMPORT_SETTING(settings.ui_accent_r, ui_accent_r, max(0, min(255, atoi(value))));
                 IMPORT_SETTING(settings.ui_accent_g, ui_accent_g, max(0, min(255, atoi(value))));
                 IMPORT_SETTING(settings.ui_accent_b, ui_accent_b, max(0, min(255, atoi(value))));
+                IMPORT_SETTING(settings.ui_rgb, ui_rgb, atoi(value) ? 1 : 0);
+                IMPORT_SETTING(settings.ui_rgb_speed, ui_rgb_speed, fmaxf(1.0F, fminf(10.0F, atof(value))));
                 IMPORT_SETTING(settings.lighten_colors, lighten_colors, max(0, min(255, atoi(value))));
                 IMPORT_SETTING(settings.hud_shadows, hud_shadows, atoi(value));
+                IMPORT_SETTING(settings.healthbar, healthbar, atoi(value) ? 1 : 0);
+                IMPORT_SETTING(settings.ammo_crosshair, ammo_crosshair, atoi(value) ? 1 : 0);
                 IMPORT_SETTING(settings.spectator_speed, spectator_speed, max(0.1F, min(4.F, atof(value))));
                 IMPORT_SETTING(settings.spectator_acceleration, spectator_acceleration, max(10.0F, min(200.0F, atof(value))));
                 IMPORT_SETTING(settings.spectator_fog_distance, spectator_fog_distance, max(5.f, min(512.f, atof(value))));
@@ -701,6 +709,11 @@ void config_reload() {
         config_register_key(WINDOW_KEY_CURSOR_LEFT, SDLK_LEFT, "cube_color_left", 0, "Color left", "Block");
         config_register_key(WINDOW_KEY_CURSOR_RIGHT, SDLK_RIGHT, "cube_color_right", 0, "Color right", "Block");
         config_register_key(WINDOW_KEY_BACKSPACE, SDLK_BACKSPACE, NULL, 0, NULL, NULL);
+        config_register_key(WINDOW_KEY_HOME, SDLK_HOME, NULL, 0, NULL, NULL);
+        config_register_key(WINDOW_KEY_END, SDLK_END, NULL, 0, NULL, NULL);
+        config_register_key(WINDOW_KEY_DELETE, SDLK_DELETE, NULL, 0, NULL, NULL);
+        config_register_key(WINDOW_KEY_A, SDLK_a, NULL, 0, NULL, NULL);
+        config_register_key(WINDOW_KEY_X, SDLK_x, NULL, 0, NULL, NULL);
         config_register_key(WINDOW_KEY_TOOL1, SDLK_1, "tool_spade", 0, "Select spade", "Tools & Weapons");
         config_register_key(WINDOW_KEY_TOOL2, SDLK_2, "tool_block", 0, "Select block", "Tools & Weapons");
         config_register_key(WINDOW_KEY_TOOL3, SDLK_3, "tool_gun", 0, "Select gun", "Tools & Weapons");
@@ -769,6 +782,11 @@ void config_reload() {
         config_register_key(WINDOW_KEY_CURSOR_LEFT, GLFW_KEY_LEFT, "cube_color_left", 0, "Color left", "Block");
         config_register_key(WINDOW_KEY_CURSOR_RIGHT, GLFW_KEY_RIGHT, "cube_color_right", 0, "Color right", "Block");
         config_register_key(WINDOW_KEY_BACKSPACE, GLFW_KEY_BACKSPACE, NULL, 0, NULL, NULL);
+        config_register_key(WINDOW_KEY_HOME, GLFW_KEY_HOME, NULL, 0, NULL, NULL);
+        config_register_key(WINDOW_KEY_END, GLFW_KEY_END, NULL, 0, NULL, NULL);
+        config_register_key(WINDOW_KEY_DELETE, GLFW_KEY_DELETE, NULL, 0, NULL, NULL);
+        config_register_key(WINDOW_KEY_A, GLFW_KEY_A, NULL, 0, NULL, NULL);
+        config_register_key(WINDOW_KEY_X, GLFW_KEY_X, NULL, 0, NULL, NULL);
         config_register_key(WINDOW_KEY_TOOL1, GLFW_KEY_1, "tool_spade", 0, "Select spade", "Tools & Weapons");
         config_register_key(WINDOW_KEY_TOOL2, GLFW_KEY_2, "tool_block", 0, "Select block", "Tools & Weapons");
         config_register_key(WINDOW_KEY_TOOL3, GLFW_KEY_3, "tool_gun", 0, "Select gun", "Tools & Weapons");
@@ -1288,12 +1306,34 @@ void config_reload() {
                          });
         list_add(&config_settings,
                          &(struct config_setting) {
+                                 .value = &settings_tmp.ui_rgb,
+                                 .type = CONFIG_TYPE_INT,
+                                 .min = 0,
+                                 .max = 1,
+                                 .name = "RGB",
+                                 .help = "Smoothly cycle the UI accent through RGB colors",
+                                 .category = "HUD/UI Settings",
+                                 .subcategory = "RGB",
+                         });
+        list_add(&config_settings,
+                         &(struct config_setting) {
+                                 .value = &settings_tmp.ui_rgb_speed,
+                                 .type = CONFIG_TYPE_FLOAT,
+                                 .min = 1,
+                                 .max = 10,
+                                 .name = "RGB Speed",
+                                 .help = "Speed of the animated RGB UI accent",
+                                 .category = "HUD/UI Settings",
+                                 .subcategory = "RGB",
+                         });
+        list_add(&config_settings,
+                         &(struct config_setting) {
                                  .value = &settings_tmp.ui_accent_r,
                                  .type = CONFIG_TYPE_INT,
                                  .min = 0,
                                  .max = 255,
                                  .name = "UI Accent: Red",
-                                 .help = "UI accent color (red)",
+                                 .help = "Static UI accent color (red), used when RGB is disabled",
                                  .category = "HUD/UI Settings",
                          });
         list_add(&config_settings,
@@ -1303,7 +1343,7 @@ void config_reload() {
                                  .min = 0,
                                  .max = 255,
                                  .name = "UI Accent: Green",
-                                 .help = "UI accent color (green)",
+                                 .help = "Static UI accent color (green), used when RGB is disabled",
                                  .category = "HUD/UI Settings",
                          });
         list_add(&config_settings,
@@ -1313,7 +1353,7 @@ void config_reload() {
                                  .min = 0,
                                  .max = 255,
                                  .name = "UI Accent: Blue",
-                                 .help = "UI accent color (blue)",
+                                 .help = "Static UI accent color (blue), used when RGB is disabled",
                                  .category = "HUD/UI Settings",
                          });
         list_add(&config_settings,
@@ -1355,6 +1395,26 @@ void config_reload() {
                                  .max = 1,
                                  .name = "HUD shadows",
                                  .help = "Enables text shadows in various UI elements",
+                                 .category = "HUD/UI Settings",
+                         });
+        list_add(&config_settings,
+                         &(struct config_setting) {
+                                 .value = &settings_tmp.healthbar,
+                                 .type = CONFIG_TYPE_INT,
+                                 .min = 0,
+                                 .max = 1,
+                                 .name = "Healthbar",
+                                 .help = "Show a smooth segmented health bar below the health display",
+                                 .category = "HUD/UI Settings",
+                         });
+        list_add(&config_settings,
+                         &(struct config_setting) {
+                                 .value = &settings_tmp.ammo_crosshair,
+                                 .type = CONFIG_TYPE_INT,
+                                 .min = 0,
+                                 .max = 1,
+                                 .name = "Display ammo around crosshair",
+                                 .help = "Show segmented magazine ammo around the crosshair",
                                  .category = "HUD/UI Settings",
                          });
         list_add(&config_settings,
@@ -1728,7 +1788,7 @@ void config_reload() {
                                  .min = 500,
                                  .max = 50000,
                                  .name = "Recording bitrate (kbps)",
-                                  .help = "Video bitrate in kilobits per second. Higher = better quality, larger file",
+                                  .help = "Higher bitrate improves quality but creates larger files",
                                     .category = "Recording & Replay",
 
                         });

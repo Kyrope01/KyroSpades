@@ -98,19 +98,16 @@ static int is_inside(double mx, double my, int x, int y, int w, int h) {
 }
 
 /* -- Block-colour palette geometry --------------------------------------
-   The 8x8 swatch grid in the bottom-right corner. It used to be a hard-coded
-   64px square (8px cells), far too small on a Retina/HIGHDPI iOS drawable.
-   These helpers express it as a fraction of window_height so it scales (~3x
-   bigger) and so the renderer, the touch hit-test and the aim-zone exclusion
-   (window.c) all derive the SAME rect. Coordinates are HUD/GL space: origin
-   bottom-left, y UP (matching the ortho in main.c). Grid row gy=0 is the TOP
-   row, matching texture_block_color()'s convention. NOTE: window.c's
-   window_aim_zone() mirrors these fractions -- keep in sync. */
+   The 8x8 swatch grid is 75% of its former size and centered along the bottom,
+   keeping it clear of the ammo display on the right. These helpers drive the
+   renderer, touch hit-test and aim-zone exclusion from the same geometry.
+   Coordinates are HUD/GL space: origin bottom-left, y UP. Grid row gy=0 is the
+   TOP row, matching texture_block_color(). NOTE: window.c mirrors these
+   fractions -- keep both in sync. */
 #define PALETTE_CELLS 8
-static inline float palette_cell(void)   { return settings.window_height * 0.032F; }
+static inline float palette_cell(void)   { return settings.window_height * 0.024F; }
 static inline float palette_size(void)   { return palette_cell() * PALETTE_CELLS; }
-static inline float palette_right(void)  { return settings.window_width - settings.window_height * 0.025F; }
-static inline float palette_left(void)   { return palette_right() - palette_size(); }
+static inline float palette_left(void)   { return (settings.window_width - palette_size()) * 0.5F; }
 static inline float palette_bottom(void) { return settings.window_height * 0.045F; }   /* GL y, clears home indicator */
 static inline float palette_top(void)    { return palette_bottom() + palette_size(); } /* GL y of grid top */
 
@@ -131,14 +128,32 @@ static void palette_cell_clamp(float sx, float sy, int* gx, int* gy) {
 /* Strict membership test (no clamp): did a touch START inside the palette? */
 static int palette_contains(float sx, float sy) {
         float gl_y = settings.window_height - sy;
-        /* Right bound is the SCREEN EDGE (window_width), not palette_right(): the
-           rightmost colour column sits against the edge, where iOS touches are
-           least reliable (edge digitizer + system-gesture zones) — the same
-           problem the bottom row had. Extending the catch zone across the right
-           margin to the very edge means a tap aimed at the last column still
-           registers; palette_cell_clamp() maps any x past the last column back to
-           column 7. The visual grid is unchanged; this is the invisible hit area. */
-        return sx >= palette_left() && sx < settings.window_width && gl_y >= palette_bottom() && gl_y < palette_top();
+        return sx >= palette_left() && sx < palette_left() + palette_size()
+                && gl_y >= palette_bottom() && gl_y < palette_top();
+}
+
+/* Draw only an outline BEHIND the selected swatch. Each palette swatch uses
+   6 of its source texture's 8 pixels, so its visible size is 75% of a cell and
+   is anchored at the cell's top-left. The border follows that exact geometry;
+   the palette texture is drawn afterward and covers the center, leaving a
+   correctly centered flashing outline rather than a black/white overlay cube. */
+static void palette_draw_selection_border(unsigned int selected_color) {
+        float cell = palette_cell();
+        float swatch = cell * 0.75F;
+        float border = cell * 0.08F;
+        for(int y = 0; y < 8; y++) {
+                for(int x = 0; x < 8; x++) {
+                        if(texture_block_color(x, y) == selected_color) {
+                                unsigned char flash = (((int)(window_time() * 4)) & 1) * 0xFF;
+                                glColor3ub(flash, flash, flash);
+                                texture_draw_empty(palette_left() + x * cell - border,
+                                                   palette_top() - y * cell + border,
+                                                   swatch + border * 2.0F,
+                                                   swatch + border * 2.0F);
+                                return;
+                        }
+                }
+        }
 }
 
 static void format_comma(char* buffer, int value) {
@@ -169,8 +184,44 @@ void hud_init() {
         hud_change(&hud_serverlist);
 }
 
+void hud_accent_rgb(int* r, int* g, int* b) {
+        if(settings.ui_rgb) {
+                /* Three phase-shifted cosine waves produce a continuous rainbow
+                   with no hard hue boundaries. Speed is radians per second, so
+                   the default 1.0 completes a cycle in about 6.28 seconds. */
+                float phase = (float)window_time() * settings.ui_rgb_speed;
+                *r = (int)(127.5F * (cosf(phase) + 1.0F));
+                *g = (int)(127.5F * (cosf(phase - 2.0943951F) + 1.0F));
+                *b = (int)(127.5F * (cosf(phase - 4.1887902F) + 1.0F));
+        } else {
+                *r = settings.ui_accent_r;
+                *g = settings.ui_accent_g;
+                *b = settings.ui_accent_b;
+        }
+}
+
+int hud_accent_red(void) {
+        int r, g, b;
+        hud_accent_rgb(&r, &g, &b);
+        return r;
+}
+
+int hud_accent_green(void) {
+        int r, g, b;
+        hud_accent_rgb(&r, &g, &b);
+        return g;
+}
+
+int hud_accent_blue(void) {
+        int r, g, b;
+        hud_accent_rgb(&r, &g, &b);
+        return b;
+}
+
 inline int hud_accent_color() {
-        return rgb(settings.ui_accent_r, settings.ui_accent_g, settings.ui_accent_b);
+        int r, g, b;
+        hud_accent_rgb(&r, &g, &b);
+        return rgb(r, g, b);
 }
 
 float hud_ui_scale(void) {
@@ -218,10 +269,12 @@ static void mu_text_color_default(mu_Context* ctx) {
 }
 
 static mu_Color mu_accent_color(float m, int a) {
+        int r, g, b;
+        hud_accent_rgb(&r, &g, &b);
         return mu_color(
-                max(0, min(255, settings.ui_accent_r * m)),
-                max(0, min(255, settings.ui_accent_g * m)),
-                max(0, min(255, settings.ui_accent_b * m)),
+                max(0, min(255, r * m)),
+                max(0, min(255, g * m)),
+                max(0, min(255, b * m)),
                 a
         );
 }
@@ -265,6 +318,22 @@ void hud_ime_update() {
         hud_ime_focus_frame = 0;
 }
 
+static void hud_refresh_accent_style(mu_Context* ctx) {
+        if(!ctx) return;
+        ctx->style->colors[MU_COLOR_BASE] = mu_accent_color(0.3F, 255);
+        ctx->style->colors[MU_COLOR_BORDER] = mu_accent_color(0.8F, 255);
+        ctx->style->colors[MU_COLOR_BUTTON] = mu_accent_color(0.3F, 255);
+        ctx->style->colors[MU_COLOR_BUTTONHOVER] = mu_accent_color(0.8F, 255);
+        ctx->style->colors[MU_COLOR_BUTTONFOCUS] = mu_accent_color(1.0F, 255);
+        ctx->style->colors[MU_COLOR_BASEFOCUS] = mu_accent_color(0.5F, 255);
+        ctx->style->colors[MU_COLOR_BASEHOVER] = mu_accent_color(0.5F, 255);
+        ctx->style->colors[MU_COLOR_PANELBG] = mu_accent_color(0.1F, 192);
+        ctx->style->colors[MU_COLOR_WINDOWBG] = mu_accent_color(0.1F, 192);
+        ctx->style->colors[MU_COLOR_TITLEBG] = mu_accent_color(0.8F, 255);
+        ctx->style->colors[MU_COLOR_SCROLLTHUMB] = mu_accent_color(0.5F, 255);
+        ctx->style->colors[MU_COLOR_SCROLLBASE] = mu_accent_color(0.05F, 255);
+}
+
 void hud_change(struct hud* new) {
         config_key_reset_togglestates();
         hud_active = new;
@@ -273,18 +342,9 @@ void hud_change(struct hud* new) {
                 mu_init(hud_active->ctx);
                 hud_active->ctx->text_width = mu_text_width;
                 hud_active->ctx->text_height = mu_text_height;
-                hud_active->ctx->style->colors[MU_COLOR_BASE] = mu_accent_color(0.3F, 255);
-                hud_active->ctx->style->colors[MU_COLOR_BORDER] = mu_accent_color(0.8F, 255);
-                hud_active->ctx->style->colors[MU_COLOR_BUTTON] = mu_accent_color(0.3F, 255);
-                hud_active->ctx->style->colors[MU_COLOR_BUTTONHOVER] = mu_accent_color(0.8F, 255);
-                hud_active->ctx->style->colors[MU_COLOR_BUTTONFOCUS] = mu_accent_color(1.0F, 255);
-                hud_active->ctx->style->colors[MU_COLOR_BASEFOCUS] = mu_accent_color(0.5F, 255);
-                hud_active->ctx->style->colors[MU_COLOR_BASEHOVER] = mu_accent_color(0.5F, 255);
-                hud_active->ctx->style->colors[MU_COLOR_PANELBG] = mu_accent_color(0.1F, 192);
-                hud_active->ctx->style->colors[MU_COLOR_WINDOWBG] = mu_accent_color(0.1F, 192);
-                hud_active->ctx->style->colors[MU_COLOR_TITLEBG] = mu_accent_color(0.8F, 255);
-                hud_active->ctx->style->colors[MU_COLOR_SCROLLTHUMB] = mu_accent_color(0.5F, 255);
-                hud_active->ctx->style->colors[MU_COLOR_SCROLLBASE] = mu_accent_color(0.05F, 255);
+                hud_active->ctx->get_clipboard = window_clipboard;
+                hud_active->ctx->set_clipboard = window_setclipboard;
+                hud_refresh_accent_style(hud_active->ctx);
         }
 
         if(hud_active->init)
@@ -506,13 +566,23 @@ static void hud_ingame_render3D() {
                 if(camera_mode == CAMERAMODE_FPS && players[local_player_id].items_show) {
                         players[local_player_id].input.buttons.rmb = 0;
 
+                        /* Compact tool-switch overlay: keep the same four-item
+                           presentation and selected-item emphasis, but render the
+                           entire row at half scale and half spacing. Its baseline
+                           is placed close to the lower edge of the view instead of
+                           floating below screen centre. */
+                        const float tool_overlay_scale = 0.5F;
+                        const float tool_overlay_x = -1.125F;
+                        const float tool_overlay_y = -3.15F;
+                        const float tool_overlay_spacing = 0.75F;
+
                         matrix_identity(matrix_model);
-                        matrix_translate(matrix_model, -2.25F, -1.5F - (players[local_player_id].held_item == TOOL_SPADE) * 0.5F,
-                                                         -6.0F);
+                        matrix_translate(matrix_model, tool_overlay_x, tool_overlay_y, -6.0F);
                         matrix_rotate(matrix_model, window_time() * 57.4F, 0.0F, 1.0F, 0.0F);
                         matrix_translate(matrix_model, (model_spade.xpiv - model_spade.xsiz / 2) * 0.05F,
                                                          (model_spade.zpiv - model_spade.zsiz / 2) * 0.05F,
                                                          (model_spade.ypiv - model_spade.ysiz / 2) * 0.05F);
+                        matrix_scale3(matrix_model, tool_overlay_scale);
                         if(players[local_player_id].held_item == TOOL_SPADE) {
                                 matrix_scale(matrix_model, 1.5F, 1.5F, 1.5F);
                         }
@@ -521,13 +591,13 @@ static void hud_ingame_render3D() {
 
                         if(local_player_blocks > 0) {
                                 matrix_identity(matrix_model);
-                                matrix_translate(matrix_model, -2.25F,
-                                                                 -1.5F - (players[local_player_id].held_item == TOOL_BLOCK) * 0.5F, -6.0F);
-                                matrix_translate(matrix_model, 1.5F, 0.0F, 0.0F);
+                                matrix_translate(matrix_model, tool_overlay_x, tool_overlay_y, -6.0F);
+                                matrix_translate(matrix_model, tool_overlay_spacing, 0.0F, 0.0F);
                                 matrix_rotate(matrix_model, window_time() * 57.4F, 0.0F, 1.0F, 0.0F);
                                 matrix_translate(matrix_model, (model_block.xpiv - model_block.xsiz / 2) * 0.05F,
                                                                  (model_block.zpiv - model_block.zsiz / 2) * 0.05F,
                                                                  (model_block.ypiv - model_block.ysiz / 2) * 0.05F);
+                                matrix_scale3(matrix_model, tool_overlay_scale);
                                 if(players[local_player_id].held_item == TOOL_BLOCK) {
                                         matrix_scale(matrix_model, 1.5F, 1.5F, 1.5F);
                                 }
@@ -547,12 +617,12 @@ static void hud_ingame_render3D() {
                                         case WEAPON_SHOTGUN: gun = &model_shotgun; break;
                                 }
                                 matrix_identity(matrix_model);
-                                matrix_translate(matrix_model, -2.25F, -1.5F - (players[local_player_id].held_item == TOOL_GUN) * 0.5F,
-                                                                 -6.0F);
-                                matrix_translate(matrix_model, 3.0F, 0.0F, 0.0F);
+                                matrix_translate(matrix_model, tool_overlay_x, tool_overlay_y, -6.0F);
+                                matrix_translate(matrix_model, tool_overlay_spacing * 2.0F, 0.0F, 0.0F);
                                 matrix_rotate(matrix_model, window_time() * 57.4F, 0.0F, 1.0F, 0.0F);
                                 matrix_translate(matrix_model, (gun->xpiv - gun->xsiz / 2) * 0.05F, (gun->zpiv - gun->zsiz / 2) * 0.05F,
                                                                  (gun->ypiv - gun->ysiz / 2) * 0.05F);
+                                matrix_scale3(matrix_model, tool_overlay_scale);
                                 if(players[local_player_id].held_item == TOOL_GUN) {
                                         matrix_scale(matrix_model, 1.5F, 1.5F, 1.5F);
                                 }
@@ -562,13 +632,13 @@ static void hud_ingame_render3D() {
 
                         if(local_player_grenades > 0) {
                                 matrix_identity(matrix_model);
-                                matrix_translate(matrix_model, -2.25F,
-                                                                 -1.5F - (players[local_player_id].held_item == TOOL_GRENADE) * 0.5F, -6.0F);
-                                matrix_translate(matrix_model, 4.5F, 0.0F, 0.0F);
+                                matrix_translate(matrix_model, tool_overlay_x, tool_overlay_y, -6.0F);
+                                matrix_translate(matrix_model, tool_overlay_spacing * 3.0F, 0.0F, 0.0F);
                                 matrix_rotate(matrix_model, window_time() * 57.4F, 0.0F, 1.0F, 0.0F);
                                 matrix_translate(matrix_model, (model_grenade.xpiv - model_grenade.xsiz / 2) * 0.05F,
                                                                  (model_grenade.zpiv - model_grenade.zsiz / 2) * 0.05F,
                                                                  (model_grenade.ypiv - model_grenade.ysiz / 2) * 0.05F);
+                                matrix_scale3(matrix_model, tool_overlay_scale);
                                 if(players[local_player_id].held_item == TOOL_GRENADE) {
                                         matrix_scale(matrix_model, 1.5F, 1.5F, 1.5F);
                                 }
@@ -893,6 +963,10 @@ static int hud_ingame_onscreencontrol(int index, char* str, int activate) {
 }
 
 static inline void hud_common_render(mu_Context* ctx) {
+        /* RGB accents animate continuously, so refresh retained microui colors
+           every frame rather than only when switching menus. */
+        hud_refresh_accent_style(ctx);
+
         // Ingame menu
         if(network_connected && !network_map_transfer) {
                 mu_Color color = mu_accent_color(0.15F, 1.F);
@@ -970,6 +1044,174 @@ static inline void hud_font_render_centered(float x, float y, float h, char* tex
         } else {
                 font_centered(x, y, h, text);
         }
+}
+
+static void hud_healthbar_color(float health, float* r, float* g, float* b) {
+        /* Full -> green; 85..75 -> yellow; 75..50 -> orange;
+           50..30 -> red. Interpolate inside each band so color changes are
+           smooth rather than jumping at the thresholds. */
+        const float green[3]  = {0.20F, 0.86F, 0.29F};
+        const float yellow[3] = {0.95F, 0.86F, 0.12F};
+        const float orange[3] = {1.00F, 0.48F, 0.06F};
+        const float redc[3]   = {0.95F, 0.08F, 0.06F};
+        const float* from;
+        const float* to;
+        float t;
+
+        if(health >= 85.0F) {
+                from = to = green;
+                t = 0.0F;
+        } else if(health >= 75.0F) {
+                from = green; to = yellow;
+                t = (85.0F - health) / 10.0F;
+        } else if(health >= 50.0F) {
+                from = yellow; to = orange;
+                t = (75.0F - health) / 25.0F;
+        } else if(health >= 30.0F) {
+                from = orange; to = redc;
+                t = (50.0F - health) / 20.0F;
+        } else {
+                /* Below 30 HP, pulse from dark red to bright red. */
+                float pulse = 0.55F + 0.45F * (sinf((float)window_time() * 12.0F) * 0.5F + 0.5F);
+                *r = redc[0] * pulse;
+                *g = redc[1] * pulse;
+                *b = redc[2] * pulse;
+                return;
+        }
+
+        *r = from[0] + (to[0] - from[0]) * t;
+        *g = from[1] + (to[1] - from[1]) * t;
+        *b = from[2] + (to[2] - from[2]) * t;
+}
+
+static void hud_healthbar_render(int health) {
+        static float displayed_health = 100.0F;
+        static double last_update = 0.0;
+        static int initialized = 0;
+        double now = window_time();
+        float dt = last_update > 0.0 ? (float)(now - last_update) : 0.016F;
+        last_update = now;
+        if(dt < 0.0F) dt = 0.0F;
+        if(dt > 0.1F) dt = 0.1F;
+
+        float target = max(0, min(100, health));
+        if(!initialized) {
+                displayed_health = target;
+                initialized = 1;
+        } else {
+                /* Exponential response is frame-rate independent. Damage drains
+                   smoothly while healing fills a little faster. */
+                float rate = target < displayed_health ? 9.0F : 12.0F;
+                float blend = 1.0F - expf(-rate * dt);
+                displayed_health += (target - displayed_health) * blend;
+                if(fabsf(target - displayed_health) < 0.05F)
+                        displayed_health = target;
+        }
+
+        const float bar_x = 8.0F;
+        const float bar_top = 22.0F;
+        const float bar_w = 160.0F;
+        const float bar_h = 12.0F;
+        float fill_w = bar_w * displayed_health / 100.0F;
+        float r, g, b;
+        hud_healthbar_color(displayed_health, &r, &g, &b);
+
+        /* Border flashes too at critical health, making the warning visible
+           even when only a very small portion of the bar remains. */
+        if(displayed_health < 30.0F)
+                glColor3f(r, 0.02F, 0.02F);
+        else
+                glColor3ub(12, 12, 12);
+        texture_draw_empty(bar_x - 2.0F, bar_top + 2.0F, bar_w + 4.0F, bar_h + 4.0F);
+
+        glColor3ub(35, 35, 40);
+        texture_draw_empty(bar_x, bar_top, bar_w, bar_h);
+
+        if(fill_w > 0.0F) {
+                glColor3f(r, g, b);
+                texture_draw_empty(bar_x, bar_top, fill_w, bar_h);
+                /* A slim highlight gives the otherwise flat bar some depth. */
+                glColor3f(min(1.0F, r + 0.20F), min(1.0F, g + 0.20F), min(1.0F, b + 0.20F));
+                texture_draw_empty(bar_x, bar_top, fill_w, 2.0F);
+        }
+
+        /* Twenty 5-HP partitions retain a detailed segmented look while the
+           fill edge itself remains continuous and smoothly animated. */
+        glColor3ub(10, 10, 12);
+        for(int i = 1; i < 20; i++) {
+                float x = bar_x + bar_w * i / 20.0F;
+                texture_draw_empty(x, bar_top, 1.0F, bar_h);
+        }
+        glColor3f(1.0F, 1.0F, 1.0F);
+}
+
+static void hud_ammo_crosshair_render(float scalef) {
+        if(!settings.ammo_crosshair || camera_mode != CAMERAMODE_FPS
+           || local_player_id < 0 || local_player_id >= PLAYERS_MAX
+           || !players[local_player_id].alive
+           || players[local_player_id].held_item != TOOL_GUN
+           || players[local_player_id].items_show)
+                return;
+
+        int gun = players[local_player_id].weapon;
+        int magazine = weapon_ammo(gun);
+        if(magazine <= 0)
+                return;
+
+        float visible_ammo = (float)local_player_ammo;
+        if(weapon_reloading()) {
+                float duration = (gun == WEAPON_SHOTGUN) ? 0.5F : 2.5F;
+                float progress = ((float)window_time() - weapon_reload_start) / duration;
+                progress = max(0.0F, min(1.0F, progress));
+                int loadable = weapon_can_reload();
+                if(gun == WEAPON_SHOTGUN)
+                        loadable = min(loadable, 1);
+                visible_ammo += loadable * progress;
+        }
+        visible_ammo = max(0.0F, min((float)magazine, visible_ammo));
+
+        /* Empty magazines have no ring. During a reload from empty it grows
+           into view immediately as the first partial segment fills. */
+        if(visible_ammo <= 0.001F)
+                return;
+
+        float percent = visible_ammo / magazine * 100.0F;
+        float r, g, b;
+        hud_healthbar_color(percent, &r, &g, &b);
+        glColor3f(r, g, b);
+
+        float cx = settings.window_width * 0.5F;
+        float cy = settings.window_height * 0.5F;
+        /* 25% smaller than the original 27px center radius. */
+        float radius = 20.25F * scalef;
+        float half_thickness = 1.75F * scalef;
+        float segment_angle = DOUBLEPI / magazine;
+        float gap = min(segment_angle * 0.22F, 0.045F);
+        float empty_segments = magazine - visible_ammo;
+        float usable = segment_angle - gap;
+        /* Compute tessellation once so every full bullet sector has exactly the
+           same vertex count and therefore perfectly uniform geometry. */
+        int full_steps = max(2, (int)ceilf(usable / (DOUBLEPI / 60.0F)));
+
+        /* Segment zero starts at 12 o'clock and angles increase clockwise.
+           Empty space grows clockwise as bullets are spent. During reload the
+           same boundary retreats anticlockwise, so the ring refills in the
+           requested direction. Partial reload progress fills a segment from
+           its clockwise end back toward its start. */
+        for(int i = 0; i < magazine; i++) {
+                float occupancy = min(1.0F, max(0.0F, (i + 1.0F) - empty_segments));
+                if(occupancy <= 0.0F)
+                        continue;
+
+                float end = (i + 1.0F) * segment_angle - gap * 0.5F;
+                float start = end - usable * occupancy;
+                int steps = max(1, (int)ceilf(full_steps * occupancy));
+                glx_draw_ring_segment_2d(cx, cy,
+                                         radius - half_thickness,
+                                         radius + half_thickness,
+                                         start, end, steps);
+        }
+        glColor3f(1.0F, 1.0F, 1.0F);
 }
 
 static int chat_messages = 16;
@@ -1649,6 +1891,7 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                                                  texture_target.width, texture_target.height);
                         }
 
+                        hud_ammo_crosshair_render(scalef);
 
                         if(window_time() - local_player_last_damage_timer <= 0.5F && is_local) {
                                 float ang = atan2(players[local_player_id].orientation.z, players[local_player_id].orientation.x)
@@ -1670,8 +1913,11 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                         font_select(FONT_FANTASY);
                         char hp[4];
                         sprintf(hp, "%i", health);
-                        hud_texture_draw(&texture_health, 8.F, 40.F, 36.0F, 32.F);
-                        hud_font_render(48.F, 38.F, 30.F, hp, 1.F);
+                        float health_top = settings.healthbar ? 60.0F : 40.0F;
+                        hud_texture_draw(&texture_health, 8.F, health_top, 36.0F, 32.F);
+                        hud_font_render(48.F, health_top - 2.0F, 30.F, hp, 1.F);
+                        if(settings.healthbar)
+                                hud_healthbar_render(health);
 
                         char item_mini_str[32];
                         struct texture* item_mini;
@@ -1715,29 +1961,12 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                         float gmi_y = 54.F;
 
                         if(players[local_id].held_item == TOOL_BLOCK) {
-                                /* Push the elements above (live player count) up by the palette
-                                   height so they clear the now-larger grid. */
-                                gmi_y += palette_size();
-
-                                float cell = palette_cell();
-                                /* Background swatch grid (the texture scales to the new size). */
+                                /* Border first, palette second: transparent padding reveals
+                                   the outline while the actual color remains unobscured. */
+                                palette_draw_selection_border(players[local_id].block.packed);
                                 glColor3f(1.0F, 1.0F, 1.0F);
                                 texture_draw(&texture_color_selection, palette_left(), palette_top(),
                                                          palette_size(), palette_size());
-
-                                /* Blinking outline on the currently-selected swatch. */
-                                for(int y = 0; y < 8; y++) {
-                                        for(int x = 0; x < 8; x++) {
-                                                if(texture_block_color(x, y) == players[local_id].block.packed) {
-                                                        unsigned char g = (((int)(window_time() * 4)) & 1) * 0xFF;
-                                                        glColor3ub(g, g, g);
-                                                        texture_draw_empty(palette_left() + x * cell, palette_top() - y * cell,
-                                                                                           cell, cell);
-                                                        y = 10; // to break outer loop too
-                                                        break;
-                                                }
-                                        }
-                                }
                                 glColor3f(1.0F, 1.0F, 1.0F);
                         }
 
@@ -1802,22 +2031,10 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                 if(camera_mode == CAMERAMODE_SPECTATOR && spec_color_palette_time > window_time()) {
                         unsigned int cur = rgb((int)(fog_color[0] * 255.0F + 0.5F), (int)(fog_color[1] * 255.0F + 0.5F),
                                                                    (int)(fog_color[2] * 255.0F + 0.5F));
-                        float cell = palette_cell();
+                        palette_draw_selection_border(cur);
                         glColor3f(1.0F, 1.0F, 1.0F);
                         texture_draw(&texture_color_selection, palette_left(), palette_top(),
                                                  palette_size(), palette_size());
-                        for(int y = 0; y < 8; y++) {
-                                for(int x = 0; x < 8; x++) {
-                                        if(texture_block_color(x, y) == cur) {
-                                                unsigned char g = (((int)(window_time() * 4)) & 1) * 0xFF;
-                                                glColor3ub(g, g, g);
-                                                texture_draw_empty(palette_left() + x * cell, palette_top() - y * cell,
-                                                                                   cell, cell);
-                                                y = 10;
-                                                break;
-                                        }
-                                }
-                        }
                         glColor3f(1.0F, 1.0F, 1.0F);
                 }
 
@@ -4455,11 +4672,11 @@ static void hud_serverlist_render(mu_Context* ctx, float scalex, float scaley) {
                                         *lay = saved;
                                         mu_Rect band = mu_rect(panel->body.x, cell.y, panel->body.w, cell.h);
                                         mu_draw_rect(ctx, band,
-                                                mu_color(settings.ui_accent_r * 2 / 5, settings.ui_accent_g * 2 / 5,
-                                                                 settings.ui_accent_b * 2 / 5, 255));
+                                                mu_color(hud_accent_red() * 2 / 5, hud_accent_green() * 2 / 5,
+                                                                 hud_accent_blue() * 2 / 5, 255));
                                         mu_draw_box(ctx, band,
-                                                mu_color(settings.ui_accent_r, settings.ui_accent_g,
-                                                                 settings.ui_accent_b, 255));
+                                                mu_color(hud_accent_red(), hud_accent_green(),
+                                                                 hud_accent_blue(), 255));
                                 }
 
 
@@ -4738,10 +4955,48 @@ struct hud hud_serverlist = {
 /*         HUD_SETTINGS START        */
 
 static int selected_category = 0;
+static char settings_search[128] = "";
+
+/* Case-insensitive settings search. Every whitespace-separated word in the
+   query must occur somewhere in the setting name, category or subcategory.
+   This makes searches such as "weapon fov" useful without requiring the
+   words to be adjacent. */
+static int settings_search_matches(struct config_setting* setting) {
+        const unsigned char* q = (const unsigned char*)settings_search;
+        char haystack[256];
+        snprintf(haystack, sizeof(haystack), "%s %s %s",
+                 setting->name, setting->category, setting->subcategory);
+        for(char* p = haystack; *p; p++)
+                *p = (char)tolower((unsigned char)*p);
+
+        while(*q) {
+                while(*q && isspace(*q)) q++;
+                if(!*q) break;
+
+                char word[64];
+                int n = 0;
+                while(*q && !isspace(*q)) {
+                        if(n < (int)sizeof(word) - 1)
+                                word[n++] = (char)tolower(*q);
+                        q++;
+                }
+                word[n] = 0;
+                if(n > 0 && !strstr(haystack, word))
+                        return 0;
+        }
+        return 1;
+}
+
+static int settings_search_active(void) {
+        const unsigned char* q = (const unsigned char*)settings_search;
+        while(*q && isspace(*q)) q++;
+        return *q != 0;
+}
 
 static void hud_settings_init() {
         memcpy(&settings_tmp, &settings, sizeof(struct RENDER_OPTIONS));
         selected_category = 0;
+        settings_search[0] = '\0';
 }
 
 static int int_slider_defaults(mu_Context* ctx, struct config_setting* setting) {
@@ -4818,12 +5073,12 @@ static void render_setting_row(mu_Context* ctx, struct config_setting* a, int wi
                            full accent for the outline — matches the server
                            list selection style. */
                         mu_draw_rect(ctx, row_rect,
-                                mu_color(settings.ui_accent_r * 2 / 5,
-                                                 settings.ui_accent_g * 2 / 5,
-                                                 settings.ui_accent_b * 2 / 5, 255));
+                                mu_color(hud_accent_red() * 2 / 5,
+                                                 hud_accent_green() * 2 / 5,
+                                                 hud_accent_blue() * 2 / 5, 255));
                         mu_draw_box(ctx, row_rect,
-                                mu_color(settings.ui_accent_r, settings.ui_accent_g,
-                                                 settings.ui_accent_b, 255));
+                                mu_color(hud_accent_red(), hud_accent_green(),
+                                                 hud_accent_blue(), 255));
                 }
         }
 
@@ -4895,6 +5150,21 @@ static void hud_settings_render(mu_Context* ctx, float scalex, float scaley) {
 
                 mu_begin_panel(ctx, "Content");
 
+                /* Keep search outside the scrolling settings panel so it remains
+                   visible while browsing results. A search spans every category;
+                   clearing it immediately returns to the selected category. */
+                int search_label_w = ctx->text_width(ctx->style->font, "Search settings:", 0)
+                        + ctx->style->padding * 2;
+                int clear_w = ctx->text_width(ctx->style->font, "Clear", 0)
+                        + ctx->style->padding * 2;
+                mu_layout_row(ctx, 3, (int[]) {search_label_w, -clear_w, -1}, 0);
+                mu_label(ctx, "Search settings:");
+                hud_textbox(ctx, settings_search, sizeof(settings_search), 0);
+                if(mu_button(ctx, "Clear")) {
+                        settings_search[0] = '\0';
+                        ctx->focus = 0;
+                }
+
                 mu_layout_row(ctx, 2, (int[]) {150, -1}, -1);
 
                 mu_begin_panel(ctx, "Categories");
@@ -4916,7 +5186,7 @@ static void hud_settings_render(mu_Context* ctx, float scalex, float scaley) {
                         if(selected_category == i) {
                                 mu_Color old_border = ctx->style->colors[MU_COLOR_BORDER];
                                 mu_Color old_text = ctx->style->colors[MU_COLOR_TEXT];
-                                mu_Color accent = {settings.ui_accent_r, settings.ui_accent_g, settings.ui_accent_b, 255};
+                                mu_Color accent = {hud_accent_red(), hud_accent_green(), hud_accent_blue(), 255};
                                 mu_Color black = {0, 0, 0, 255};
                                 ctx->style->colors[MU_COLOR_BORDER] = accent;
                                 ctx->style->colors[MU_COLOR_TEXT] = black;
@@ -4949,6 +5219,32 @@ static void hud_settings_render(mu_Context* ctx, float scalex, float scaley) {
                         strcmp((a)->name, "Replay Duration (s)") == 0 || \
                         strcmp((a)->name, "Replay Save Hotkey") == 0)
 
+                if(settings_search_active()) {
+                        int matches = 0;
+                        for(int k = 0; k < list_size(&config_settings); k++) {
+                                struct config_setting* a = list_get(&config_settings, k);
+                                if(!SHOULD_SKIP(a) && settings_search_matches(a))
+                                        matches++;
+                        }
+
+                        char result_text[64];
+                        if(matches == 0)
+                                strcpy(result_text, "No matching settings");
+                        else
+                                snprintf(result_text, sizeof(result_text), "%d matching setting%s",
+                                         matches, matches == 1 ? "" : "s");
+                        mu_layout_row(ctx, 1, (int[]) {-1}, 0);
+                        mu_button_ex(ctx, result_text, 0,
+                                     MU_OPT_NOINTERACT | MU_OPT_ALIGNCENTER);
+
+                        /* Search results are expanded directly, regardless of
+                           category or subcategory, for one-tap access. */
+                        for(int k = 0; k < list_size(&config_settings); k++) {
+                                struct config_setting* a = list_get(&config_settings, k);
+                                if(!SHOULD_SKIP(a) && settings_search_matches(a))
+                                        render_setting_row(ctx, a, width);
+                        }
+                } else {
                 /* Pass 1: settings with no subcategory */
                 for(int k = 0; k < list_size(&config_settings); k++) {
                         struct config_setting* a = list_get(&config_settings, k);
@@ -4993,7 +5289,7 @@ static void hud_settings_render(mu_Context* ctx, float scalex, float scaley) {
                         /* Highlight the treenode header with accent color */
                         mu_Color old_border = ctx->style->colors[MU_COLOR_BORDER];
                         mu_Color old_text = ctx->style->colors[MU_COLOR_TEXT];
-                        mu_Color accent = {settings.ui_accent_r, settings.ui_accent_g, settings.ui_accent_b, 255};
+                        mu_Color accent = {hud_accent_red(), hud_accent_green(), hud_accent_blue(), 255};
                         mu_Color white = {255, 255, 255, 255};
                         ctx->style->colors[MU_COLOR_BORDER] = accent;
                         ctx->style->colors[MU_COLOR_TEXT] = white;
@@ -5016,6 +5312,7 @@ static void hud_settings_render(mu_Context* ctx, float scalex, float scaley) {
                                 mu_end_treenode(ctx);
                         }
                 }
+                } /* !settings_search_active() */
 
                 #undef SHOULD_SKIP
 
@@ -5121,7 +5418,7 @@ static void hud_skins_render(mu_Context* ctx, float scalex, float scaley) {
                         if(i == SKIN_PLAYER) continue;
                         mu_Color old_border = ctx->style->colors[MU_COLOR_BORDER];
                         mu_Color old_text = ctx->style->colors[MU_COLOR_TEXT];
-                        mu_Color accent = {settings.ui_accent_r, settings.ui_accent_g, settings.ui_accent_b, 255};
+                        mu_Color accent = {hud_accent_red(), hud_accent_green(), hud_accent_blue(), 255};
                         ctx->style->colors[MU_COLOR_BORDER] = accent;
                         if(skins_selected_category == i) {
                                 ctx->style->colors[MU_COLOR_TEXT] = (mu_Color){0, 0, 0, 255};
@@ -5177,7 +5474,7 @@ static void hud_skins_render(mu_Context* ctx, float scalex, float scaley) {
                                         ctx->style->colors[MU_COLOR_BORDER] = (mu_Color){255, 255, 0, 255};
                                         ctx->style->colors[MU_COLOR_BUTTON] = (mu_Color){0, 0, 0, 60};
                                 } else {
-                                        ctx->style->colors[MU_COLOR_BORDER] = (mu_Color){settings.ui_accent_r, settings.ui_accent_g, settings.ui_accent_b, 255};
+                                        ctx->style->colors[MU_COLOR_BORDER] = (mu_Color){hud_accent_red(), hud_accent_green(), hud_accent_blue(), 255};
                                         ctx->style->colors[MU_COLOR_BUTTON] = (mu_Color){0, 0, 0, 30};
                                 }
 

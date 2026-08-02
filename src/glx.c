@@ -606,6 +606,67 @@ void glx_draw_line_2d(float x1, float y1, float x2, float y2) {
 #endif
 }
 
+void glx_draw_ring_segment_2d(float cx, float cy, float inner_radius, float outer_radius,
+                              float start_angle, float end_angle, int steps) {
+        if(steps < 1 || end_angle <= start_angle || outer_radius <= inner_radius)
+                return;
+
+#if defined(OPENGL_ES)
+        /* Two vertices (outer, inner) per angular sample, xyz each. A triangle
+           strip produces a solid annular sector with identical geometry at
+           every rotation, unlike thick GL lines whose rasterized width varied
+           visibly by screen angle. */
+        float verts[(steps + 1) * 6];
+        for(int i = 0; i <= steps; i++) {
+                float a = start_angle + (end_angle - start_angle) * i / steps;
+                int o = i * 6;
+                verts[o + 0] = cx + sinf(a) * outer_radius;
+                verts[o + 1] = cy + cosf(a) * outer_radius;
+                verts[o + 2] = 0.0F;
+                verts[o + 3] = cx + sinf(a) * inner_radius;
+                verts[o + 4] = cy + cosf(a) * inner_radius;
+                verts[o + 5] = 0.0F;
+        }
+        if(default_shader) {
+                glx_ensure_line_quad_vbo();
+                glBindBuffer(GL_ARRAY_BUFFER, line_quad_vbo);
+                glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STREAM_DRAW);
+                GLint cur_prog;
+                glGetIntegerv(GL_CURRENT_PROGRAM, &cur_prog);
+                if(cur_prog == (GLint)default_shader) {
+                        glUniform1f(loc_u_HasVertexColor, 0.0F);
+                        glUniform4fv(loc_u_Color, 1, gles_current_color);
+                        glUniform1f(loc_u_TextureEnabled, 0.0F);
+                        glUniform1f(loc_u_TexCoordScale, 1.0F);
+                }
+                glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, (void*)0);
+                glEnableVertexAttribArray(0);
+                glDrawArrays(GL_TRIANGLE_STRIP, 0, (steps + 1) * 2);
+                glDisableVertexAttribArray(0);
+                glBindBuffer(GL_ARRAY_BUFFER, 0);
+                return;
+        }
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glDisable(GL_TEXTURE_2D);
+        glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+        glDisableClientState(GL_COLOR_ARRAY);
+        glDisableClientState(GL_NORMAL_ARRAY);
+        glEnableClientState(GL_VERTEX_ARRAY);
+        glVertexPointer(3, GL_FLOAT, 0, verts);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, (steps + 1) * 2);
+        glDisableClientState(GL_VERTEX_ARRAY);
+        glEnable(GL_TEXTURE_2D);
+#else
+        glBegin(GL_TRIANGLE_STRIP);
+        for(int i = 0; i <= steps; i++) {
+                float a = start_angle + (end_angle - start_angle) * i / steps;
+                glVertex2f(cx + sinf(a) * outer_radius, cy + cosf(a) * outer_radius);
+                glVertex2f(cx + sinf(a) * inner_radius, cy + cosf(a) * inner_radius);
+        }
+        glEnd();
+#endif
+}
+
 void glx_draw_quad_2d(float x, float y, float w, float h) {
 #if defined(OPENGL_ES)
         if(default_shader) {

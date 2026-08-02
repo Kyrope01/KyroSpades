@@ -1829,6 +1829,11 @@ static int mu_key_translate(int key) {
                 case WINDOW_KEY_BACKSPACE: return MU_KEY_BACKSPACE;
                 case WINDOW_KEY_ENTER: return MU_KEY_RETURN;
                 case WINDOW_KEY_SHIFT: return MU_KEY_SHIFT;
+                case WINDOW_KEY_CURSOR_LEFT: return MU_KEY_LEFT;
+                case WINDOW_KEY_CURSOR_RIGHT: return MU_KEY_RIGHT;
+                case WINDOW_KEY_HOME: return MU_KEY_HOME;
+                case WINDOW_KEY_END: return MU_KEY_END;
+                case WINDOW_KEY_DELETE: return MU_KEY_DELETE;
                 default: return 0;
         }
 }
@@ -1900,10 +1905,22 @@ void keys(struct window_instance* window, int key, int scancode, int action, int
                         }
                 }
 
-                if(action == WINDOW_PRESS && key == WINDOW_KEY_V && mods) {
-                        const char* clipboard = window_clipboard();
-                        if(clipboard)
-                                mu_input_text(hud_active->ctx, clipboard);
+                /* Standard textbox shortcuts. Physical A/X have dedicated
+                   internal aliases because those keys are also bound to Move
+                   Left and Map Zoom respectively. Ctrl and Command both arrive
+                   through `mods`, so this works on Windows/Linux/macOS. */
+                if(action == WINDOW_PRESS && mods) {
+                        if(key == WINDOW_KEY_A)
+                                mu_input_keydown(hud_active->ctx, MU_KEY_SELECT_ALL);
+                        if(key == WINDOW_KEY_C)
+                                mu_input_keydown(hud_active->ctx, MU_KEY_COPY);
+                        if(key == WINDOW_KEY_X)
+                                mu_input_keydown(hud_active->ctx, MU_KEY_CUT);
+                        if(key == WINDOW_KEY_V) {
+                                const char* clipboard = window_clipboard();
+                                if(clipboard)
+                                        mu_input_text(hud_active->ctx, clipboard);
+                        }
                 }
         }
 
@@ -2155,6 +2172,13 @@ int main(int argc, char** argv) {
         settings.player_arms = 1;
         settings.camera_movement = 0;
         settings.fullscreen = 0;
+        settings.ui_accent_r = 200;
+        settings.ui_accent_g = 200;
+        settings.ui_accent_b = 200;
+        settings.ui_rgb = 0;
+        settings.ui_rgb_speed = 1.0F;
+        settings.healthbar = 1;
+        settings.ammo_crosshair = 0;
         settings.greedy_meshing = 0;
         /* The look formula is `setting / 5.0F * MOUSE_SENSITIVITY`, so the
            neutral value of this setting is 5 — NOT the raw radians/pixel

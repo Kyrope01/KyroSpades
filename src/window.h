@@ -108,7 +108,20 @@ enum window_keys {
 	WINDOW_KEY_DEMO_SPEED_UP,
 	WINDOW_KEY_MAP_ZOOM,
 	WINDOW_KEY_RECORDING,
-	WINDOW_KEY_REPLAY_SAVE
+	WINDOW_KEY_REPLAY_SAVE,
+	/* Editing-only keys used by microui text fields. They are registered
+	   without user-facing bindings so every backend routes them through the
+	   same input path. */
+	WINDOW_KEY_HOME,
+	WINDOW_KEY_END,
+	WINDOW_KEY_DELETE,
+	WINDOW_KEY_A,
+	WINDOW_KEY_X,
+	/* Keep this last: window_pressed_keys must cover every internal key.
+	   The old fixed size of 64 ended at WINDOW_KEY_DEMO_PAUSE, so newer
+	   bindings (including Map zoom/X at index 68) wrote past the array and
+	   could corrupt button_map, making a keyboard press fire the weapon. */
+	WINDOW_KEY_COUNT
 };
 
 enum {
@@ -140,7 +153,7 @@ struct window_finger {
 	} cur;
 };
 
-extern int window_pressed_keys[64];
+extern int window_pressed_keys[WINDOW_KEY_COUNT];
 
 /* SDL's real default framebuffer (0 on desktop/Android, non-zero on iOS). */
 extern int window_gl_default_framebuffer;

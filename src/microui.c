@@ -422,9 +422,11 @@ void mu_input_keyup(mu_Context *ctx, int key) {
 
 void mu_input_text(mu_Context *ctx, const char *text) {
   int len = strlen(ctx->input_text);
-  int size = strlen(text) + 1;
-  expect(len + size <= (int) sizeof(ctx->input_text));
+  int room = (int)sizeof(ctx->input_text) - len - 1;
+  int size = mu_min(room, (int)strlen(text));
+  if (size <= 0) { return; }
   memcpy(ctx->input_text + len, text, size);
+  ctx->input_text[len + size] = '\0';
 }
 
 
@@ -777,30 +779,191 @@ int mu_checkbox(mu_Context *ctx, const char *label, int *state) {
 }
 
 
+static int textbox_prev_char(const char *buf, int pos) {
+  if (pos <= 0) { return 0; }
+  pos--;
+  while (pos > 0 && (((unsigned char)buf[pos] & 0xc0) == 0x80)) { pos--; }
+  return pos;
+}
+
+
+static int textbox_next_char(const char *buf, int pos, int len) {
+  if (pos >= len) { return len; }
+  pos++;
+  while (pos < len && (((unsigned char)buf[pos] & 0xc0) == 0x80)) { pos++; }
+  return pos;
+}
+
+
+static int textbox_delete_selection(mu_Context *ctx, char *buf, int *len) {
+  int lo, hi;
+  if (ctx->textbox_anchor == ctx->textbox_cursor) { return 0; }
+  lo = mu_min(ctx->textbox_anchor, ctx->textbox_cursor);
+  hi = mu_max(ctx->textbox_anchor, ctx->textbox_cursor);
+  memmove(buf + lo, buf + hi, *len - hi + 1);
+  *len -= hi - lo;
+  ctx->textbox_cursor = ctx->textbox_anchor = lo;
+  return 1;
+}
+
+
+static int textbox_prefix_width(mu_Context *ctx, mu_Font font,
+  const char *buf, int bytes)
+{
+  /* The engine's text_width callback treats len <= 0 as "measure the whole
+     string". Text editing needs byte offset 0 to mean a zero-width prefix;
+     without this adapter, selections beginning at the first character were
+     drawn at the end of the string and appeared to have no highlight. */
+  return bytes <= 0 ? 0 : ctx->text_width(font, buf, bytes);
+}
+
+
+static int textbox_cursor_from_x(mu_Context *ctx, const char *buf, int len,
+  mu_Font font, int textx, int mousex)
+{
+  int pos = 0;
+  int rel = mousex - textx;
+  if (rel <= 0) { return 0; }
+  while (pos < len) {
+    int next = textbox_next_char(buf, pos, len);
+    int x0 = textbox_prefix_width(ctx, font, buf, pos);
+    int x1 = textbox_prefix_width(ctx, font, buf, next);
+    if (rel < (x0 + x1) / 2) { return pos; }
+    pos = next;
+  }
+  return len;
+}
+
+
 int mu_textbox_raw(mu_Context *ctx, char *buf, int bufsz, mu_Id id, mu_Rect r,
   int opt)
 {
   int res = 0;
+  int len = (int)strlen(buf);
+  mu_Font font = ctx->style->font;
   mu_update_control(ctx, id, r, opt | MU_OPT_HOLDFOCUS);
 
   if (ctx->focus == id) {
-    /* handle text input */
-    int len = strlen(buf);
-    int n = mu_min(bufsz - len - 1, (int) strlen(ctx->input_text));
-    if (n > 0) {
-      memcpy(buf + len, ctx->input_text, n);
-      len += n;
-      buf[len] = '\0';
-      res |= MU_RES_CHANGE;
+    int shift;
+    if (ctx->textbox_edit != id) {
+      ctx->textbox_edit = id;
+      ctx->textbox_cursor = len;
+      ctx->textbox_anchor = len;
+      ctx->textbox_scroll = 0;
     }
-    /* handle backspace */
-    if (ctx->key_pressed & MU_KEY_BACKSPACE && len > 0) {
-      /* skip utf-8 continuation bytes */
-      while ((buf[--len] & 0xc0) == 0x80 && len > 0);
-      buf[len] = '\0';
-      res |= MU_RES_CHANGE;
+
+    if (ctx->textbox_cursor > len) { ctx->textbox_cursor = len; }
+    if (ctx->textbox_anchor > len) { ctx->textbox_anchor = len; }
+    shift = !!(ctx->key_down & MU_KEY_SHIFT);
+
+    /* Mouse placement and drag selection. textx uses the scroll value from the
+       previous frame; the draw pass below then adjusts it to reveal the new
+       cursor, which is exactly how native single-line fields behave. */
+    if (ctx->mouse_pressed == MU_MOUSE_LEFT && ctx->hover == id) {
+      int textx = r.x + ctx->style->padding - ctx->textbox_scroll;
+      int pos = textbox_cursor_from_x(ctx, buf, len, font, textx, ctx->mouse_pos.x);
+      if (!shift) { ctx->textbox_anchor = pos; }
+      ctx->textbox_cursor = pos;
+    } else if ((ctx->mouse_down & MU_MOUSE_LEFT) && ctx->textbox_edit == id) {
+      int textx = r.x + ctx->style->padding - ctx->textbox_scroll;
+      ctx->textbox_cursor = textbox_cursor_from_x(
+        ctx, buf, len, font, textx, ctx->mouse_pos.x);
     }
-    /* handle return */
+
+    /* Selection and clipboard shortcuts. */
+    if (ctx->key_pressed & MU_KEY_SELECT_ALL) {
+      ctx->textbox_anchor = 0;
+      ctx->textbox_cursor = len;
+    }
+    if ((ctx->key_pressed & (MU_KEY_COPY | MU_KEY_CUT)) &&
+        ctx->textbox_anchor != ctx->textbox_cursor && ctx->set_clipboard)
+    {
+      int lo = mu_min(ctx->textbox_anchor, ctx->textbox_cursor);
+      int hi = mu_max(ctx->textbox_anchor, ctx->textbox_cursor);
+      char *copy = (char*)malloc(hi - lo + 1);
+      if (copy) {
+        memcpy(copy, buf + lo, hi - lo);
+        copy[hi - lo] = '\0';
+        ctx->set_clipboard(copy);
+        free(copy);
+      }
+      if (ctx->key_pressed & MU_KEY_CUT) {
+        if (textbox_delete_selection(ctx, buf, &len)) { res |= MU_RES_CHANGE; }
+      }
+    }
+
+    /* Cursor navigation. Holding Shift extends from the existing anchor. */
+    if (ctx->key_pressed & MU_KEY_LEFT) {
+      if (!shift && ctx->textbox_anchor != ctx->textbox_cursor) {
+        ctx->textbox_cursor = mu_min(ctx->textbox_anchor, ctx->textbox_cursor);
+      } else {
+        ctx->textbox_cursor = textbox_prev_char(buf, ctx->textbox_cursor);
+      }
+      if (!shift) { ctx->textbox_anchor = ctx->textbox_cursor; }
+    }
+    if (ctx->key_pressed & MU_KEY_RIGHT) {
+      if (!shift && ctx->textbox_anchor != ctx->textbox_cursor) {
+        ctx->textbox_cursor = mu_max(ctx->textbox_anchor, ctx->textbox_cursor);
+      } else {
+        ctx->textbox_cursor = textbox_next_char(buf, ctx->textbox_cursor, len);
+      }
+      if (!shift) { ctx->textbox_anchor = ctx->textbox_cursor; }
+    }
+    if (ctx->key_pressed & MU_KEY_HOME) {
+      ctx->textbox_cursor = 0;
+      if (!shift) { ctx->textbox_anchor = 0; }
+    }
+    if (ctx->key_pressed & MU_KEY_END) {
+      ctx->textbox_cursor = len;
+      if (!shift) { ctx->textbox_anchor = len; }
+    }
+
+    /* Deletion works on the selection first, then on one UTF-8 character. */
+    if (ctx->key_pressed & MU_KEY_BACKSPACE) {
+      if (textbox_delete_selection(ctx, buf, &len)) {
+        res |= MU_RES_CHANGE;
+      } else if (ctx->textbox_cursor > 0) {
+        int from = textbox_prev_char(buf, ctx->textbox_cursor);
+        memmove(buf + from, buf + ctx->textbox_cursor,
+                len - ctx->textbox_cursor + 1);
+        len -= ctx->textbox_cursor - from;
+        ctx->textbox_cursor = ctx->textbox_anchor = from;
+        res |= MU_RES_CHANGE;
+      }
+    }
+    if (ctx->key_pressed & MU_KEY_DELETE) {
+      if (textbox_delete_selection(ctx, buf, &len)) {
+        res |= MU_RES_CHANGE;
+      } else if (ctx->textbox_cursor < len) {
+        int to = textbox_next_char(buf, ctx->textbox_cursor, len);
+        memmove(buf + ctx->textbox_cursor, buf + to, len - to + 1);
+        len -= to - ctx->textbox_cursor;
+        ctx->textbox_anchor = ctx->textbox_cursor;
+        res |= MU_RES_CHANGE;
+      }
+    }
+
+    /* Typed text and Ctrl/Cmd+V replace the active selection and insert at the
+       cursor instead of always appending to the end. */
+    if (ctx->input_text[0]) {
+      int n;
+      if (textbox_delete_selection(ctx, buf, &len)) { res |= MU_RES_CHANGE; }
+      n = mu_min(bufsz - len - 1, (int)strlen(ctx->input_text));
+      /* Do not cut a pasted UTF-8 codepoint in half at the field limit. */
+      if (ctx->input_text[n] != '\0') {
+        while (n > 0 && (((unsigned char)ctx->input_text[n] & 0xc0) == 0x80)) { n--; }
+      }
+      if (n > 0) {
+        memmove(buf + ctx->textbox_cursor + n, buf + ctx->textbox_cursor,
+                len - ctx->textbox_cursor + 1);
+        memcpy(buf + ctx->textbox_cursor, ctx->input_text, n);
+        len += n;
+        ctx->textbox_cursor += n;
+        ctx->textbox_anchor = ctx->textbox_cursor;
+        res |= MU_RES_CHANGE;
+      }
+    }
+
     if (ctx->key_pressed & MU_KEY_RETURN) {
       mu_set_focus(ctx, 0);
       res |= MU_RES_SUBMIT;
@@ -811,15 +974,35 @@ int mu_textbox_raw(mu_Context *ctx, char *buf, int bufsz, mu_Id id, mu_Rect r,
   mu_draw_control_frame(ctx, id, r, MU_COLOR_BASE, opt);
   if (ctx->focus == id) {
     mu_Color color = ctx->style->colors[MU_COLOR_TEXT];
-    mu_Font font = ctx->style->font;
-    int textw = ctx->text_width(font, buf, -1);
     int texth = ctx->text_height(font);
-    int ofx = r.w - ctx->style->padding - textw - 1;
-    int textx = r.x + mu_min(ofx, ctx->style->padding);
     int texty = r.y + (r.h - texth) / 2;
+    int available = mu_max(1, r.w - ctx->style->padding * 2 - 1);
+    int cursorw = textbox_prefix_width(ctx, font, buf, ctx->textbox_cursor);
+    int totalw = ctx->text_width(font, buf, -1);
+    int textx;
+
+    if (cursorw - ctx->textbox_scroll > available) {
+      ctx->textbox_scroll = cursorw - available;
+    }
+    if (cursorw - ctx->textbox_scroll < 0) {
+      ctx->textbox_scroll = cursorw;
+    }
+    if (totalw < available) { ctx->textbox_scroll = 0; }
+    textx = r.x + ctx->style->padding - ctx->textbox_scroll;
+
     mu_push_clip_rect(ctx, r);
+    if (ctx->textbox_anchor != ctx->textbox_cursor) {
+      int lo = mu_min(ctx->textbox_anchor, ctx->textbox_cursor);
+      int hi = mu_max(ctx->textbox_anchor, ctx->textbox_cursor);
+      int sx = textx + textbox_prefix_width(ctx, font, buf, lo);
+      int ex = textx + textbox_prefix_width(ctx, font, buf, hi);
+      /* Use an opaque, conventional selection blue. The previous subtle
+         accent tint could disappear against similarly coloured field bases. */
+      mu_Color selection = mu_color(55, 115, 210, 255);
+      mu_draw_rect(ctx, mu_rect(sx, texty, mu_max(1, ex - sx), texth), selection);
+    }
     mu_draw_text(ctx, font, buf, -1, mu_vec2(textx, texty), color);
-    mu_draw_rect(ctx, mu_rect(textx + textw, texty, 1, texth), color);
+    mu_draw_rect(ctx, mu_rect(textx + cursorw, texty, 1, texth), color);
     mu_pop_clip_rect(ctx);
   } else {
     mu_draw_control_text(ctx, buf, r, MU_COLOR_TEXT, opt);

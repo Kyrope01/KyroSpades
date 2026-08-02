@@ -29,6 +29,7 @@
 #include "matrix.h"
 #include "camera.h"
 #include "config.h"
+#include "window.h"
 
 enum camera_mode camera_mode = CAMERAMODE_SPECTATOR;
 
@@ -70,9 +71,11 @@ float camera_fov_scaled(float dt) {
 	float lerp_speed = 5.0F * dt; // Adjust this value to control smoothness
 	current_fov_offset = current_fov_offset + (target_fov_offset - current_fov_offset) * fminf(lerp_speed, 1.0F);
 
+	float normal_fov = settings.camera_fov + current_fov_offset;
 	if(render_fpv && local_id >= 0 && local_id < PLAYERS_MAX
 	   && players[local_id].held_item == TOOL_GUN && players[local_id].input.buttons.rmb
-	   && !players[local_id].input.keys.sprint && players[local_id].alive) {
+	   && (!players[local_id].input.keys.sprint || players[local_id].input.keys.crouch)
+	   && players[local_id].alive) {
 		float ads_fov = CAMERA_DEFAULT_FOV;
 		switch(players[local_id].weapon) {
 			case WEAPON_RIFLE: ads_fov = settings.rifle_ads_fov; break;
@@ -80,9 +83,22 @@ float camera_fov_scaled(float dt) {
 			case WEAPON_SHOTGUN: ads_fov = settings.shotgun_ads_fov; break;
 			default: ads_fov = CAMERA_DEFAULT_FOV; break;
 		}
-		return ads_fov * atan(tan((ads_fov / 180.0F * PI) / 2) / 2.0F) * 2.0F;
+		float target_ads_fov = ads_fov * atan(tan((ads_fov / 180.0F * PI) / 2) / 2.0F) * 2.0F;
+
+		/* Use the same 150 ms smoothstep as the scope PNG. This keeps the
+		   optical zoom and image size synchronized instead of snapping the
+		   camera FOV while the scope is still growing into place. It also
+		   relies on rmb_start representing the initial press (not being reset
+		   each held frame; see cameracontroller_fps). */
+		if(settings.ads_zoom_animation) {
+			float progress = (window_time() - players[local_id].input.buttons.rmb_start) / 0.15F;
+			progress = fmaxf(0.0F, fminf(1.0F, progress));
+			progress = progress * progress * (3.0F - 2.0F * progress);
+			return normal_fov + (target_ads_fov - normal_fov) * progress;
+		}
+		return target_ads_fov;
 	}
-	return settings.camera_fov + current_fov_offset;
+	return normal_fov;
 }
 
 void camera_overflow_adjust() {

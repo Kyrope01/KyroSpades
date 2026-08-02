@@ -103,7 +103,11 @@ FILE* create_demo_file(void) {
     char file_name[128];
     char dir_path[] = "demos";
 
-    ks_mkdir(dir_path, 0755);
+    /* Keep the explicit cast: an older Beta CI workflow used a broad sed rule
+       for mkdir(dir_path, 0755) which also matched the tail of ks_mkdir and
+       deleted this second argument on Windows. This spelling is equivalent but
+       cannot be corrupted by that legacy substitution. */
+    ks_mkdir(dir_path, (int)0755);
 
     time_t demo_time;
     time(&demo_time);

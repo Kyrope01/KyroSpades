@@ -164,7 +164,13 @@ void cameracontroller_fps(float dt) {
 			}
 		}
 
-		players[local_player_id].input.keys.sprint = window_key_down(WINDOW_KEY_SPRINT);
+		/* Crouch and sprint are mutually exclusive. This is especially
+		   important for touch/controller movement, where the virtual stick can
+		   leave Sprint held while the separate Crouch control is pressed. A
+		   stale sprint bit blocks ADS and continuously marks the held item as
+		   disabled below, so crouching appeared to make ADS impossible. */
+		players[local_player_id].input.keys.sprint
+			= window_key_down(WINDOW_KEY_SPRINT) && !players[local_player_id].input.keys.crouch;
 		players[local_player_id].input.keys.jump = window_key_down(WINDOW_KEY_SPACE);
 		players[local_player_id].input.keys.sneak = window_key_down(WINDOW_KEY_SNEAK);
 
@@ -177,7 +183,7 @@ void cameracontroller_fps(float dt) {
 	camera_y = players[local_player_id].physics.eye.y + player_height(&players[local_player_id]);
 	camera_z = players[local_player_id].physics.eye.z;
 
-	if(window_key_down(WINDOW_KEY_SPRINT) && chat_input_mode == CHAT_NO_INPUT) {
+	if(players[local_player_id].input.keys.sprint && chat_input_mode == CHAT_NO_INPUT) {
 		players[local_player_id].item_disabled = window_time();
 	} else {
 		if(window_time() - players[local_player_id].item_disabled < 0.4F && !players[local_player_id].items_show) {
@@ -190,10 +196,14 @@ void cameracontroller_fps(float dt) {
 
 	if(players[local_player_id].held_item != TOOL_GUN
 	   || (settings.hold_down_sights && !players[local_player_id].items_show)) {
+		/* In hold-to-ADS mode this block runs every frame. The old code reset
+		   rmb_start on every one of those frames while RMB was held, so the
+		   scope animation permanently remained at its first (half-size) frame.
+		   Timestamp only the actual up->down transition. */
+		int was_rmb = players[local_player_id].input.buttons.rmb;
 		players[local_player_id].input.buttons.rmb = button_map[1];
-		if(button_map[1]) {
+		if(button_map[1] && !was_rmb)
 			players[local_player_id].input.buttons.rmb_start = window_time();
-		}
 	}
 
 	if(chat_input_mode != CHAT_NO_INPUT) {
