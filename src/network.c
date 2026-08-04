@@ -531,6 +531,12 @@ void read_PacketCreatePlayer(void* data, int len) {
                 players[p->player_id].pos.x = p->x;
                 players[p->player_id].pos.y = 63.0F - p->z;
                 players[p->player_id].pos.z = p->y;
+                /* spawn is a genuine teleport: discard interpolation history
+                   and any correction blend so we render from the spawn point */
+                player_prev_snap(p->player_id);
+                if(p->player_id == local_player_id) {
+                        view_offset.x = view_offset.y = view_offset.z = 0.0F;
+                }
                 strcpy(players[p->player_id].name, p->name);
                 players[p->player_id].orientation.x = players[p->player_id].orientation_smooth.x
                         = (p->team == TEAM_1) ? 1.0F : -1.0F;
@@ -635,8 +641,34 @@ void read_PacketMapStart(void* data, int len) {
         camera_mode = CAMERAMODE_SELECTION;
 }
 
+/* Measured interval between WorldUpdate packets (EWMA). pyspades sends
+   them at NETWORK_FPS = 10 Hz; the correction-blend decay rate adapts
+   to the measured cadence so blending always completes in time for the
+   next update without being needlessly slow-pulsed. */
+static float network_wu_interval = 0.1F;
+static float network_wu_last = 0.0F;
+
+float network_correction_rate(void) {
+        /* target: ~90% of the blend done within one update interval
+           (e^-2.2 ~= 0.11 remaining), clamped to sane bounds */
+        float rate = 2.2F / network_wu_interval;
+        if(rate < 8.0F)
+                rate = 8.0F;
+        if(rate > 30.0F)
+                rate = 30.0F;
+        return rate;
+}
+
 void read_PacketWorldUpdate(void* data, int len) {
         if(len > 0) {
+                float now = window_time();
+                if(network_wu_last > 0.0F) {
+                        float iv = now - network_wu_last;
+                        if(iv > 0.01F && iv < 1.0F)
+                                network_wu_interval = network_wu_interval * 0.8F + iv * 0.2F;
+                }
+                network_wu_last = now;
+
                 int is_075 = (len % sizeof(struct PacketWorldUpdate075) == 0);
                 int is_076 = (len % sizeof(struct PacketWorldUpdate076) == 0);
 
@@ -647,9 +679,7 @@ void read_PacketWorldUpdate(void* data, int len) {
                                 if(players[k].connected && players[k].alive && k != local_player_id) {
                                         if(distance3D(players[k].pos.x, players[k].pos.y, players[k].pos.z, p->x, 63.0F - p->z, p->y)
                                            > 0.1F * 0.1F) {
-                                                players[k].pos.x = p->x;
-                                                players[k].pos.y = 63.0F - p->z;
-                                                players[k].pos.z = p->y;
+                                                player_net_correct(k, p->x, 63.0F - p->z, p->y);
                                         }
                                         players[k].orientation.x = p->ox;
                                         players[k].orientation.y = -p->oz;
@@ -665,9 +695,7 @@ void read_PacketWorldUpdate(void* data, int len) {
                                            && p->player_id != local_player_id) {
                                                 if(distance3D(players[p->player_id].pos.x, players[p->player_id].pos.y, players[p->player_id].pos.z, p->x, 63.0F - p->z, p->y)
                                                    > 0.1F * 0.1F) {
-                                                        players[p->player_id].pos.x = p->x;
-                                                        players[p->player_id].pos.y = 63.0F - p->z;
-                                                        players[p->player_id].pos.z = p->y;
+                                                        player_net_correct(p->player_id, p->x, 63.0F - p->z, p->y);
                                                 }
                                                 players[p->player_id].orientation.x = p->ox;
                                                 players[p->player_id].orientation.y = -p->oz;
@@ -685,9 +713,10 @@ void read_PacketPositionData(void* data, int len) {
                 return;
         }
         struct PacketPositionData* p = (struct PacketPositionData*)data;
-        players[local_player_id].pos.x = p->x;
-        players[local_player_id].pos.y = 63.0F - p->z;
-        players[local_player_id].pos.z = p->y;
+        /* Server-forced position ("rubberband correction"). Never applied
+           as a raw snap anymore: small corrections glide via the decaying
+           camera offset, big ones (spawns/teleports) still snap. */
+        player_local_correct(p->x, 63.0F - p->z, p->y);
 }
 
 void read_PacketOrientationData(void* data, int len) {
@@ -696,9 +725,24 @@ void read_PacketOrientationData(void* data, int len) {
                 return;
         }
         struct PacketOrientationData* p = (struct PacketOrientationData*)data;
-        players[local_player_id].pos.x = p->x;
-        players[local_player_id].pos.y = -p->z;
-        players[local_player_id].pos.z = p->y;
+        /* BUGFIX: this handler previously wrote the ORIENTATION values
+           into the local player's POSITION (with a sketchy conversion),
+           which would teleport the player to within a block of the map
+           origin if a server script ever sent this packet. Interpret it
+           as a view orientation instead (OpenSpades semantics): wire
+           (x,y,z) maps to internal (x, -z, y). */
+        float ox = p->x, oy = -p->z, oz = p->y;
+        float lenv = sqrtf(ox * ox + oy * oy + oz * oz);
+        if(lenv < 0.5F || lenv > 2.0F)
+                return; /* ignore zero/garbage packets */
+        float clamped_y = oy;
+        if(clamped_y > 1.0F)
+                clamped_y = 1.0F;
+        if(clamped_y < -1.0F)
+                clamped_y = -1.0F;
+        camera_rot_y = acosf(clamped_y);
+        camera_rot_x = atan2f(ox, oz);
+        camera_overflow_adjust();
 }
 
 void read_PacketSetColor(void* data, int len) {
@@ -1216,15 +1260,19 @@ void network_updateColor() {
         network_send(PACKET_SETCOLOR_ID, &c, sizeof(c));
 }
 
-void network_send(int id, void* data, int len) {
+static void network_send_flags(int id, void* data, int len, enet_uint32 flags) {
         if(demo_is_playing()) return;
         if(network_connected) {
                 network_stats[0].outgoing += len + 1;
                 unsigned char tmp[512];
                 tmp[0] = id;
                 memcpy(tmp + 1, data, len);
-                enet_peer_send(peer, 0, enet_packet_create(tmp, len + 1, ENET_PACKET_FLAG_RELIABLE));
+                enet_peer_send(peer, 0, enet_packet_create(tmp, len + 1, flags));
         }
+}
+
+void network_send(int id, void* data, int len) {
+        network_send_flags(id, data, len, ENET_PACKET_FLAG_RELIABLE);
 }
 
 unsigned int network_ping() {
@@ -1358,6 +1406,63 @@ int network_connect_string(char* addr) {
         return network_connect(ip, port);
 }
 
+/* Processes all pending incoming ENet events. Extracted so the main loop
+   can service the network at frame start (before physics/input) in
+   addition to the regular end-of-frame network_update call. No-op when
+   not connected or while a demo replays (demo feeds packets itself). */
+void network_service(void) {
+        if(!network_connected || demo_is_playing())
+                return;
+
+        ENetEvent event;
+        while(enet_host_service(client, &event, 0) > 0) {
+                switch(event.type) {
+                        case ENET_EVENT_TYPE_RECEIVE: {
+                                network_stats[0].ingoing += event.packet->dataLength;
+                                /* Defensive: enet should never deliver a 0-length packet,
+                                   but if it does, dataLength-1 underflows to SIZE_MAX
+                                   and the handler thinks it has a huge buffer. */
+                                if(event.packet->dataLength < 1) {
+                                        enet_packet_destroy(event.packet);
+                                        break;
+                                }
+                                int id = event.packet->data[0];
+                                if(id < 0 || id >= 256) {
+                                        log_error("Packet id out of range: %i", id);
+                                        enet_packet_destroy(event.packet);
+                                        break;
+                                }
+                                if(*packets[id]) {
+                                        log_debug("Packet id %i", id);
+                                        (*packets[id])(event.packet->data + 1, event.packet->dataLength - 1);
+                                } else {
+                                        log_error("Invalid packet id %i, length: %i", id, (int)event.packet->dataLength - 1);
+                                }
+                                register_demo_packet(event.packet);
+                                network_received_packets++;
+                                enet_packet_destroy(event.packet);
+                                break;
+                        }
+                        case ENET_EVENT_TYPE_DISCONNECT:
+                                // In case we're disconnected for using the wrong protocol, don't return to HUD just yet
+                                if(event.data != 3) {
+                                        hud_change(&hud_serverlist);
+                                        chat_showpopup(network_reason_disconnect(event.data), 10.0F, rgb(255, 0, 0));
+                                }
+
+                                log_error("server disconnected! reason: %s", network_reason_disconnect(event.data));
+                                event.peer->data = NULL;
+                                network_connected = 0;
+                                network_logged_in = 0;
+                                network_map_transfer_end = 0;
+                                player_clear_corpses();
+                                bloodmarks_clear();
+                                damagenumbers_clear();
+                                return;
+                }
+        }
+}
+
 int network_update() {
         if(demo_is_playing()) {
                 demo_playback_update();
@@ -1374,53 +1479,11 @@ int network_update() {
                         network_stats_last = window_time();
                 }
 
-                ENetEvent event;
-                while(enet_host_service(client, &event, 0) > 0) {
-                        switch(event.type) {
-                                case ENET_EVENT_TYPE_RECEIVE: {
-                                        network_stats[0].ingoing += event.packet->dataLength;
-                                        /* Defensive: enet should never deliver a 0-length packet,
-                                           but if it does, dataLength-1 underflows to SIZE_MAX
-                                           and the handler thinks it has a huge buffer. */
-                                        if(event.packet->dataLength < 1) {
-                                                enet_packet_destroy(event.packet);
-                                                break;
-                                        }
-                                        int id = event.packet->data[0];
-                                        if(id < 0 || id >= 256) {
-                                                log_error("Packet id out of range: %i", id);
-                                                enet_packet_destroy(event.packet);
-                                                break;
-                                        }
-                                        if(*packets[id]) {
-                                                log_debug("Packet id %i", id);
-                                                (*packets[id])(event.packet->data + 1, event.packet->dataLength - 1);
-                                        } else {
-                                                log_error("Invalid packet id %i, length: %i", id, (int)event.packet->dataLength - 1);
-                                        }
-                                        register_demo_packet(event.packet);
-                                        network_received_packets++;
-                                        enet_packet_destroy(event.packet);
-                                        break;
-                                }
-                                case ENET_EVENT_TYPE_DISCONNECT:
-                                        // In case we're disconnected for using the wrong protocol, don't return to HUD just yet
-                                        if(event.data != 3) {
-                                                hud_change(&hud_serverlist);
-                                                chat_showpopup(network_reason_disconnect(event.data), 10.0F, rgb(255, 0, 0));
-                                        }
-
-                                        log_error("server disconnected! reason: %s", network_reason_disconnect(event.data));
-                                        event.peer->data = NULL;
-                                        network_connected = 0;
-                                        network_logged_in = 0;
-                                        network_map_transfer_end = 0;
-                                        player_clear_corpses();
-                                        bloodmarks_clear();
-                                        damagenumbers_clear();
-                                        return 0;
-                        }
-                }
+                network_service();
+                /* a disconnect processed above clears network_connected;
+                   preserve the old early-exit behavior */
+                if(!network_connected)
+                        return 0;
 
                 if(network_logged_in && players[local_player_id].team != TEAM_SPECTATOR && players[local_player_id].alive) {
                         if(players[local_player_id].input.keys.packed != network_keys_last) {
@@ -1450,11 +1513,23 @@ int network_update() {
                                 network_tool_last = players[local_player_id].held_item;
                         }
 
-                        if(window_time() - network_pos_update > 1.0F
+                        /* IMPORTANT (verified in pyspades/piqueserver source,
+                           MAX_POSITION_RATE = 0.7): PositionData arriving less
+                           than 0.7 s after the previous one is rejected by the
+                           server AND punished with a rubberband correction,
+                           with the rate window restarting on every arrival.
+                           The report interval therefore must never go near
+                           that floor: ~0.85-0.90 s with jitter (enough margin
+                           above 0.7 s even with network timing noise). */
+                        static float network_pos_interval = 0.9F;
+                        float pos_threshold = settings.net_fast_position ? network_pos_interval : 1.0F;
+                        if(window_time() - network_pos_update > pos_threshold
                            && distance3D(network_pos_last.x, network_pos_last.y, network_pos_last.z, players[local_player_id].pos.x,
                                                          players[local_player_id].pos.y, players[local_player_id].pos.z)
                                    > 0.01F) {
                                 network_pos_update = window_time();
+                                /* 0.85..0.90 s, re-randomized per report */
+                                network_pos_interval = 0.85F + 0.05F * ((float)rand() / (float)RAND_MAX);
                                 memcpy(&network_pos_last, &players[local_player_id].pos, sizeof(struct Position));
                                 struct PacketPositionData pos;
                                 pos.x = players[local_player_id].pos.x;
@@ -1473,9 +1548,26 @@ int network_update() {
                                 orient.x = players[local_player_id].orientation.x;
                                 orient.y = players[local_player_id].orientation.z;
                                 orient.z = -players[local_player_id].orientation.y;
-                                network_send(PACKET_ORIENTATIONDATA_ID, &orient, sizeof(orient));
+                                /* Orientation is latest-wins data: sending it
+                                   unsequenced (unreliable, drop-old) avoids
+                                   reliable-stream stalls on lossy links. The
+                                   server itself uses UNSEQUENCED for its
+                                   WorldUpdates, so this is fully compatible.
+                                   ENET_PACKET_FLAG_UNSEQUENCED is an enum
+                                   constant (not a macro) in every ENet since
+                                   1.2, so it is always available here. */
+                                network_send_flags(PACKET_ORIENTATIONDATA_ID, &orient, sizeof(orient),
+                                                   settings.net_unsequenced_orient ? ENET_PACKET_FLAG_UNSEQUENCED
+                                                                                   : ENET_PACKET_FLAG_RELIABLE);
                         }
                 }
+
+                /* Push outgoing packets onto the socket immediately instead
+                   of letting them sit queued until the next frame's service
+                   call (up to one full frame of self-inflicted latency on
+                   every input/position/orientation change). */
+                if(settings.net_early_opt)
+                        enet_host_flush(client);
         }
 
         chunk_queue_blocks();

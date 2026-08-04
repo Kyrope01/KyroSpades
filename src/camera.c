@@ -102,15 +102,19 @@ float camera_fov_scaled(float dt) {
 }
 
 void camera_overflow_adjust() {
-	// Only clamp pitch in FPS mode, not in spectator mode (for FPV-style free rotation)
-	if(camera_mode == CAMERAMODE_FPS) {
-		if(camera_rot_y < EPSILON) {
-			camera_rot_y = EPSILON;
-		}
+	/* Pitch is clamped to just under +-90 degrees in EVERY mode now.
+	   Spectator used to allow pitch past the pole ("FPV-style free
+	   rotation"): the auto-upright view flip at the pole made screen up
+	   and screen right swap sides, so mouse-Y and A/D inverted while the
+	   view itself stayed upright. Over-the-pole spectator angles are
+	   instead reached with camera roll (drone-style flip), which keeps
+	   the input mapping consistent in every orientation. */
+	if(camera_rot_y < EPSILON) {
+		camera_rot_y = EPSILON;
+	}
 
-		if(camera_rot_y > 3.14F) {
-			camera_rot_y = 3.14F;
-		}
+	if(camera_rot_y > 3.14F) {
+		camera_rot_y = 3.14F;
 	}
 
 	if(camera_rot_x > DOUBLEPI) {

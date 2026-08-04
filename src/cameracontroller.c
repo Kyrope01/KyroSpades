@@ -28,6 +28,7 @@
 #include "cameracontroller.h"
 #include "hud.h"
 #include "config.h"
+#include "demo.h"
 
 int cameracontroller_bodyview_mode = 0;
 int cameracontroller_bodyview_player = 0;
@@ -37,7 +38,50 @@ float cameracontroller_bodyview_zoom = 0.0F;
 // Smooth crouch interpolation for local player
 static float crouch_offset = 0.0F;
 static float target_crouch_offset = 0.0F;
-void cameracontroller_add_shake(float intensity) { }
+/* Camera-position offset while crouching (crouch_instant mode): the
+   collision state changes instantly (server parity), this eases only
+   the camera toward the new height. */
+static float crouch_cam_offset = 0.0F;
+
+/* Vertical lag applied to the first-person gun on top of the rendered
+   camera (viewmodel anchor, see player_render). */
+float cameracontroller_gunlag_y = 0.0F;
+/* Smoothed vertical velocity for that lag. The legacy trick
+   (last_cy = eye.y - vel.y*0.4) consumes the raw 60 Hz tick velocity,
+   which is steppy by nature: gravity bumps it every tick, jumping is an
+   instant impulse and landing slams it to zero in one tick. With the
+   camera now interpolated/smoothed, that quantization showed up as the
+   gun jolting relative to the camera exactly at jumps and landings.
+   Low-passing the velocity keeps the identical lag magnitude and feel,
+   but makes it continuous; tick rate no longer leaks into the views. */
+static float gunlag_vel_smooth = 0.0F;
+
+/* Camera shake (view-only, applied after aim rays are computed) */
+static float cam_shake_value = 0.0F;
+void cameracontroller_add_shake(float intensity) {
+	if(!settings.camera_shake)
+		return;
+	cam_shake_value += intensity;
+	if(cam_shake_value > 1.25F)
+		cam_shake_value = 1.25F;
+}
+
+/* Landing dip (view-only): instant drop, exponential recovery */
+static float cam_land_dip = 0.0F;
+void cameracontroller_land_dip(float strength) {
+	if(!settings.land_dip)
+		return;
+	cam_land_dip += strength;
+	if(cam_land_dip > 0.3F)
+		cam_land_dip = 0.3F;
+}
+
+/* First-person view bob (view-only) */
+static float cam_bob_phase = 0.0F;
+static float cam_bob_strength = 0.0F;
+
+/* adaptive correction-blend decay rate (network.c) */
+extern float network_correction_rate(void);
 
 
 float cameracontroller_death_velocity_x, cameracontroller_death_velocity_y, cameracontroller_death_velocity_z;
@@ -51,6 +95,13 @@ void cameracontroller_death_init(int player, float x, float y, float z) {
 
 	cameracontroller_bodyview_player = player;
 	cameracontroller_bodyview_zoom = 0.0F;
+
+	/* clear feel-state left over from FPS mode */
+	view_offset.x = view_offset.y = view_offset.z = 0.0F;
+	cam_shake_value = 0.0F;
+	cam_bob_strength = 0.0F;
+	crouch_cam_offset = 0.0F;
+	gunlag_vel_smooth = 0.0F;
 }
 
 void cameracontroller_death(float dt) {
@@ -128,15 +179,42 @@ void cameracontroller_fps(float dt) {
 		if(players[local_player_id].input.keys.crouch && !window_key_down(WINDOW_KEY_CROUCH)
 		   && player_uncrouch(&players[local_player_id])) {
 			players[local_player_id].input.keys.crouch = 0;
+			if(settings.crouch_instant) {
+				/* player_uncrouch raised the feet instantly (server parity);
+				   ease only the camera up. */
+				if(settings.disable_dynamic_fov)
+					crouch_cam_offset = 0.0F;
+				else
+					crouch_cam_offset -= 0.9F;
+				player_prev_snap(local_player_id);
+			}
 		}
 
+		if(settings.crouch_instant) {
+			/* Collision state changes instantly with the key -- identical to
+			   the server's set_crouch, which shifts the feet by 0.9
+			   unconditionally (even mid-air). Only the camera ease remains. */
+			if(window_key_down(WINDOW_KEY_CROUCH)
+			   && !players[local_player_id].input.keys.crouch) {
+				players[local_player_id].pos.y -= 0.9F;
+				players[local_player_id].physics.eye.y -= 0.9F;
+				last_cy -= 0.9F;
+				if(settings.disable_dynamic_fov)
+					crouch_cam_offset = 0.0F;
+				else
+					crouch_cam_offset += 0.9F;
+				player_prev_snap(local_player_id);
+			}
+			if(window_key_down(WINDOW_KEY_CROUCH))
+				players[local_player_id].input.keys.crouch = 1;
+		} else {
 		if(window_key_down(WINDOW_KEY_CROUCH)) {
 			// Smooth crouch transition with interpolation
 			target_crouch_offset = 0.9F;
 		} else {
 			target_crouch_offset = 0.0F;
 		}
-		
+
 		if(settings.disable_dynamic_fov) {
 			crouch_offset = target_crouch_offset;
 		} else {
@@ -144,7 +222,7 @@ void cameracontroller_fps(float dt) {
 			float crouch_lerp_speed = 40.0F * dt;
 			crouch_offset = crouch_offset + (target_crouch_offset - crouch_offset) * fminf(crouch_lerp_speed, 1.0F);
 		}
-		
+
 		// Apply smooth crouch offset to player position and eye
 		if(window_key_down(WINDOW_KEY_CROUCH)) {
 			// following if-statement disables smooth crouching on local player
@@ -163,6 +241,7 @@ void cameracontroller_fps(float dt) {
 				}
 			}
 		}
+		}
 
 		/* Crouch and sprint are mutually exclusive. This is especially
 		   important for touch/controller movement, where the virtual stick can
@@ -179,9 +258,79 @@ void cameracontroller_fps(float dt) {
 		}
 	}
 
-	camera_x = players[local_player_id].physics.eye.x;
-	camera_y = players[local_player_id].physics.eye.y + player_height(&players[local_player_id]);
-	camera_z = players[local_player_id].physics.eye.z;
+	/* View-only offset decays. The fast loop runs in substeps whose dts
+	   sum to the frame time, and exp() composes exactly across them. */
+	float decay_corr = expf(-dt * network_correction_rate());
+	view_offset.x *= decay_corr;
+	view_offset.y *= decay_corr;
+	view_offset.z *= decay_corr;
+	if(fabsf(view_offset.x) < 0.001F && fabsf(view_offset.y) < 0.001F && fabsf(view_offset.z) < 0.001F) {
+		view_offset.x = view_offset.y = view_offset.z = 0.0F;
+	}
+	cam_land_dip *= expf(-dt * 7.5F);
+	cam_shake_value *= expf(-dt * 5.0F);
+	if(crouch_cam_offset != 0.0F) {
+		crouch_cam_offset += (0.0F - crouch_cam_offset) * fminf(40.0F * dt, 1.0F);
+		if(fabsf(crouch_cam_offset) < 0.001F)
+			crouch_cam_offset = 0.0F;
+	}
+
+	/* Partial-tick interpolation of the 60 Hz physics (Minecraft-style):
+	   the camera renders between the previous and the current tick. */
+	if(settings.render_interpolation) {
+		camera_x = players[local_player_id].prev_eye.x
+			+ (players[local_player_id].physics.eye.x - players[local_player_id].prev_eye.x) * physics_tick_alpha;
+		camera_y = players[local_player_id].prev_eye.y
+			+ (players[local_player_id].physics.eye.y - players[local_player_id].prev_eye.y) * physics_tick_alpha;
+		camera_z = players[local_player_id].prev_eye.z
+			+ (players[local_player_id].physics.eye.z - players[local_player_id].prev_eye.z) * physics_tick_alpha;
+	} else {
+		camera_x = players[local_player_id].physics.eye.x;
+		camera_y = players[local_player_id].physics.eye.y;
+		camera_z = players[local_player_id].physics.eye.z;
+	}
+
+	/* Gun lag = the legacy -0.4*vel.y offset... except the engine's
+	   VERTICAL axis is z (jump impulse and landing/fall detection both
+	   use velocity.z; y is a horizontal map-plane axis). The legacy code
+	   lagged a HORIZONTAL axis into the vertical gun offset - authentic
+	   historical bug. Lag the true vertical velocity instead:
+	   +z is down (falling = positive vel.z), so falling gives a positive
+	   offset -> the gun visibly stays up relative to the dropping eye.
+	   Smoothed so it never quantizes to the 60 Hz tick. */
+	gunlag_vel_smooth += (players[local_player_id].physics.velocity.z - gunlag_vel_smooth)
+						 * fminf(dt * 18.0F, 1.0F);
+	cameracontroller_gunlag_y = 0.4F * gunlag_vel_smooth;
+
+	if(settings.net_smooth_corrections) {
+		/* smoothed server position corrections (rubberband hiding) */
+		camera_x += view_offset.x;
+		camera_y += view_offset.y;
+		camera_z += view_offset.z;
+	}
+	if(settings.crouch_instant)
+		camera_y += crouch_cam_offset;
+	if(settings.land_dip)
+		camera_y -= cam_land_dip;
+
+	camera_y += player_height(&players[local_player_id]);
+
+	/* View bob phase advance (render-only effect; applied in
+	   cameracontroller_fps_render so aim rays stay unaffected) */
+	if(settings.view_bob) {
+		/* horizontal plane is x,y -- z is the VERTICAL axis here */
+		float hsp = hypotf(players[local_player_id].physics.velocity.x,
+						   players[local_player_id].physics.velocity.y) * 32.0F;
+		float target = (!players[local_player_id].physics.airborne && hsp > 0.4F)
+			? fminf(hsp / 8.0F, 1.25F) * 0.8F : 0.0F;
+		cam_bob_strength += (target - cam_bob_strength) * fminf(dt * 8.0F, 1.0F);
+		if(target > 0.0F)
+			/* ~2.8-4.8 Hz: head-bob territory, NOT a buzz (the old rate
+			   reached ~8.5 Hz lateral + 17 Hz vertical - vibrated). */
+			cam_bob_phase += dt * (2.8F + 2.0F * target);
+	} else {
+		cam_bob_strength = 0.0F;
+	}
 
 	if(players[local_player_id].input.keys.sprint && chat_input_mode == CHAT_NO_INPUT) {
 		players[local_player_id].item_disabled = window_time();
@@ -225,10 +374,21 @@ void cameracontroller_fps(float dt) {
 	players[local_player_id].orientation_smooth.y = ly;
 	players[local_player_id].orientation_smooth.z = lz;
 
-	float len = sqrt(lx * lx + ly * ly + lz * lz);
-	players[local_player_id].orientation.x = lx / len;
-	players[local_player_id].orientation.y = ly / len;
-	players[local_player_id].orientation.z = lz / len;
+	if(settings.raw_aim) {
+		/* 1:1 aim: the orientation used for movement, shots and network
+		   sync follows the camera exactly (no artificial low-pass filter).
+		   The smoothed copy above stays alive for cosmetic uses only
+		   (arm sway, third-person model). sin()/cos() are normalized by
+		   construction. */
+		players[local_player_id].orientation.x = sin(camera_rot_x) * sin(camera_rot_y);
+		players[local_player_id].orientation.y = cos(camera_rot_y);
+		players[local_player_id].orientation.z = cos(camera_rot_x) * sin(camera_rot_y);
+	} else {
+		float len = sqrt(lx * lx + ly * ly + lz * lz);
+		players[local_player_id].orientation.x = lx / len;
+		players[local_player_id].orientation.y = ly / len;
+		players[local_player_id].orientation.z = lz / len;
+	}
 
 	camera_vx = players[local_player_id].physics.velocity.x;
 	camera_vy = players[local_player_id].physics.velocity.y;
@@ -236,8 +396,37 @@ void cameracontroller_fps(float dt) {
 }
 
 void cameracontroller_fps_render() {
-	matrix_lookAt(matrix_view, camera_x, camera_y, camera_z, camera_x + sin(camera_rot_x) * sin(camera_rot_y),
-				  camera_y + cos(camera_rot_y), camera_z + cos(camera_rot_x) * sin(camera_rot_y), 0.0F, 1.0F, 0.0F);
+	/* These are RENDER-ONLY modifiers: camera_x/y/z and camera_rot_x/y
+	   keep their gameplay-exact values (aim rays, block/grenade picks,
+	   hit tests are computed from the unmodified globals). */
+	float ex = camera_x, ey = camera_y, ez = camera_z;
+	float rx = camera_rot_x, ry = camera_rot_y;
+
+	if(settings.view_bob && cam_bob_strength > 0.001F) {
+		/* Single-frequency quadrature ellipse (lat = cos, up = sin): one
+		   smooth circular sway at walking cadence. The previous version
+		   ran the vertical axis at 2x the phase frequency, which turns
+		   into visible high-frequency vibration at high frame rates. */
+		float lat = cosf(cam_bob_phase) * 0.045F * cam_bob_strength;
+		float up = sinf(cam_bob_phase) * 0.032F * cam_bob_strength;
+		/* yaw-right vector: derivative of (sin rx, cos rx) is (cos rx, -sin rx) */
+		ex += cosf(rx) * lat;
+		ez -= sinf(rx) * lat;
+		ey += up;
+	}
+
+	if(settings.camera_shake && cam_shake_value > 0.0001F) {
+		/* smooth sum-of-sines wobble; amplitude mix tuned so a single
+		   rifle shot is a readable nudge and close explosions a real
+		   wallop (the original pure-quadratic 0.006 was sub-perceptual) */
+		float t = game_time();
+		float amp = cam_shake_value * cam_shake_value * 0.02F + cam_shake_value * 0.012F;
+		rx += (sinf(t * 137.0F) + 0.5F * sinf(t * 311.0F)) * amp;
+		ry += (sinf(t * 181.0F + 1.3F) + 0.5F * sinf(t * 271.0F + 0.4F)) * amp * 0.8F;
+	}
+
+	matrix_lookAt(matrix_view, ex, ey, ez, ex + sin(rx) * sin(ry), ey + cos(ry), ez + cos(rx) * sin(ry),
+				  0.0F, 1.0F, 0.0F);
 }
 
 // Spectator camera velocity with smooth acceleration/deceleration
@@ -264,7 +453,6 @@ void cameracontroller_spectator(float dt) {
 	// Use setting for accel/decel rates (with sensible defaults if not set)
 	float spec_accel = settings.spectator_acceleration > 0.0F ? settings.spectator_acceleration : 80.0F;
 	float spec_decel = spec_accel * 0.75F;  // Deceleration is 75% of acceleration
-	float spec_damping = 0.9F;              // Velocity damping factor
 	aabb_set_center(&camera, camera_x, camera_y - camera_eye_height, camera_z);
 
 	float input_x = 0.0F, input_y = 0.0F, input_z = 0.0F;
@@ -371,35 +559,34 @@ void cameracontroller_spectator(float dt) {
 		input_z /= input_len;
 	}
 
-	// Smoothly accelerate/decelerate towards target velocity
-	if(target_speed > 0.0F) {
-		// Accelerate towards target velocity
-		float current_speed = sqrt(spec_vel_x * spec_vel_x + spec_vel_y * spec_vel_y + spec_vel_z * spec_vel_z);
-		float speed_diff = target_speed - current_speed;
-		
-		if(speed_diff > 0.0F) {
-			// Accelerating
-			float accel = spec_accel * dt;
-			if(accel > speed_diff) accel = speed_diff;
-			current_speed += accel;
-		} else {
-			// Decelerating (when changing direction)
-			float decel = spec_decel * dt;
-			if(decel > -speed_diff) decel = -speed_diff;
-			current_speed += decel;
-		}
-		
-		// Apply new speed in the input direction
-		spec_vel_x = input_x * current_speed;
-		spec_vel_y = input_y * current_speed;
-		spec_vel_z = input_z * current_speed;
-	} else {
-		// No input - apply damping for smooth deceleration
-		spec_vel_x *= spec_damping;
-		spec_vel_y *= spec_damping;
-		spec_vel_z *= spec_damping;
-		
-		// Stop completely when velocity is very small
+	/* Ease the whole velocity VECTOR toward the target velocity, instead
+	   of only scaling the speed and slamming it onto the new input
+	   direction every frame (the old code redirected ALL momentum
+	   instantly, so strafing while flying forward snapped straight onto
+	   the diagonal). Direction changes now swing smoothly: accelerating,
+	   braking and turning all use the same rate-limited approach, and it
+	   is frame-time scaled so it behaves identically at any frame rate. */
+	float target_vel_x = input_x * target_speed;
+	float target_vel_y = input_y * target_speed;
+	float target_vel_z = input_z * target_speed;
+
+	float dv_x = target_vel_x - spec_vel_x;
+	float dv_y = target_vel_y - spec_vel_y;
+	float dv_z = target_vel_z - spec_vel_z;
+	float dv_len = sqrt(dv_x * dv_x + dv_y * dv_y + dv_z * dv_z);
+
+	if(dv_len > 0.0001F) {
+		float rate = (target_speed > 0.0F) ? spec_accel : spec_decel;
+		float step = rate * dt;
+		if(step > dv_len)
+			step = dv_len;
+		spec_vel_x += dv_x / dv_len * step;
+		spec_vel_y += dv_y / dv_len * step;
+		spec_vel_z += dv_z / dv_len * step;
+	}
+
+	// Stop completely when drifting with no input and velocity is tiny
+	if(target_speed == 0.0F) {
 		if(fabs(spec_vel_x) < 0.01F) spec_vel_x = 0.0F;
 		if(fabs(spec_vel_y) < 0.01F) spec_vel_y = 0.0F;
 		if(fabs(spec_vel_z) < 0.01F) spec_vel_z = 0.0F;

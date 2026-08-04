@@ -168,6 +168,24 @@ extern struct Player {
 		char feet_cylce;
 		float tool_started;
 	} sound;
+
+	/* Previous fixed-tick state, used by the render interpolation
+	   (partial ticks, Minecraft-style). Snapshotted by
+	   player_snapshot_prev() right before every 60 Hz physics tick. */
+	struct Position prev_pos, prev_eye;
+
+	/* Correction blending: when the server repositions this player,
+	   the simulation snaps to the authoritative value instantly but the
+	   RENDERED position keeps this decaying offset so the on-screen
+	   motion glides instead of teleporting (Source-style error
+	   smoothing, view-only). */
+	struct Position net_offset;
+
+	/* Last authoritative position received for this player
+	   (WorldUpdate) + arrival time, for velocity refresh and
+	   adaptive blending. */
+	struct Position server_pos;
+	float server_pos_time;
 } players[PLAYERS_MAX];
 // pyspades/pysnip/piqueserver sometimes uses ids that are out of range
 
@@ -189,6 +207,16 @@ void player_on_held_item_change(struct Player* p);
 int player_can_spectate(struct Player* p);
 float player_section_height(int section);
 void player_init(void);
+
+/* Render interpolation / correction blending (movement feel) */
+extern float physics_tick_alpha;        /* 0..1 fraction into the current physics tick */
+extern struct Position view_offset;     /* decaying camera offset for the local player */
+void player_snapshot_prev(void);        /* call right before every fixed physics tick */
+void player_prev_snap(int id);          /* discard interpolation history (teleports/spawns) */
+void player_render_interpolate_begin(void);
+void player_render_interpolate_end(void);
+void player_net_correct(int id, float nx, float ny, float nz); /* remote players */
+void player_local_correct(float nx, float ny, float nz);       /* local player (view_offset) */
 float player_height(const struct Player* p);
 float player_height2(const struct Player* p);
 void player_reposition(struct Player* p);

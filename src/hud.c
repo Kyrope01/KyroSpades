@@ -3126,6 +3126,7 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
                                         players[local_player_id].pos.x = 256.0F;
                                         players[local_player_id].pos.y = 63.0F;
                                         players[local_player_id].pos.z = 256.0F;
+                                        player_prev_snap(local_player_id);
                                 }
                         }
 
@@ -4274,6 +4275,7 @@ static void server_c(char* address, char* name) {
                 players[local_player_id].pos.x = map_size_x / 2.0F;
                 players[local_player_id].pos.y = map_size_y - 1.0F;
                 players[local_player_id].pos.z = map_size_z / 2.0F;
+                player_prev_snap(local_player_id);
                 window_title(address);
                 hud_change(&hud_ingame);
         } else {

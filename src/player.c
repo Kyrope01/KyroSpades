@@ -266,6 +266,7 @@ void player_init() {
 	for(int k = 0; k < PLAYERS_MAX; k++) {
 		player_reset(&players[k]);
 		players[k].score = 0;
+		player_prev_snap(k);
 	}
 	player_clear_corpses();
 }
@@ -287,6 +288,8 @@ void player_reset(struct Player* p) {
 	p->physics.wade = 0;
 	p->input.keys.packed = 0;
 	p->input.buttons.packed = 0;
+	p->net_offset.x = p->net_offset.y = p->net_offset.z = 0.0F;
+	p->server_pos_time = 0.0F;
 }
 
 void player_on_held_item_change(struct Player* p) {
@@ -471,6 +474,178 @@ int player_intersection_choose(struct player_intersection* s, float* dist) {
 	return type;
 }
 
+/* ------------------------------------------------------------------ */
+/* Movement-feel: render interpolation (partial ticks) and correction  */
+/* blending. All of this is view-only: the simulation remains identical*/
+/* to the 60 Hz server-side physics, only what is drawn is smoothed.   */
+/* ------------------------------------------------------------------ */
+
+struct Position view_offset = {0.0F, 0.0F, 0.0F};
+
+/* provided by network.c (adaptive blend rate from WorldUpdate cadence) */
+extern float network_correction_rate(void);
+
+static struct Position interp_saved_pos[PLAYERS_MAX];
+static struct Position interp_saved_eye[PLAYERS_MAX];
+static int interp_active = 0;
+
+void player_snapshot_prev(void) {
+	for(int k = 0; k < PLAYERS_MAX; k++)
+		if(players[k].connected) {
+			players[k].prev_pos = players[k].pos;
+			players[k].prev_eye = players[k].physics.eye;
+		}
+}
+
+void player_prev_snap(int id) {
+	struct Player* p = &players[id];
+	p->prev_pos = p->pos;
+	p->prev_eye = p->physics.eye;
+	p->net_offset.x = p->net_offset.y = p->net_offset.z = 0.0F;
+}
+
+/* Reposition the player model state to interpolated values for the
+   duration of the world render, then restore. This catches every
+   consumer (models, nametags, shadows, FPV gun) without touching the
+   simulation state used by game logic. */
+void player_render_interpolate_begin(void) {
+	if(interp_active)
+		return;
+	/* Needed when EITHER feature is on: the correction-blend offset is
+	   consumed here at render time even when tick interpolation is off
+	   (alpha = 1.0 keeps the player's current sim position + offset). */
+	if(!settings.render_interpolation && !settings.net_smooth_corrections)
+		return;
+	interp_active = 1;
+	float alpha = settings.render_interpolation ? physics_tick_alpha : 1.0F;
+	for(int k = 0; k < PLAYERS_MAX; k++) {
+		if(!players[k].connected)
+			continue;
+		struct Player* p = &players[k];
+		interp_saved_pos[k] = p->pos;
+		interp_saved_eye[k] = p->physics.eye;
+		p->pos.x = p->prev_pos.x + (p->pos.x - p->prev_pos.x) * alpha + p->net_offset.x;
+		p->pos.y = p->prev_pos.y + (p->pos.y - p->prev_pos.y) * alpha + p->net_offset.y;
+		p->pos.z = p->prev_pos.z + (p->pos.z - p->prev_pos.z) * alpha + p->net_offset.z;
+		p->physics.eye.x = p->prev_eye.x + (interp_saved_eye[k].x - p->prev_eye.x) * alpha + p->net_offset.x;
+		p->physics.eye.y = p->prev_eye.y + (interp_saved_eye[k].y - p->prev_eye.y) * alpha + p->net_offset.y;
+		p->physics.eye.z = p->prev_eye.z + (interp_saved_eye[k].z - p->prev_eye.z) * alpha + p->net_offset.z;
+	}
+}
+
+void player_render_interpolate_end(void) {
+	if(!interp_active)
+		return;
+	for(int k = 0; k < PLAYERS_MAX; k++) {
+		if(!players[k].connected)
+			continue;
+		players[k].pos = interp_saved_pos[k];
+		players[k].physics.eye = interp_saved_eye[k];
+	}
+	interp_active = 0;
+}
+
+/* Server-driven repositioning of a REMOTE player (WorldUpdate / relayed
+   position). The simulation state is corrected instantly so subsequent
+   input-driven prediction stays truthful; only the rendered position is
+   kept continuous via net_offset. */
+void player_net_correct(int k, float nx, float ny, float nz) {
+	struct Player* p = &players[k];
+	float dx = nx - p->pos.x, dy = ny - p->pos.y, dz = nz - p->pos.z;
+	float d2 = dx * dx + dy * dy + dz * dz;
+	float now = window_time();
+
+	/* Velocity refresh: estimate actual velocity from consecutive
+	   authoritative positions (helps footstep timing and extrapolation
+	   during update gaps). Skipped on teleports. */
+	if(d2 < 25.0F && p->server_pos_time > 0.0F) {
+		float dtw = now - p->server_pos_time;
+		if(dtw > 0.05F) {
+			float vx = (nx - p->server_pos.x) / dtw / 32.0F;
+			float vy = (ny - p->server_pos.y) / dtw / 32.0F;
+			float vz = (nz - p->server_pos.z) / dtw / 32.0F;
+			if(vx * vx + vy * vy + vz * vz < 2.25F) { /* cap: 1.5/s internal */
+				p->physics.velocity.x = vx;
+				p->physics.velocity.y = vy;
+				p->physics.velocity.z = vz;
+			}
+		}
+	}
+	p->server_pos.x = nx;
+	p->server_pos.y = ny;
+	p->server_pos.z = nz;
+	p->server_pos_time = now;
+
+	if(d2 > 25.0F || !settings.net_smooth_corrections) {
+		/* > 5 blocks: genuine teleport (spawn/admin move) -- snap everything */
+		p->pos.x = nx;
+		p->pos.y = ny;
+		p->pos.z = nz;
+		p->physics.eye.x = nx;
+		p->physics.eye.y = ny;
+		p->physics.eye.z = nz;
+		player_prev_snap(k);
+		return;
+	}
+
+	/* capture the current on-screen position the same way the render
+	   interpolation computes it, then absorb the whole jump into the
+	   decaying render offset so the transition is invisible */
+	float alpha = settings.render_interpolation ? physics_tick_alpha : 1.0F;
+	float rx = p->prev_pos.x + (p->pos.x - p->prev_pos.x) * alpha + p->net_offset.x;
+	float ry = p->prev_pos.y + (p->pos.y - p->prev_pos.y) * alpha + p->net_offset.y;
+	float rz = p->prev_pos.z + (p->pos.z - p->prev_pos.z) * alpha + p->net_offset.z;
+
+	p->pos.x = nx;
+	p->pos.y = ny;
+	p->pos.z = nz;
+	p->physics.eye.x = nx;
+	p->physics.eye.y = ny;
+	p->physics.eye.z = nz;
+	p->prev_pos = p->pos;
+	p->prev_eye = p->physics.eye;
+
+	p->net_offset.x = rx - nx;
+	p->net_offset.y = ry - ny;
+	p->net_offset.z = rz - nz;
+}
+
+/* Server-forced position correction of the LOCAL player (the classic
+   rubberband). Simulation snaps to the authoritative position (keeping
+   prediction truthful) while the camera keeps a decaying offset. */
+void player_local_correct(float nx, float ny, float nz) {
+	struct Player* p = &players[local_player_id];
+	float dx = nx - p->pos.x, dy = ny - p->pos.y, dz = nz - p->pos.z;
+	float d2 = dx * dx + dy * dy + dz * dz;
+
+	if(d2 > 25.0F || !settings.net_smooth_corrections || !p->alive) {
+		p->pos.x = nx;
+		p->pos.y = ny;
+		p->pos.z = nz;
+		player_prev_snap(local_player_id);
+		view_offset.x = view_offset.y = view_offset.z = 0.0F;
+		return;
+	}
+
+	float alpha = settings.render_interpolation ? physics_tick_alpha : 1.0F;
+	float rx = p->prev_eye.x + (p->physics.eye.x - p->prev_eye.x) * alpha + view_offset.x;
+	float ry = p->prev_eye.y + (p->physics.eye.y - p->prev_eye.y) * alpha + view_offset.y;
+	float rz = p->prev_eye.z + (p->physics.eye.z - p->prev_eye.z) * alpha + view_offset.z;
+
+	p->pos.x = nx;
+	p->pos.y = ny;
+	p->pos.z = nz;
+	p->physics.eye.x = nx;
+	p->physics.eye.y = ny;
+	p->physics.eye.z = nz;
+	p->prev_pos = p->pos;
+	p->prev_eye = p->physics.eye;
+
+	view_offset.x = rx - nx;
+	view_offset.y = ry - ny;
+	view_offset.z = rz - nz;
+}
+
 void player_update(float dt, int locked) {
 	/* dt is identical for every player in this call, so the smoothing
 	   exponents below are loop-invariant -- compute them once instead of
@@ -479,6 +654,10 @@ void player_update(float dt, int locked) {
 	   of pow() (double) since all operands here are float anyway. */
 	const float smooth_decay = powf(0.9F, dt * 60.0F);
 	const float smooth_gain = powf(0.1F, dt * 60.0F);
+
+	/* Correction-blend decay rate (adaptive to measured WorldUpdate
+	   cadence). exp() composes exactly across the small fast-loop steps. */
+	float off_decay = expf(-dt * network_correction_rate());
 
 	for(int k = 0; k < PLAYERS_MAX; k++) {
 		if(players[k].connected) {
@@ -493,6 +672,17 @@ void player_update(float dt, int locked) {
 						+ players[k].orientation.y * smooth_gain;
 					players[k].orientation_smooth.z = players[k].orientation_smooth.z * smooth_decay
 						+ players[k].orientation.z * smooth_gain;
+
+					// decay correction-blend offset (view-only)
+					players[k].net_offset.x *= off_decay;
+					players[k].net_offset.y *= off_decay;
+					players[k].net_offset.z *= off_decay;
+					if(fabsf(players[k].net_offset.x) < 0.001F
+					   && fabsf(players[k].net_offset.y) < 0.001F
+					   && fabsf(players[k].net_offset.z) < 0.001F) {
+						players[k].net_offset.x = players[k].net_offset.y = players[k].net_offset.z
+							= 0.0F;
+					}
 				}
 			}
 		}
@@ -1066,7 +1256,18 @@ void player_render(struct Player* p, int id) {
 	}
 
 	matrix_push(matrix_model);
-	matrix_translate(matrix_model, p->physics.eye.x, p->physics.eye.y + height, p->physics.eye.z);
+	if(id == local_player_id && camera_mode == CAMERAMODE_FPS) {
+		/* Anchor the first-person viewmodel to the RENDERED camera instead
+		   of the raw simulated eye. camera_x/y/z already contain the
+		   interpolated eye, player_height and every view-only easer
+		   (correction smoothing, crouch ease, landing dip); gunlag_y keeps
+		   the legacy last_cy vertical gun lag on top. Without this, the gun
+		   stayed at the sim position while the camera glided after server
+		   corrections -> the viewmodel visibly vibrated on laggy servers. */
+		matrix_translate(matrix_model, camera_x, camera_y + cameracontroller_gunlag_y, camera_z);
+	} else {
+		matrix_translate(matrix_model, p->physics.eye.x, p->physics.eye.y + height, p->physics.eye.z);
+	}
 	if(!render_fpv)
 		matrix_translate(matrix_model, 0.0F, p->input.keys.crouch * 0.1F - 0.1F * 2, 0.0F);
 	matrix_pointAt(matrix_model, ox, oy, oz);
@@ -1503,6 +1704,10 @@ int player_move(struct Player* p, float fsynctics, int id) {
 		// slow down on landing
 		p->physics.velocity.x *= 0.5F;
 		p->physics.velocity.y *= 0.5F;
+
+		// view-only landing dip, scaled by fall speed (local player only)
+		if(local && settings.land_dip)
+			cameracontroller_land_dip(fminf((f2 - FALL_SLOW_DOWN) * 0.65F, 0.34F));
 
 		// return fall damage
 		if(f2 > FALL_DAMAGE_VELOCITY) {

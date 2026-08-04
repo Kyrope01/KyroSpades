@@ -386,6 +386,17 @@ void weapon_shoot() {
 
 	camera_overflow_adjust();
 
+	/* small view-only kick on firing (does not touch aim: applied at the
+	   view-matrix level after all rays are computed) */
+	if(settings.camera_shake) {
+		switch(players[local_player_id].weapon) {
+			case WEAPON_RIFLE: cameracontroller_add_shake(0.16F); break;
+			case WEAPON_SMG: cameracontroller_add_shake(0.08F); break;
+			case WEAPON_SHOTGUN: cameracontroller_add_shake(0.28F); break;
+			default: break;
+		}
+	}
+
 	sound_create(SOUND_LOCAL, weapon_sound(players[local_player_id].weapon), players[local_player_id].pos.x,
 				 players[local_player_id].pos.y, players[local_player_id].pos.z);
 	particle_create_casing(&players[local_player_id]);

@@ -139,6 +139,18 @@ extern struct RENDER_OPTIONS {
         int replay_enabled;
         int replay_duration;
         int replay_save_hotkey;
+        /* ── Network smoothing / movement-feel (all client-side, view-only) ── */
+        int net_smooth_corrections;   /* blend server position corrections instead of hard-snapping */
+        int net_fast_position;        /* report position every ~0.85-0.9 s instead of every 1.0 s */
+        int net_early_opt;            /* service ENet at frame start + flush outgoing immediately */
+        int net_unsequenced_orient;   /* send orientation as unsequenced (drop-tolerant) packets */
+        int render_interpolation;     /* partial-tick interpolation of the 60 Hz physics tic */
+        int precise_pacing;           /* precise frame pacing for the software fps cap */
+        int raw_aim;                  /* 1:1 view orientation (no artificial low-pass filter) */
+        int crouch_instant;           /* instant crouch physics, camera eases separately */
+        int view_bob;                 /* subtle first-person view bob while walking */
+        int land_dip;                 /* small camera dip when landing from a fall */
+        int camera_shake;             /* camera shake from gunfire and explosions (view-only) */
         char audio_monitor_source[64];
 } settings, settings_tmp;
 

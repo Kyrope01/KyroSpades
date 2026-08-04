@@ -25,6 +25,7 @@ extern int cameracontroller_bodyview_mode;
 extern int cameracontroller_bodyview_player;
 extern int cameracontroller_yclamp;
 extern float cameracontroller_bodyview_zoom;
+extern float cameracontroller_gunlag_y; // last_cy minus rendered camera base (viewmodel anchor)
 
 void cameracontroller_reset_spectator_velocity(void);
 
@@ -40,6 +41,7 @@ void cameracontroller_selection(float dt);
 void cameracontroller_death(float dt);
 
 void cameracontroller_add_shake(float intensity);
+void cameracontroller_land_dip(float strength);
 void cameracontroller_fps_render(void);
 void cameracontroller_spectator_render(void);
 void cameracontroller_bodyview_render(void);

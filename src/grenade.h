@@ -27,6 +27,7 @@ struct Grenade {
 	float fuse_length;
 	float created;
 	struct Position pos;
+	struct Position prev_pos; /* position before the last fixed tick (render interpolation) */
 	struct Velocity velocity;
 };
 

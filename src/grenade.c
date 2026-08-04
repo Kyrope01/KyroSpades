@@ -32,6 +32,8 @@
 #include "config.h"
 #include "bloodmarks.h"
 #include "damagenumbers.h"
+#include "camera.h"
+#include "cameracontroller.h"
 
 struct entity_system grenades;
 
@@ -41,6 +43,7 @@ void grenade_init() {
 
 void grenade_add(struct Grenade* g) {
 	g->created = window_time();
+	g->prev_pos = g->pos; /* no interpolation history for a fresh grenade */
 
 	entitysys_add(&grenades, g);
 }
@@ -137,15 +140,21 @@ static int grenade_inwater(struct Grenade* g) {
 bool grenade_render_single(void* obj, void* user) {
 	struct Grenade* g = (struct Grenade*)obj;
 
+	/* partial-tick interpolation: render between previous and current tick */
+	float alpha = settings.render_interpolation ? physics_tick_alpha : 1.0F;
+	float rx = g->prev_pos.x + (g->pos.x - g->prev_pos.x) * alpha;
+	float ry = g->prev_pos.y + (g->pos.y - g->prev_pos.y) * alpha;
+	float rz = g->prev_pos.z + (g->pos.z - g->prev_pos.z) * alpha;
+
 	// TODO: position grenade on ground properly
 	matrix_push(matrix_model);
-	matrix_translate(matrix_model, g->pos.x,
-					 g->pos.y + (model_grenade.zpiv + model_grenade.zsiz * 2) * model_grenade.scale, g->pos.z);
+	matrix_translate(matrix_model, rx,
+					 ry + (model_grenade.zpiv + model_grenade.zsiz * 2) * model_grenade.scale, rz);
 	if(fabs(g->velocity.x) > 0.05F || fabs(g->velocity.y) > 0.05F || fabs(g->velocity.z) > 0.05F)
 		matrix_rotate(matrix_model, -window_time() * 720.0F, -g->velocity.z, 0.0F, g->velocity.x);
 	matrix_upload();
 
-	kv6_calclight(g->pos.x, g->pos.y, g->pos.z);
+	kv6_calclight(rx, ry, rz);
 
 	kv6_render(&model_grenade, g->team);
 	matrix_pop(matrix_model);
@@ -160,9 +169,19 @@ bool grenade_update_single(void* obj, void* user) {
 	struct Grenade* g = (struct Grenade*)obj;
 	float dt = *(float*)user;
 
+	/* snapshot for the partial-tick render interpolation (runs once per
+	   fixed 60 Hz physics tick) */
+	g->prev_pos = g->pos;
+
 	if(window_time() - g->created > g->fuse_length) {
 		sound_create(SOUND_WORLD, grenade_inwater(g) ? &sound_explode_water : &sound_explode, g->pos.x, g->pos.y,
 					 g->pos.z);
+
+		/* impact thud on the local camera, scaled by proximity */
+		if(settings.camera_shake && camera_mode == CAMERAMODE_FPS) {
+			float dist = len3D(camera_x - g->pos.x, camera_y - g->pos.y, camera_z - g->pos.z);
+			cameracontroller_add_shake(fminf(9.0F / (dist + 2.0F), 1.0F) * 0.7F);
+		}
 		particle_create(grenade_inwater(g) ? map_get(g->pos.x, 0, g->pos.z) : 0x505050, g->pos.x, g->pos.y + 1.5F,
 						g->pos.z, 20.0F, 1.5F, 64, 0.1F, 0.5F);
 

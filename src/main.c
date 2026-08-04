@@ -67,6 +67,10 @@ int fps = 0;
 
 float dt_float = 0.0F;
 
+/* Fraction of the current 60 Hz physics tick that has elapsed when the
+   frame renders (0..1). Used for partial-tick render interpolation. */
+float physics_tick_alpha = 1.0F;
+
 int ms_seed = 1;
 int ms_rand() {
         ms_seed = ms_seed * 0x343FD + 0x269EC3;
@@ -1297,8 +1301,16 @@ void display() {
                                         players[local_player_id].input.buttons.rmb_start = window_time() + 0.5F;
                                 players[local_player_id].input.buttons.rmb = 0;
                         }
-                        if(1) {
-                                if(hud_active->render_localplayer) {
+			if(1) {
+				/* swap player models to interpolated render positions for the
+				   ENTIRE scene pass (local viewmodel, player_render_all and
+				   hud render_3D), then restore the true simulation state at
+				   the end of display(). Previously this wrapper only covered
+				   render_3D, so camera + grenades were interpolated while
+				   player models (incl. the FPV gun block above) were not -
+				   that mismatch was the movement judder. */
+				player_render_interpolate_begin();
+				if(hud_active->render_localplayer) {
                                         float tmp2 = players[local_player_id].physics.eye.y;
                                         players[local_player_id].physics.eye.y = last_cy;
                                         if(camera_mode == CAMERAMODE_FPS)
@@ -1621,8 +1633,11 @@ void display() {
                 }
         }
 
-        if(hud_active->render_3D)
-                hud_active->render_3D();
+	if(hud_active->render_3D)
+		/* (interpolated render positions were already swapped in before the
+		   local player block; see above) */
+		hud_active->render_3D();
+	player_render_interpolate_end();
 
         glDisable(GL_DEPTH_TEST);
         glDisable(GL_MULTISAMPLE);
@@ -2223,6 +2238,19 @@ int main(int argc, char** argv) {
         settings.filmic_tonemapping = 1;
         settings.chat_mention_r = 255;
         settings.chat_mention_g = 255;
+        /* Movement-feel / network smoothing defaults: all on, each can be
+           toggled independently in settings for A/B comparison. */
+        settings.net_smooth_corrections = 1;
+        settings.net_fast_position = 1;
+        settings.net_early_opt = 1;
+        settings.net_unsequenced_orient = 1;
+        settings.render_interpolation = 1;
+        settings.precise_pacing = 1;
+        settings.raw_aim = 1;
+        settings.crouch_instant = 1;
+        settings.view_bob = 1;
+        settings.land_dip = 1;
+        settings.camera_shake = 1;
         strcpy(settings.name, "DEV_CLIENT");
 
 #if defined(__ANDROID__)
@@ -2361,6 +2389,12 @@ int main(int argc, char** argv) {
                 last_frame_start = window_time();
                 dt_float = (float)dt;
 
+                /* Process incoming network events as early as possible so
+                   this frame's physics, input and render see them (instead
+                   of only at end-of-frame). */
+                if(settings.net_early_opt)
+                        network_service();
+
                 if(hud_active->render_world) {
                         physics_time_fast += dt;
                         physics_time_fixed += dt;
@@ -2370,6 +2404,9 @@ int main(int argc, char** argv) {
                         while(physics_time_fixed >= PHYSICS_STEP_TIME) {
                                 physics_time_fixed -= PHYSICS_STEP_TIME;
                                 if(!demo_is_frozen()) {
+                                        /* snapshot pre-tick state for the
+                                           partial-tick render interpolation */
+                                        player_snapshot_prev();
                                         player_update(PHYSICS_STEP_TIME, 1);
                                         grenade_update(PHYSICS_STEP_TIME);
                                 }
@@ -2421,6 +2458,14 @@ int main(int argc, char** argv) {
                         physics_time_fast = PHYSICS_STEP_TIME;
                 if(physics_time_fixed > PHYSICS_STEP_TIME * 2)
                         physics_time_fixed = PHYSICS_STEP_TIME;
+
+                /* partial-tick fraction for render interpolation: how far we
+                   are into the current, still-unfinished physics tick */
+                physics_tick_alpha = settings.render_interpolation
+                        ? (float)fmin(fmax(physics_time_fixed / PHYSICS_STEP_TIME, 0.0), 1.0)
+                        : 1.0F;
+                } else {
+                        physics_tick_alpha = 1.0F;
                 }
 
                  display();
@@ -2505,11 +2550,31 @@ int main(int argc, char** argv) {
                  rpc_update();
  
                  if(settings.vsync > 1 && (window_time() - last_frame_start) < (1.0 / settings.vsync)) {
-                         double sleep_s = 1.0 / settings.vsync - (window_time() - last_frame_start);
-                         struct timespec ts;
-                         ts.tv_sec = (int)sleep_s;
-                         ts.tv_nsec = (sleep_s - ts.tv_sec) * 1000000000.0;
-                         nanosleep(&ts, NULL);
+                         if(settings.precise_pacing) {
+                                 /* precise pacing: coarse nanosleep until ~1ms
+                                    before the deadline, then spin the rest.
+                                    A plain nanosleep regularly overshoots by
+                                    milliseconds, which shows up as judder. */
+                                 double target = last_frame_start + 1.0 / settings.vsync;
+                                 for(;;) {
+                                         double remain = target - window_time();
+                                         if(remain <= 0.0)
+                                                 break;
+                                         if(remain > 0.0012) {
+                                                 double sl = remain - 0.001;
+                                                 struct timespec ts;
+                                                 ts.tv_sec = (int)sl;
+                                                 ts.tv_nsec = (sl - ts.tv_sec) * 1000000000.0;
+                                                 nanosleep(&ts, NULL);
+                                         }
+                                 }
+                         } else {
+                                 double sleep_s = 1.0 / settings.vsync - (window_time() - last_frame_start);
+                                 struct timespec ts;
+                                 ts.tv_sec = (int)sleep_s;
+                                 ts.tv_nsec = (sleep_s - ts.tv_sec) * 1000000000.0;
+                                 nanosleep(&ts, NULL);
+                         }
                  }
  
                  fps = 1.0F / dt;

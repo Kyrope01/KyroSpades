@@ -50,6 +50,8 @@ int network_identifier_split(char* addr, char* ip_out, int* port_out);
 int network_connect(char* ip, int port);
 int network_connect_string(char* addr);
 int network_update(void);
+void network_service(void); /* process pending incoming ENet events (frame-start service) */
+float network_correction_rate(void); /* adaptive correction-blend decay rate */
 int network_status(void);
 void network_init(void);
 

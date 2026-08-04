@@ -357,6 +357,17 @@ void config_save() {
         config_setf("client", "smg_ads_fov", settings.smg_ads_fov);
         config_seti("client", "disable_corpse_despawn", settings.disable_corpse_despawn);
         config_seti("client", "disable_dynamic_fov", settings.disable_dynamic_fov);
+        config_seti("client", "net_smooth_corrections", settings.net_smooth_corrections);
+        config_seti("client", "net_fast_position", settings.net_fast_position);
+        config_seti("client", "net_early_opt", settings.net_early_opt);
+        config_seti("client", "net_unsequenced_orient", settings.net_unsequenced_orient);
+        config_seti("client", "render_interpolation", settings.render_interpolation);
+        config_seti("client", "precise_pacing", settings.precise_pacing);
+        config_seti("client", "raw_aim", settings.raw_aim);
+        config_seti("client", "crouch_instant", settings.crouch_instant);
+        config_seti("client", "view_bob", settings.view_bob);
+        config_seti("client", "land_dip", settings.land_dip);
+        config_seti("client", "camera_shake", settings.camera_shake);
         config_seti("client", "textured_blocks", settings.textured_blocks);
         config_seti("client", "skin_spade", settings.skin_spade);
         config_seti("client", "skin_grenade", settings.skin_grenade);
@@ -517,6 +528,18 @@ IMPORT_SETTING(settings.camera_movement, camera_movement, atoi(value));
                 IMPORT_SETTING(settings.smg_ads_fov, smg_ads_fov, fmaxf(5.0F, fminf(atof(value), CAMERA_DEFAULT_FOV)));
                 IMPORT_SETTING(settings.disable_corpse_despawn, disable_corpse_despawn, atoi(value));
                 IMPORT_SETTING(settings.disable_dynamic_fov, disable_dynamic_fov, atoi(value));
+                IMPORT_SETTING(settings.net_smooth_corrections, net_smooth_corrections, atoi(value));
+                IMPORT_SETTING(settings.net_fast_position, net_fast_position, atoi(value));
+                IMPORT_SETTING(settings.net_early_opt, net_early_opt, atoi(value));
+                IMPORT_SETTING(settings.net_unsequenced_orient, net_unsequenced_orient, atoi(value));
+                IMPORT_SETTING(settings.render_interpolation, render_interpolation, atoi(value));
+                IMPORT_SETTING(settings.precise_pacing, precise_pacing, atoi(value));
+                IMPORT_SETTING(settings.raw_aim, raw_aim, atoi(value));
+                IMPORT_SETTING(settings.crouch_instant, crouch_instant, atoi(value));
+				/* view_bob / land_dip / camera_shake deliberately have no
+				   IMPORT_SETTING: they must stay always-on. config_seti still
+				   writes them (as 1), self-healing any stale 0 saved by an
+				   older build. */
                 IMPORT_SETTING(settings.textured_blocks, textured_blocks, atoi(value));
                 IMPORT_SETTING(settings.skin_spade, skin_spade, max(0, atoi(value)));
                 IMPORT_SETTING(settings.skin_grenade, skin_grenade, max(0, atoi(value)));
@@ -1582,6 +1605,99 @@ void config_reload() {
                                  .help = "Dead player models remain permanently on the map",
                                  .name = "Disable corpse despawn",
                          });
+
+        /* ── Gameplay feel / network smoothing (all client-side, view-only) ── */
+        list_add(&config_settings,
+                         &(struct config_setting) {
+                                 .value = &settings_tmp.net_smooth_corrections,
+                                 .type = CONFIG_TYPE_INT,
+                                 .min = 0,
+                                 .max = 1,
+                                 .help = "Glide through server corrections; no visible rubberband",
+                                 .name = "Smooth server corrections",
+                                 .category = "Gameplay Feel",
+                                 .subcategory = "Network",
+                         });
+        list_add(&config_settings,
+                         &(struct config_setting) {
+                                 .value = &settings_tmp.net_fast_position,
+                                 .type = CONFIG_TYPE_INT,
+                                 .min = 0,
+                                 .max = 1,
+                                 .help = "Position updates every ~0.9 s, above the 0.7 s reject floor",
+                                 .name = "Faster position updates",
+                                 .category = "Gameplay Feel",
+                                 .subcategory = "Network",
+                         });
+        list_add(&config_settings,
+                         &(struct config_setting) {
+                                 .value = &settings_tmp.net_early_opt,
+                                 .type = CONFIG_TYPE_INT,
+                                 .min = 0,
+                                 .max = 1,
+                                 .help = "Service network at frame start; flush sends immediately",
+                                 .name = "Network latency optimizations",
+                                 .category = "Gameplay Feel",
+                                 .subcategory = "Network",
+                         });
+        list_add(&config_settings,
+                         &(struct config_setting) {
+                                 .value = &settings_tmp.net_unsequenced_orient,
+                                 .type = CONFIG_TYPE_INT,
+                                 .min = 0,
+                                 .max = 1,
+                                 .help = "Aim sync as latest-wins packets; smoother on packet loss",
+                                 .name = "Loss-tolerant aim sync",
+                                 .category = "Gameplay Feel",
+                                 .subcategory = "Network",
+                         });
+        list_add(&config_settings,
+                         &(struct config_setting) {
+                                 .value = &settings_tmp.render_interpolation,
+                                 .type = CONFIG_TYPE_INT,
+                                 .min = 0,
+                                 .max = 1,
+                                 .help = "Render between 60 Hz physics ticks; smooth at any fps",
+                                 .name = "Motion interpolation",
+                                 .category = "Gameplay Feel",
+                                 .subcategory = "Rendering",
+                         });
+        list_add(&config_settings,
+                         &(struct config_setting) {
+                                 .value = &settings_tmp.precise_pacing,
+                                 .type = CONFIG_TYPE_INT,
+                                 .min = 0,
+                                 .max = 1,
+                                 .help = "Sleep+spin to hit frame-cap deadlines exactly",
+                                 .name = "Precise frame pacing",
+                                 .category = "Gameplay Feel",
+                                 .subcategory = "Rendering",
+                         });
+        list_add(&config_settings,
+                         &(struct config_setting) {
+                                 .value = &settings_tmp.raw_aim,
+                                 .type = CONFIG_TYPE_INT,
+                                 .min = 0,
+                                 .max = 1,
+                                 .help = "1:1 aim, no low-pass filter; shots follow crosshair",
+                                 .name = "Raw aim input",
+                                 .category = "Gameplay Feel",
+                                 .subcategory = "Input",
+                         });
+        list_add(&config_settings,
+                         &(struct config_setting) {
+                                 .value = &settings_tmp.crouch_instant,
+                                 .type = CONFIG_TYPE_INT,
+                                 .min = 0,
+                                 .max = 1,
+                                 .help = "Server-instant crouch physics; only the camera eases",
+                                 .name = "Instant crouch physics",
+                                 .category = "Gameplay Feel",
+                                 .subcategory = "Input",
+                         });
+		/* View bob / landing dip / camera shake are intentionally NOT
+		   exposed here: they are signature features of this client and
+		   stay always-on for everyone (config defaults = 1, no import). */
 
         list_add(&config_settings,
                          &(struct config_setting) {
