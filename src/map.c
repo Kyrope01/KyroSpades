@@ -145,9 +145,13 @@ static bool damaged_voxel_update(void* key, void* value, void* user) {
 void map_damaged_voxels_render() {
         matrix_identity(matrix_model);
         matrix_upload();
-        // glEnable(GL_POLYGON_OFFSET_FILL);
-        // glPolygonOffset(0.0F,-100.0F);
-        glDepthFunc(GL_EQUAL);
+        /* Use polygon offset to push damage overlays slightly forward in depth
+           space, avoiding z-fighting with the terrain underneath. GL_EQUAL was
+           extremely sensitive to floating-point precision and caused flickering
+           pixels, especially after long sessions when precision degrades. */
+        glEnable(GL_POLYGON_OFFSET_FILL);
+        glPolygonOffset(-1.0F, -1.0F);
+        glDepthFunc(GL_LEQUAL);
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
@@ -157,10 +161,8 @@ void map_damaged_voxels_render() {
 
         tesselator_draw(&map_damaged_tesselator, 1);
 
-        glDepthFunc(GL_LEQUAL);
+        glDisable(GL_POLYGON_OFFSET_FILL);
         glDisable(GL_BLEND);
-        // glPolygonOffset(0.0F,0.0F);
-        // glDisable(GL_POLYGON_OFFSET_FILL);
 }
 
 struct map_work_packet {

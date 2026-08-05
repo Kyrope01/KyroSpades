@@ -324,10 +324,17 @@ void cameracontroller_fps(float dt) {
 		float target = (!players[local_player_id].physics.airborne && hsp > 0.4F)
 			? fminf(hsp / 8.0F, 1.25F) * 0.8F : 0.0F;
 		cam_bob_strength += (target - cam_bob_strength) * fminf(dt * 8.0F, 1.0F);
-		if(target > 0.0F)
+		if(target > 0.0F) {
 			/* ~2.8-4.8 Hz: head-bob territory, NOT a buzz (the old rate
 			   reached ~8.5 Hz lateral + 17 Hz vertical - vibrated). */
 			cam_bob_phase += dt * (2.8F + 2.0F * target);
+			/* Wrap phase at 2*PI to prevent floating-point precision loss
+			   over very long sessions. Without this, after hours of play
+			   the phase value grows large enough that sinf/cosf lose
+			   precision, causing visible micro-jitter and artifacts. */
+			if(cam_bob_phase > 6.2831853F)
+				cam_bob_phase -= 6.2831853F;
+		}
 	} else {
 		cam_bob_strength = 0.0F;
 	}
