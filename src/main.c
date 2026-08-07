@@ -2162,7 +2162,7 @@ int main(int argc, char** argv) {
         settings.color_correction = 0;
         settings.multisamples = 0;
         settings.shadow_entities = 0;
-        settings.ambient_occlusion = 0;
+        settings.ambient_occlusion = 1;
         settings.ao_multiplier = 1.0F;
         settings.shadow_quality = 0;
         settings.shadow_intensity = 0.40F;
@@ -2175,6 +2175,7 @@ int main(int argc, char** argv) {
         settings.water_wave_tile_size = 2;
         settings.render_distance = 128.0F;
         settings.spectator_fog_distance = 128.0F;
+        settings.spectator_acceleration = 90.0F;
         settings.window_width = 800;
         settings.window_height = 600;
         settings.player_arms = 1;
@@ -2188,6 +2189,9 @@ int main(int argc, char** argv) {
         settings.hud_shadows = 0;
         settings.healthbar = 0;
         settings.ammo_crosshair = 0;
+        settings.free_aim = 0;
+        settings.free_aim_deadzone_h = 6.0F;
+        settings.free_aim_deadzone_v = 4.0F;
         settings.greedy_meshing = 0;
         /* The look formula is `setting / 5.0F * MOUSE_SENSITIVITY`, so the
            neutral value of this setting is 5 — NOT the raw radians/pixel
@@ -2233,7 +2237,7 @@ int main(int argc, char** argv) {
            client keeps the original BetterSpades fast render path. */
         settings.chromatic_aberration = 0;
         settings.chromatic_aberration_strength = 1.5F;
-        settings.filmic_tonemapping = 0;
+        settings.filmic_tonemapping = 1;
         settings.chat_mention_r = 255;
         settings.chat_mention_g = 255;
         /* Movement-feel / network smoothing defaults: all on, each can be

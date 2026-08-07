@@ -80,6 +80,7 @@ int window_super_down(void) {
 void hud_ingame_mouseclick(double x, double y, int button, int action, int mods);
 extern float camera_rot_x, camera_rot_y;
 extern void camera_overflow_adjust(void);
+extern void camera_look_delta(float yaw_delta, float pitch_delta);
 
 #ifdef OS_WINDOWS
 #include <sysinfoapi.h>
@@ -1133,9 +1134,7 @@ void window_update() {
 						s = 0.5F;
 					if(settings.invert_y)
 						fdy *= -1.0F;
-					camera_rot_x -= fdx * sens * s;
-					camera_rot_y += fdy * sens * s;
-					camera_overflow_adjust();
+					camera_look_delta(fdx * sens * s, fdy * sens * s);
 					break;
 				}
 				if(hud_active == &hud_ingame && f == aim_finger2)

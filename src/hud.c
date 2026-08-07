@@ -1395,6 +1395,35 @@ static void demo_playback_render_overlay(float scalef) {
 }
 
 
+static int hud_project_aim(float yaw, float pitch, float* sx, float* sy) {
+        float cx, cy, cz, ax, ay, az;
+        camera_vector_from_angles(camera_rot_x, camera_rot_y, &cx, &cy, &cz);
+        camera_vector_from_angles(yaw, pitch, &ax, &ay, &az);
+
+        mat4 view, proj, mvp;
+        matrix_identity(view);
+        matrix_lookAt(view, 0.0, 0.0, 0.0, cx, cy, cz, 0.0, 1.0, 0.0);
+        matrix_identity(proj);
+        matrix_perspective(proj, settings.camera_fov, ((float)settings.window_width) / ((float)settings.window_height), 0.1F, 128.0F);
+        glmc_mat4_mul(proj, view, mvp);
+
+        vec4 clip = {ax, ay, az, 1.0F};
+        vec4 out;
+        glmc_mat4_mulv(mvp, clip, out);
+        if(fabsf(out[3]) < 0.0001F)
+                return 0;
+        float ndc_x = out[0] / out[3];
+        float ndc_y = out[1] / out[3];
+        *sx = (ndc_x * 0.5F + 0.5F) * (float)settings.window_width;
+        *sy = (ndc_y * 0.5F + 0.5F) * (float)settings.window_height;
+        return *sx > -128.0F && *sx < settings.window_width + 128.0F
+                && *sy > -128.0F && *sy < settings.window_height + 128.0F;
+}
+
+static void hud_draw_target_at(float x, float y, float size) {
+        texture_draw(&texture_target, ceilf(x - size * 0.5F), ceilf(y + size * 0.5F), size, size);
+}
+
 static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
         // window_mousemode(camera_mode==CAMERAMODE_SELECTION?WINDOW_CURSOR_ENABLED:WINDOW_CURSOR_DISABLED);
 
@@ -1550,6 +1579,8 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                         sprintf(join_str, "Press 2 to join %s", gamestate.team_2.name);
                         font_centered(settings.window_width / 4.0F * 3.0F, 61 * scalef, 16.F, join_str);
                         font_centered(settings.window_width / 2.0F, 61 * scalef, 16.F, "Press 3 to spectate");
+                        if(!network_logged_in)
+                                font_centered(settings.window_width / 2.0F, 41 * scalef, 16.F, "Press 4 to spectate anonymously");
                         glColor3f(1.0F, 1.0F, 1.0F);
                 }
 
@@ -1890,8 +1921,19 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                         settings.window_height * current_zoom_factor * size_scale, (float)(zoom->width - 1) / (float)zoom->width, 0.0F,
                                         1.0F / (float)zoom->width, 1.0F);
                         } else {
-                                texture_draw(&texture_target, ceil((settings.window_width - texture_target.width) / 2.0F), ceil((settings.window_height + texture_target.height) / 2.0F),
-                                                                 texture_target.width, texture_target.height);
+                                if(settings.free_aim && camera_mode == CAMERAMODE_FPS) {
+                                        float sx, sy;
+                                        if(hud_project_aim(camera_crosshair_rot_x, camera_crosshair_rot_y, &sx, &sy)) {
+                                                /* Draw only the actual shot direction.  A second eased
+                                                   muzzle marker looked cool, but made it unclear where
+                                                   bullets would land. */
+                                                glColor3f(1.0F, 1.0F, 1.0F);
+                                                hud_draw_target_at(sx, sy, 20.0F);
+                                        }
+                                } else {
+                                        hud_draw_target_at(settings.window_width * 0.5F, settings.window_height * 0.5F,
+                                                           (float)texture_target.width);
+                                }
                         }
 
                         hud_ammo_crosshair_render(scalef);
@@ -2804,14 +2846,12 @@ static void hud_ingame_mouselocation(double x, double y) {
                 float dx_rotated = dx * cos_roll + dy * sin_roll;
                 float dy_rotated = dy * cos_roll - dx * sin_roll;
                 
-                camera_rot_x -= dx_rotated * settings.mouse_sensitivity / 5.0F * (float)MOUSE_SENSITIVITY * s;
-                camera_rot_y += dy_rotated * settings.mouse_sensitivity / 5.0F * (float)MOUSE_SENSITIVITY * s;
+                camera_look_delta(dx_rotated * settings.mouse_sensitivity / 5.0F * (float)MOUSE_SENSITIVITY * s,
+                                  dy_rotated * settings.mouse_sensitivity / 5.0F * (float)MOUSE_SENSITIVITY * s);
         } else {
-                camera_rot_x -= dx * settings.mouse_sensitivity / 5.0F * (float)MOUSE_SENSITIVITY * s;
-                camera_rot_y += dy * settings.mouse_sensitivity / 5.0F * (float)MOUSE_SENSITIVITY * s;
+                camera_look_delta(dx * settings.mouse_sensitivity / 5.0F * (float)MOUSE_SENSITIVITY * s,
+                                  dy * settings.mouse_sensitivity / 5.0F * (float)MOUSE_SENSITIVITY * s);
         }
-
-        camera_overflow_adjust();
 }
 
 static void hud_switch_next_player() {
@@ -3344,10 +3384,15 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
 
                         if(screen_current == SCREEN_TEAM_SELECT) {
                                 int new_team = 256;
+                                int anonymous_spectator = 0;
                                 switch(key) {
                                         case WINDOW_KEY_SELECT1: new_team = TEAM_1; break;
                                         case WINDOW_KEY_SELECT2: new_team = TEAM_2; break;
                                         case WINDOW_KEY_SELECT3: new_team = TEAM_SPECTATOR; break;
+                                        case WINDOW_KEY_SELECT4:
+                                                new_team = TEAM_SPECTATOR;
+                                                anonymous_spectator = !network_logged_in;
+                                                break;
                                 }
                                 if(new_team <= 255) {
                                         if(network_logged_in) {
@@ -3374,9 +3419,10 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
                                                         login.blue = players[local_player_id].block.blue;
                                                         login.green = players[local_player_id].block.green;
                                                         login.red = players[local_player_id].block.red;
-                                                        strcpy(login.name, settings.name);
+                                                        const char* join_name = anonymous_spectator ? "Anonymous" : settings.name;
+                                                        strcpy(login.name, join_name);
                                                         network_send(PACKET_EXISTINGPLAYER_ID, &login,
-                                                                                 sizeof(login) - sizeof(login.name) + strlen(settings.name) + 1);
+                                                                                 sizeof(login) - sizeof(login.name) + strlen(join_name) + 1);
                                                         screen_current = SCREEN_NONE;
                                                 } else {
                                                         screen_current = SCREEN_GUN_SELECT;

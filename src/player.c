@@ -33,6 +33,7 @@
 #include "font.h"
 #include "cameracontroller.h"
 #include "config.h"
+#include "glx.h"
 #include "tracer.h"
 #include "weapon.h"
 #include "window.h"
@@ -49,15 +50,19 @@ static float os_sway_x=0, os_sway_y=0, os_last_rot_x=0, os_last_rot_y=0;
 static int os_sway_initialized=0;
 static float os_lerp_smooth(float cur,float tgt,float dt,float p){float f=1.0f-powf(p,dt);return cur+(tgt-cur)*f;}
 
+static void player_draw_esp_box(struct Player* p);
 
 struct GameState gamestate;
 
 // Check if a player is obscured from the camera's viewpoint
 static int player_is_obscured(struct Player* p) {
         struct Camera_HitType hit;
+        float tx = p->physics.eye.x;
+        float ty = p->physics.eye.y + player_height(p) * 0.5F;
+        float tz = p->physics.eye.z;
         camera_hit_mask(&hit, -1, camera_x, camera_y, camera_z,
-                        p->pos.x - camera_x, p->pos.y - camera_y, p->pos.z - camera_z, 1024.0F);
-        // Player is obscured if we hit a block before reaching the player
+                        tx - camera_x, ty - camera_y, tz - camera_z, 1024.0F);
+        // Player is obscured if terrain is hit before the player hitbox.
         return hit.type == CAMERA_HITTYPE_BLOCK;
 }
 
@@ -805,11 +810,8 @@ void player_render_all() {
 			}
 		}
 		if(k != local_player_id) {
-			// Always render players in spectator ESP mode, regardless of frustum or distance
-			int should_render = (camera_mode == CAMERAMODE_SPECTATOR && settings.esp_in_spec)
-				|| (camera_CubeInFrustum(players[k].pos.x, players[k].pos.y, players[k].pos.z, 1.0F, 2.0F)
-					&& distance2D(players[k].pos.x, players[k].pos.z, camera_x, camera_z)
-						<= render_dist_sq);
+			int should_render = camera_CubeInFrustum(players[k].pos.x, players[k].pos.y, players[k].pos.z, 1.0F, 2.0F)
+				&& distance2D(players[k].pos.x, players[k].pos.z, camera_x, camera_z) <= render_dist_sq;
 			
 			if(should_render) {
 				struct player_intersection intersects = {0};
@@ -878,6 +880,22 @@ void player_render_all() {
 		}
 	}
 
+	/* Draw spectator ESP as a final overlay pass.  Keeping it out of the main
+	   player render loop prevents its deliberately unusual GL state (no fog,
+	   no texture, no lighting, no depth) from leaking into later normal player
+	   models and making visible players turn fog-colored. */
+	if(camera_mode == CAMERAMODE_SPECTATOR && settings.esp_in_spec && !cameracontroller_bodyview_mode) {
+		for(int k = 0; k < PLAYERS_MAX; k++) {
+			if(k == local_player_id || !players[k].connected || players[k].team == TEAM_SPECTATOR)
+				continue;
+			if(!camera_CubeInFrustum(players[k].pos.x, players[k].pos.y, players[k].pos.z, 1.0F, 2.0F)
+			   || distance2D(players[k].pos.x, players[k].pos.z, camera_x, camera_z) > render_dist_sq)
+				continue;
+			if(player_is_obscured(players + k))
+				player_draw_esp_box(players + k);
+		}
+	}
+
 	player_render_corpses();
 }
 
@@ -934,6 +952,62 @@ static const struct hitbox box_legc = (struct hitbox) {
 	.size = {3, 7, 8},
 	.scale = 0.1F,
 };
+
+static void player_esp_bounds(const struct hitbox* box, float* x0, float* y0, float* z0, float* x1, float* y1, float* z1) {
+	*x0 = -box->pivot[0] * box->scale;
+	*y0 = -box->pivot[2] * box->scale;
+	*z0 = -box->pivot[1] * box->scale;
+	*x1 = (box->size[0] - box->pivot[0]) * box->scale;
+	*y1 = (box->size[2] - box->pivot[2]) * box->scale;
+	*z1 = (box->size[1] - box->pivot[1]) * box->scale;
+}
+
+static void player_esp_draw_cuboid_lines(float x0, float y0, float z0, float x1, float y1, float z1) {
+	float vertices[] = {
+		x0,y0,z0, x1,y0,z0,  x1,y0,z0, x1,y0,z1,  x1,y0,z1, x0,y0,z1,  x0,y0,z1, x0,y0,z0,
+		x0,y1,z0, x1,y1,z0,  x1,y1,z0, x1,y1,z1,  x1,y1,z1, x0,y1,z1,  x0,y1,z1, x0,y1,z0,
+		x0,y0,z0, x0,y1,z0,  x1,y0,z0, x1,y1,z0,  x1,y0,z1, x1,y1,z1,  x0,y0,z1, x0,y1,z1,
+	};
+	glVertexPointer(3, GL_FLOAT, 0, vertices);
+	glDrawArrays(GL_LINES, 0, 24);
+}
+
+static void player_esp_draw_cuboid_fill(float x0, float y0, float z0, float x1, float y1, float z1) {
+	float vertices[] = {
+		/* bottom */ x0,y0,z0, x1,y0,z1, x1,y0,z0,  x0,y0,z0, x0,y0,z1, x1,y0,z1,
+		/* top    */ x0,y1,z0, x1,y1,z0, x1,y1,z1,  x0,y1,z0, x1,y1,z1, x0,y1,z1,
+		/* -x     */ x0,y0,z0, x0,y1,z0, x0,y1,z1,  x0,y0,z0, x0,y1,z1, x0,y0,z1,
+		/* +x     */ x1,y0,z0, x1,y1,z1, x1,y1,z0,  x1,y0,z0, x1,y0,z1, x1,y1,z1,
+		/* -z     */ x0,y0,z0, x1,y1,z0, x0,y1,z0,  x0,y0,z0, x1,y0,z0, x1,y1,z0,
+		/* +z     */ x0,y0,z1, x0,y1,z1, x1,y1,z1,  x0,y0,z1, x1,y1,z1, x1,y0,z1,
+	};
+	glVertexPointer(3, GL_FLOAT, 0, vertices);
+	glDrawArrays(GL_TRIANGLES, 0, 36);
+}
+
+static void player_esp_draw_hitbox(const struct hitbox* box, int fill) {
+	float x0, y0, z0, x1, y1, z1;
+	player_esp_bounds(box, &x0, &y0, &z0, &x1, &y1, &z1);
+	if(fill)
+		player_esp_draw_cuboid_fill(x0, y0, z0, x1, y1, z1);
+	else
+		player_esp_draw_cuboid_lines(x0, y0, z0, x1, y1, z1);
+}
+
+static void player_esp_color(int team) {
+	switch(team) {
+		case TEAM_1: glColor3ub(gamestate.team_1.red, gamestate.team_1.green, gamestate.team_1.blue); break;
+		case TEAM_2: glColor3ub(gamestate.team_2.red, gamestate.team_2.green, gamestate.team_2.blue); break;
+		default: glColor3ub(255, 220, 32); break;
+	}
+}
+
+static void player_esp_draw_part(const struct hitbox* box, int team) {
+	glColor3ub(10, 10, 10);
+	player_esp_draw_hitbox(box, 1);
+	player_esp_color(team);
+	player_esp_draw_hitbox(box, 0);
+}
 
 static bool hitbox_intersection(mat4 model, const struct hitbox* box, Ray* r, float* distance) {
 	mat4 inv_model;
@@ -1059,11 +1133,130 @@ void player_collision(const struct Player* p, Ray* ray, struct player_intersecti
 	matrix_pop(matrix_model);
 }
 
+static void player_draw_esp_box(struct Player* p) {
+	if(!p->alive || p->team == TEAM_SPECTATOR)
+		return;
+
+	float l = sqrt(distance3D(p->orientation_smooth.x, p->orientation_smooth.y, p->orientation_smooth.z, 0, 0, 0));
+	if(l <= 0.0001F)
+		return;
+	float ox = p->orientation_smooth.x / l;
+	float oy = p->orientation_smooth.y / l;
+	float oz = p->orientation_smooth.z / l;
+
+	const struct hitbox* torso = p->input.keys.crouch ? &box_torsoc : &box_torso;
+	const struct hitbox* leg = p->input.keys.crouch ? &box_legc : &box_leg;
+	float height = player_height(p) - 0.25F;
+
+	float len = sqrtf(p->orientation.x * p->orientation.x + p->orientation.z * p->orientation.z);
+	if(len <= 0.0001F) len = 1.0F;
+	float fx = p->orientation.x / len;
+	float fy = p->orientation.z / len;
+	float a = (p->physics.velocity.x * fx + fy * p->physics.velocity.z) / fmaxf(fx * fx + fy * fy, 0.0001F);
+	float b = (fabsf(fx) > 0.0001F) ? (p->physics.velocity.z - fy * a) / fx : 0.0F;
+	a /= 0.25F;
+	b /= 0.25F;
+
+	glLineWidth(1.0F);
+	player_esp_color(p->team);
+	/* ESP outlines are informational overlays, not world geometry: disable fog,
+	   lighting and texturing so the line color is exactly the team color.  The
+	   previous version only disabled the spherical fog texture unit; if texture0
+	   or lighting was left enabled by nearby model rendering, the lines could be
+	   blended/modulated into the map fog color. */
+#ifndef OPENGL_ES
+	GLboolean fog_was_on = glIsEnabled(GL_FOG);
+	GLboolean tex_was_on = glIsEnabled(GL_TEXTURE_2D);
+	GLboolean lighting_was_on = glIsEnabled(GL_LIGHTING);
+	GLboolean color_material_was_on = glIsEnabled(GL_COLOR_MATERIAL);
+	GLboolean cull_was_on = glIsEnabled(GL_CULL_FACE);
+	if(fog_was_on) glDisable(GL_FOG);
+	if(tex_was_on) glDisable(GL_TEXTURE_2D);
+	if(lighting_was_on) glDisable(GL_LIGHTING);
+	if(color_material_was_on) glDisable(GL_COLOR_MATERIAL);
+	if(cull_was_on) glDisable(GL_CULL_FACE);
+#endif
+	glx_disable_sphericalfog();
+	glDisable(GL_DEPTH_TEST);
+	glDepthMask(GL_FALSE);
+	glEnableClientState(GL_VERTEX_ARRAY);
+
+	matrix_push(matrix_model);
+	matrix_identity(matrix_model);
+	matrix_translate(matrix_model, p->physics.eye.x, p->physics.eye.y + height, p->physics.eye.z);
+	float head_scale = sqrtf(p->orientation.x * p->orientation.x + p->orientation.y * p->orientation.y
+		+ p->orientation.z * p->orientation.z);
+	matrix_translate(matrix_model, 0.0F, box_head.pivot[2] * (head_scale * box_head.scale - box_head.scale), 0.0F);
+	matrix_scale3(matrix_model, head_scale);
+	matrix_pointAt(matrix_model, ox, oy, oz);
+	matrix_rotate(matrix_model, 90.0F, 0.0F, 1.0F, 0.0F);
+	matrix_upload();
+	player_esp_draw_part(&box_head, p->team);
+
+	matrix_identity(matrix_model);
+	matrix_translate(matrix_model, p->physics.eye.x, p->physics.eye.y + height, p->physics.eye.z);
+	matrix_pointAt(matrix_model, ox, 0.0F, oz);
+	matrix_rotate(matrix_model, 90.0F, 0.0F, 1.0F, 0.0F);
+	matrix_upload();
+	player_esp_draw_part(torso, p->team);
+
+	matrix_push(matrix_model);
+	matrix_translate(matrix_model, torso->size[0] * 0.1F * 0.5F - leg->size[0] * 0.1F * 0.5F,
+					 -torso->size[2] * 0.1F * (p->input.keys.crouch ? 0.6F : 1.0F),
+					 p->input.keys.crouch ? (-torso->size[2] * 0.1F * 0.75F) : 0.0F);
+	matrix_rotate(matrix_model, 45.0F * foot_function(p) * a, 1.0F, 0.0F, 0.0F);
+	matrix_rotate(matrix_model, 45.0F * foot_function(p) * b, 0.0F, 0.0F, 1.0F);
+	matrix_upload();
+	player_esp_draw_part(leg, p->team);
+	matrix_pop(matrix_model);
+
+	matrix_translate(matrix_model, -torso->size[0] * 0.1F * 0.5F + leg->size[0] * 0.1F * 0.5F,
+					 -torso->size[2] * 0.1F * (p->input.keys.crouch ? 0.6F : 1.0F),
+					 p->input.keys.crouch ? (-torso->size[2] * 0.1F * 0.75F) : 0.0F);
+	matrix_rotate(matrix_model, -45.0F * foot_function(p) * a, 1.0F, 0.0F, 0.0F);
+	matrix_rotate(matrix_model, -45.0F * foot_function(p) * b, 0.0F, 0.0F, 1.0F);
+	matrix_upload();
+	player_esp_draw_part(leg, p->team);
+
+	matrix_identity(matrix_model);
+	matrix_translate(matrix_model, p->physics.eye.x, p->physics.eye.y + height, p->physics.eye.z);
+	matrix_translate(matrix_model, 0.0F, p->input.keys.crouch * 0.1F - 0.1F * 2, 0.0F);
+	matrix_pointAt(matrix_model, ox, oy, oz);
+	matrix_rotate(matrix_model, 90.0F, 0.0F, 1.0F, 0.0F);
+	if(p->input.keys.sprint && !p->input.keys.crouch)
+		matrix_rotate(matrix_model, 45.0F, 1.0F, 0.0F, 0.0F);
+	float* angles = player_tool_func(p);
+	matrix_rotate(matrix_model, angles[0], 1.0F, 0.0F, 0.0F);
+	matrix_rotate(matrix_model, angles[1], 0.0F, 1.0F, 0.0F);
+	matrix_upload();
+	player_esp_draw_part(&box_arm_left, p->team);
+	matrix_rotate(matrix_model, -45.0F, 0.0F, 1.0F, 0.0F);
+	matrix_upload();
+	player_esp_draw_part(&box_arm_right, p->team);
+
+	matrix_pop(matrix_model);
+	glDisableClientState(GL_VERTEX_ARRAY);
+	glDepthMask(GL_TRUE);
+	glEnable(GL_DEPTH_TEST);
+	glx_enable_sphericalfog();
+#ifndef OPENGL_ES
+	if(cull_was_on) glEnable(GL_CULL_FACE);
+	if(color_material_was_on) glEnable(GL_COLOR_MATERIAL);
+	if(lighting_was_on) glEnable(GL_LIGHTING);
+	if(tex_was_on) glEnable(GL_TEXTURE_2D);
+	if(fog_was_on) glEnable(GL_FOG);
+#endif
+	glColor3f(1.0F, 1.0F, 1.0F);
+	matrix_upload();
+}
+
 void player_render(struct Player* p, int id) {
 	kv6_calclight(p->pos.x, p->pos.y, p->pos.z);
 
-	int esp_active = (camera_mode == CAMERAMODE_SPECTATOR && settings.esp_in_spec);
-	int obscured = esp_active ? player_is_obscured(p) : 0;
+	/* Spectator ESP is drawn as TigerSpades-style colored outline boxes in
+	   player_render_all(); keep the normal model renderer depth-correct. */
+	int esp_active = 0;
+	int obscured = 0;
 	int in_view = player_in_view(p);
 
 	if(camera_mode == CAMERAMODE_SPECTATOR && p->team != TEAM_SPECTATOR && !cameracontroller_bodyview_mode && settings.show_names_in_spec) {

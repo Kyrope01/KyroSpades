@@ -20,8 +20,10 @@
 
 #include <enet/enet.h>
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include "libdeflate.h"
 #include "texture.h"
@@ -76,7 +78,8 @@ float network_stats_last = 0.0F;
 ENetHost* client;
 ENetPeer* peer;
 
-char network_custom_reason[17];
+#define NETWORK_CUSTOM_REASON_MAX 252
+char network_custom_reason[NETWORK_CUSTOM_REASON_MAX + 1];
 
 void network_init_host() {
         client = enet_host_create(NULL, 1, 1, 0, 0); // limit bandwidth here if you want to
@@ -149,6 +152,8 @@ void read_PacketMapChunk(void* data, int len) {
 }
 
 void read_PacketChatMessage(void* data, int len) {
+        if(len < 2)
+                return;
         struct PacketChatMessage* p = (struct PacketChatMessage*)data;
         char n[32] = {0};
         char m[256];
@@ -164,8 +169,16 @@ void read_PacketChatMessage(void* data, int len) {
                         // try to determine gamemode
 
                         if(p->player_id == 255) {
-                                strncpy(network_custom_reason, p->message, 16);
-                                network_custom_reason[16] = 0;
+                                /* KickReason extension: a system chat packet from
+                                   pseudo-player 255 can be sent at any connection
+                                   stage to carry a human-readable disconnect reason.
+                                   Keep up to the max chat payload (252 bytes), not
+                                   the old 16-byte name-sized buffer. */
+                                int msg_len = len - 2;
+                                if(msg_len < 0) msg_len = 0;
+                                if(msg_len > NETWORK_CUSTOM_REASON_MAX) msg_len = NETWORK_CUSTOM_REASON_MAX;
+                                memcpy(network_custom_reason, p->message, msg_len);
+                                network_custom_reason[msg_len] = 0;
                                 return; // dont add message to chat
                         }
                         m[0] = 0;
@@ -1165,7 +1178,111 @@ void read_PacketHandshakeInit(void* data, int len) {
         network_send(PACKET_HANDSHAKERETURN_ID, data, len);
 }
 
+/* Prototype "enhanced version info" response, matching Fran6nd's
+   protocol-extended-teamplay ZeroSpades branch.  A server requests this by
+   sending PacketVersionGet (33) with a payload of property ids.  The client
+   replies using PacketExistingPlayer (9) with marker 'x', then a sequence of:
+
+        property_id:u8 payload_length:u8 payload:bytes
+
+   Current property ids:
+        0 = application name + version: major:u8 minor:u8 patch:u8 name:string
+        1 = user locale string
+        2 = client feature flags #1: u32le (bit 0 = Unicode support)
+
+   Servers that do not know this draft keep sending an empty VersionGet and
+   still receive the normal BetterSpades-compatible VersionSend packet below. */
+static void versioninfo_put_u8(unsigned char* out, int* pos, unsigned char v) {
+        out[(*pos)++] = v;
+}
+
+static void versioninfo_put_u32le(unsigned char* out, int* pos, uint32_t v) {
+        out[(*pos)++] = (unsigned char)(v & 0xFF);
+        out[(*pos)++] = (unsigned char)((v >> 8) & 0xFF);
+        out[(*pos)++] = (unsigned char)((v >> 16) & 0xFF);
+        out[(*pos)++] = (unsigned char)((v >> 24) & 0xFF);
+}
+
+static void versioninfo_put_string(unsigned char* out, int* pos, const char* s, int max_end) {
+        if(!s) s = "";
+        while(*s && *pos < max_end)
+                out[(*pos)++] = (unsigned char)*s++;
+}
+
+static const char* versioninfo_locale(void) {
+        const char* lang = getenv("LANG");
+        if(!lang || !lang[0] || !strcmp(lang, "C") || !strcmp(lang, "POSIX"))
+                return "en_US";
+        return lang;
+}
+
+static void send_version_enhanced(const unsigned char* props, int prop_count) {
+        unsigned char payload[480];
+        int pos = 0;
+        versioninfo_put_u8(payload, &pos, (unsigned char)'x');
+
+        for(int i = 0; i < prop_count && pos < (int)sizeof(payload) - 16; i++) {
+                unsigned char prop = props[i];
+                int duplicate = 0;
+                for(int j = 0; j < i; j++) {
+                        if(props[j] == prop) {
+                                duplicate = 1;
+                                break;
+                        }
+                }
+                if(duplicate)
+                        continue;
+
+                versioninfo_put_u8(payload, &pos, prop);
+                int len_pos = pos;
+                versioninfo_put_u8(payload, &pos, 0);
+                int begin = pos;
+
+                switch(prop) {
+                        case 0: /* ApplicationNameAndVersion */
+                                versioninfo_put_u8(payload, &pos, (unsigned char)KYROSPADES_MAJOR);
+                                versioninfo_put_u8(payload, &pos, (unsigned char)KYROSPADES_MINOR);
+                                versioninfo_put_u8(payload, &pos, (unsigned char)KYROSPADES_PATCH);
+                                versioninfo_put_string(payload, &pos, "KyroSpades", (int)sizeof(payload));
+                                break;
+                        case 1: { /* UserLocale */
+                                char locale_buf[32];
+                                const char* lang = versioninfo_locale();
+                                int n = 0;
+                                while(lang[n] && lang[n] != '.' && n < (int)sizeof(locale_buf) - 1) {
+                                        locale_buf[n] = (lang[n] == '-') ? '_' : lang[n];
+                                        n++;
+                                }
+                                locale_buf[n] = 0;
+                                versioninfo_put_string(payload, &pos, locale_buf, (int)sizeof(payload));
+                                break;
+                        }
+                        case 2: /* ClientFeatureFlags1 */
+                                /* Bit 0 is Unicode support in the draft.  The chat/HUD path
+                                   is UTF-8 aware, so advertise it. */
+                                versioninfo_put_u32le(payload, &pos, 1u);
+                                break;
+                        default:
+                                /* Unknown property: reply with an empty payload, as the
+                                   prototype does, so the server can see it was understood
+                                   syntactically but has no client-side value. */
+                                break;
+                }
+
+                int plen = pos - begin;
+                if(plen > 255) plen = 255;
+                payload[len_pos] = (unsigned char)plen;
+        }
+
+        network_send(PACKET_EXISTINGPLAYER_ID, payload, pos);
+}
+
 void read_PacketVersionGet(void* data, int len) {
+        if(len > 0) {
+                send_version_enhanced((const unsigned char*)data, len);
+                return;
+        }
+
         struct PacketVersionSend ver;
         /* The aos:// version packet only has a one-byte client id, and common
            servers only know the original BetterSpades id ('B').  Sending a new
@@ -1451,7 +1568,8 @@ void network_service(void) {
                         }
                         case ENET_EVENT_TYPE_DISCONNECT:
                                 // In case we're disconnected for using the wrong protocol, don't return to HUD just yet
-                                if(event.data != 3) {
+                                // unless a KickReason message already supplied a readable reason.
+                                if(event.data != 3 || *network_custom_reason) {
                                         hud_change(&hud_serverlist);
                                         chat_showpopup(network_reason_disconnect(event.data), 10.0F, rgb(255, 0, 0));
                                 }

@@ -289,6 +289,9 @@ void config_save() {
         config_seti("client", "hud_shadows", settings.hud_shadows);
         config_seti("client", "healthbar", settings.healthbar);
         config_seti("client", "ammo_crosshair", settings.ammo_crosshair);
+        config_seti("client", "free_aim", settings.free_aim);
+        config_setf("client", "free_aim_deadzone_h", settings.free_aim_deadzone_h);
+        config_setf("client", "free_aim_deadzone_v", settings.free_aim_deadzone_v);
         config_seti("client", "multisamples", settings.multisamples);
         config_seti("client", "greedy_meshing", settings.greedy_meshing);
         config_seti("client", "vsync", settings.vsync);
@@ -478,6 +481,9 @@ IMPORT_SETTING(settings.camera_movement, camera_movement, atoi(value));
                 IMPORT_SETTING(settings.hud_shadows, hud_shadows, atoi(value));
                 IMPORT_SETTING(settings.healthbar, healthbar, atoi(value) ? 1 : 0);
                 IMPORT_SETTING(settings.ammo_crosshair, ammo_crosshair, atoi(value) ? 1 : 0);
+                IMPORT_SETTING(settings.free_aim, free_aim, atoi(value) ? 1 : 0);
+                IMPORT_SETTING(settings.free_aim_deadzone_h, free_aim_deadzone_h, fmaxf(0.0F, fminf(45.0F, atof(value))));
+                IMPORT_SETTING(settings.free_aim_deadzone_v, free_aim_deadzone_v, fmaxf(0.0F, fminf(45.0F, atof(value))));
                 IMPORT_SETTING(settings.spectator_speed, spectator_speed, max(0.1F, min(4.F, atof(value))));
                 IMPORT_SETTING(settings.spectator_acceleration, spectator_acceleration, max(10.0F, min(200.0F, atof(value))));
                 IMPORT_SETTING(settings.spectator_fog_distance, spectator_fog_distance, max(5.f, min(512.f, atof(value))));
@@ -775,6 +781,7 @@ void config_reload() {
         config_register_key(WINDOW_KEY_SELECT1, SDLK_1, NULL, 0, NULL, NULL);
         config_register_key(WINDOW_KEY_SELECT2, SDLK_2, NULL, 0, NULL, NULL);
         config_register_key(WINDOW_KEY_SELECT3, SDLK_3, NULL, 0, NULL, NULL);
+        config_register_key(WINDOW_KEY_SELECT4, SDLK_4, NULL, 0, NULL, NULL);
         config_register_key(WINDOW_KEY_HISTORY_PREVIOUS, SDLK_UP, "history_previous", 0, "Previous message", "Chat history");
         config_register_key(WINDOW_KEY_HISTORY_NEXT, SDLK_DOWN, "history_next", 0, "Next message", "Chat history");
         config_register_key(WINDOW_KEY_YCLAMP, SDLK_c, "y_clamp", 0, "Toggle Y-Clamp", "Spectator");
@@ -847,6 +854,7 @@ void config_reload() {
         config_register_key(WINDOW_KEY_SELECT1, GLFW_KEY_1, NULL, 0, NULL, NULL);
         config_register_key(WINDOW_KEY_SELECT2, GLFW_KEY_2, NULL, 0, NULL, NULL);
         config_register_key(WINDOW_KEY_SELECT3, GLFW_KEY_3, NULL, 0, NULL, NULL);
+        config_register_key(WINDOW_KEY_SELECT4, GLFW_KEY_4, NULL, 0, NULL, NULL);
         config_register_key(WINDOW_KEY_HISTORY_PREVIOUS, GLFW_KEY_UP, "history_previous", 0, "Previous message", "Chat history");
         config_register_key(WINDOW_KEY_HISTORY_NEXT, GLFW_KEY_DOWN, "history_next", 0, "Next message", "Chat history");
         config_register_key(WINDOW_KEY_YCLAMP, GLFW_KEY_C, "y_clamp", 0, "Toggle Y-Clamp", "Spectator");
@@ -1594,6 +1602,39 @@ void config_reload() {
                                  .help = "Enable zoom animation when aiming down sights (ADS)",
                                  .name = "ADS zoom animation",
                                  .category = "Weapon Settings",
+                         });
+        list_add(&config_settings,
+                         &(struct config_setting) {
+                                 .value = &settings_tmp.free_aim,
+                                 .type = CONFIG_TYPE_INT,
+                                 .min = 0,
+                                 .max = 1,
+                                 .help = "Move the crosshair inside a deadzone before the view follows",
+                                 .name = "Free aim",
+                                 .category = "Weapon Settings",
+                                 .subcategory = "Free Aim",
+                         });
+        list_add(&config_settings,
+                         &(struct config_setting) {
+                                 .value = &settings_tmp.free_aim_deadzone_h,
+                                 .type = CONFIG_TYPE_FLOAT,
+                                 .min = 0,
+                                 .max = 45,
+                                 .help = "Horizontal free-aim deadzone in degrees",
+                                 .name = "Horizontal deadzone",
+                                 .category = "Weapon Settings",
+                                 .subcategory = "Free Aim",
+                         });
+        list_add(&config_settings,
+                         &(struct config_setting) {
+                                 .value = &settings_tmp.free_aim_deadzone_v,
+                                 .type = CONFIG_TYPE_FLOAT,
+                                 .min = 0,
+                                 .max = 45,
+                                 .help = "Vertical free-aim deadzone in degrees",
+                                 .name = "Vertical deadzone",
+                                 .category = "Weapon Settings",
+                                 .subcategory = "Free Aim",
                          });
 
         list_add(&config_settings,

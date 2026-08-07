@@ -390,6 +390,21 @@ void cameracontroller_fps(float dt) {
 		players[local_player_id].orientation.z = lz / len;
 	}
 
+	if(settings.free_aim) {
+		float mx, my, mz;
+		camera_freeaim_update_muzzle(dt);
+		/* The crosshair is the authoritative aim point.  The eased muzzle
+		   angles are only for optional visual smoothing; hit tests, tracers
+		   and orientation packets must line up with what the player sees. */
+		camera_vector_from_angles(camera_crosshair_rot_x, camera_crosshair_rot_y, &mx, &my, &mz);
+		players[local_player_id].orientation.x = mx;
+		players[local_player_id].orientation.y = my;
+		players[local_player_id].orientation.z = mz;
+		players[local_player_id].orientation_smooth = players[local_player_id].orientation;
+	} else {
+		camera_freeaim_reset();
+	}
+
 	camera_vx = players[local_player_id].physics.velocity.x;
 	camera_vy = players[local_player_id].physics.velocity.y;
 	camera_vz = players[local_player_id].physics.velocity.z;
@@ -423,6 +438,12 @@ void cameracontroller_fps_render() {
 		float amp = cam_shake_value * cam_shake_value * 0.02F + cam_shake_value * 0.012F;
 		rx += (sinf(t * 137.0F) + 0.5F * sinf(t * 311.0F)) * amp;
 		ry += (sinf(t * 181.0F + 1.3F) + 0.5F * sinf(t * 271.0F + 0.4F)) * amp * 0.8F;
+	}
+
+	if(settings.free_aim && local_player_id >= 0 && local_player_id < PLAYERS_MAX
+	   && players[local_player_id].held_item == TOOL_GUN && players[local_player_id].input.buttons.rmb) {
+		rx = camera_crosshair_rot_x;
+		ry = camera_crosshair_rot_y;
 	}
 
 	matrix_lookAt(matrix_view, ex, ey, ez, ex + sin(rx) * sin(ry), ey + cos(ry), ez + cos(rx) * sin(ry),

@@ -268,6 +268,17 @@ void weapon_shoot() {
 	// https://pastebin.com/raw/TMjKSTXG
 	// http://paste.quacknet.org/view/a3ea2743
 
+	if(settings.free_aim) {
+		/* Mouse input can arrive after the last camera_update() but before
+		   weapon_update() in display().  Refresh the local aim vector here so
+		   a shot always follows the visible free-aim crosshair this frame. */
+		camera_vector_from_angles(camera_crosshair_rot_x, camera_crosshair_rot_y,
+						   &players[local_player_id].orientation.x,
+						   &players[local_player_id].orientation.y,
+						   &players[local_player_id].orientation.z);
+		players[local_player_id].orientation_smooth = players[local_player_id].orientation;
+	}
+
 	for(int i = 0; i < ((players[local_player_id].weapon == WEAPON_SHOTGUN) ? 8 : 1); i++) {
 		float o[3] = {players[local_player_id].orientation.x, players[local_player_id].orientation.y,
 					  players[local_player_id].orientation.z};

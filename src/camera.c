@@ -35,6 +35,8 @@ enum camera_mode camera_mode = CAMERAMODE_SPECTATOR;
 
 float frustum[6][4];
 float camera_rot_x = 2.04F, camera_rot_y = 1.79F;
+float camera_crosshair_rot_x = 2.04F, camera_crosshair_rot_y = 1.79F;
+float camera_muzzle_rot_x = 2.04F, camera_muzzle_rot_y = 1.79F;
 float camera_x = 256.0F, camera_y = 60.0F, camera_z = 256.0F;
 float camera_vx, camera_vy, camera_vz;
 float camera_size = 0.8F;
@@ -101,6 +103,75 @@ float camera_fov_scaled(float dt) {
 	return normal_fov;
 }
 
+void camera_vector_from_angles(float yaw, float pitch, float* x, float* y, float* z) {
+	*x = sinf(yaw) * sinf(pitch);
+	*y = cosf(pitch);
+	*z = cosf(yaw) * sinf(pitch);
+}
+
+static float camera_angle_delta(float a, float b) {
+	float d = a - b;
+	while(d > PI) d -= DOUBLEPI;
+	while(d < -PI) d += DOUBLEPI;
+	return d;
+}
+
+static float camera_clamp_angle_around(float center, float value, float range) {
+	float d = camera_angle_delta(value, center);
+	if(d > range) d = range;
+	if(d < -range) d = -range;
+	return center + d;
+}
+
+void camera_freeaim_reset(void) {
+	camera_crosshair_rot_x = camera_muzzle_rot_x = camera_rot_x;
+	camera_crosshair_rot_y = camera_muzzle_rot_y = camera_rot_y;
+}
+
+void camera_freeaim_update_muzzle(float dt) {
+	if(!settings.free_aim || camera_mode != CAMERAMODE_FPS) {
+		camera_freeaim_reset();
+		return;
+	}
+
+	/* TigerSpades-style free aim: the visible crosshair moves immediately,
+	   while the actual muzzle/shot direction eases into it quickly. */
+	const float tau = 0.039F;
+	float a = dt / (tau + dt);
+	if(a < 0.0F) a = 0.0F;
+	if(a > 1.0F) a = 1.0F;
+	camera_muzzle_rot_x += camera_angle_delta(camera_crosshair_rot_x, camera_muzzle_rot_x) * a;
+	camera_muzzle_rot_y += (camera_crosshair_rot_y - camera_muzzle_rot_y) * a;
+}
+
+void camera_look_delta(float yaw_delta, float pitch_delta) {
+	if(settings.free_aim && camera_mode == CAMERAMODE_FPS) {
+		camera_crosshair_rot_x -= yaw_delta;
+		camera_crosshair_rot_y += pitch_delta;
+
+		float h = settings.free_aim_deadzone_h * PI / 180.0F;
+		float v = settings.free_aim_deadzone_v * PI / 180.0F;
+		if(h < 0.0F) h = 0.0F;
+		if(v < 0.0F) v = 0.0F;
+
+		if(fabsf(camera_angle_delta(camera_crosshair_rot_x, camera_rot_x)) >= h)
+			camera_rot_x -= yaw_delta;
+		if(fabsf(camera_crosshair_rot_y - camera_rot_y) >= v)
+			camera_rot_y += pitch_delta;
+
+		camera_overflow_adjust();
+		camera_crosshair_rot_x = camera_clamp_angle_around(camera_rot_x, camera_crosshair_rot_x, h);
+		camera_crosshair_rot_y = fmaxf(camera_rot_y - v, fminf(camera_rot_y + v, camera_crosshair_rot_y));
+		camera_overflow_adjust();
+		return;
+	}
+
+	camera_rot_x -= yaw_delta;
+	camera_rot_y += pitch_delta;
+	camera_overflow_adjust();
+	camera_freeaim_reset();
+}
+
 void camera_overflow_adjust() {
 	/* Pitch is clamped to just under +-90 degrees in EVERY mode now.
 	   Spectator used to allow pitch past the pole ("FPV-style free
@@ -109,21 +180,19 @@ void camera_overflow_adjust() {
 	   view itself stayed upright. Over-the-pole spectator angles are
 	   instead reached with camera roll (drone-style flip), which keeps
 	   the input mapping consistent in every orientation. */
-	if(camera_rot_y < EPSILON) {
-		camera_rot_y = EPSILON;
-	}
+	if(camera_rot_y < EPSILON) camera_rot_y = EPSILON;
+	if(camera_rot_y > 3.14F) camera_rot_y = 3.14F;
+	if(camera_crosshair_rot_y < EPSILON) camera_crosshair_rot_y = EPSILON;
+	if(camera_crosshair_rot_y > 3.14F) camera_crosshair_rot_y = 3.14F;
+	if(camera_muzzle_rot_y < EPSILON) camera_muzzle_rot_y = EPSILON;
+	if(camera_muzzle_rot_y > 3.14F) camera_muzzle_rot_y = 3.14F;
 
-	if(camera_rot_y > 3.14F) {
-		camera_rot_y = 3.14F;
-	}
-
-	if(camera_rot_x > DOUBLEPI) {
-		camera_rot_x -= DOUBLEPI;
-	}
-
-	if(camera_rot_x < 0.0F) {
-		camera_rot_x += DOUBLEPI;
-	}
+	while(camera_rot_x > DOUBLEPI) camera_rot_x -= DOUBLEPI;
+	while(camera_rot_x < 0.0F) camera_rot_x += DOUBLEPI;
+	while(camera_crosshair_rot_x > DOUBLEPI) camera_crosshair_rot_x -= DOUBLEPI;
+	while(camera_crosshair_rot_x < 0.0F) camera_crosshair_rot_x += DOUBLEPI;
+	while(camera_muzzle_rot_x > DOUBLEPI) camera_muzzle_rot_x -= DOUBLEPI;
+	while(camera_muzzle_rot_x < 0.0F) camera_muzzle_rot_x += DOUBLEPI;
 }
 
 void camera_apply() {
@@ -159,10 +228,14 @@ void camera_hit_fromplayer(struct Camera_HitType* hit, int player_id, float rang
 				   players[player_id].physics.eye.z, players[player_id].orientation.x, players[player_id].orientation.y,
 				   players[player_id].orientation.z, range);
 	} else {
+		float rx, ry, rz;
+		if(settings.free_aim)
+			camera_vector_from_angles(camera_crosshair_rot_x, camera_crosshair_rot_y, &rx, &ry, &rz);
+		else
+			camera_vector_from_angles(camera_rot_x, camera_rot_y, &rx, &ry, &rz);
 		camera_hit(hit, player_id, players[player_id].physics.eye.x,
 				   players[player_id].physics.eye.y + player_height(&players[player_id]),
-				   players[player_id].physics.eye.z, sin(camera_rot_x) * sin(camera_rot_y), cos(camera_rot_y),
-				   cos(camera_rot_x) * sin(camera_rot_y), range);
+				   players[player_id].physics.eye.z, rx, ry, rz, range);
 	}
 }
 
@@ -224,8 +297,12 @@ void camera_hit_mask(struct Camera_HitType* hit, int exclude_player, float x, fl
 }
 
 int* camera_terrain_pick(unsigned char mode) {
-	return camera_terrain_pickEx(mode, camera_x, camera_y, camera_z, sin(camera_rot_x) * sin(camera_rot_y),
-								 cos(camera_rot_y), cos(camera_rot_x) * sin(camera_rot_y));
+	float rx, ry, rz;
+	if(settings.free_aim && camera_mode == CAMERAMODE_FPS)
+		camera_vector_from_angles(camera_crosshair_rot_x, camera_crosshair_rot_y, &rx, &ry, &rz);
+	else
+		camera_vector_from_angles(camera_rot_x, camera_rot_y, &rx, &ry, &rz);
+	return camera_terrain_pickEx(mode, camera_x, camera_y, camera_z, rx, ry, rz);
 }
 
 // kindly borrowed from
