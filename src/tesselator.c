@@ -113,8 +113,7 @@ void tesselator_draw(struct tesselator* t, int with_color) {
 #if defined(OPENGL_ES)
         if(gles_version >= 2) {
                 glx_use_default_shader();
-                glUniform4fv(glGetUniformLocation(glx_default_shader_program(), "u_Color"), 1, gles_current_color);
-                glUniform1f(glGetUniformLocation(glx_default_shader_program(), "u_HasVertexColor"), with_color ? 1.0F : 0.0F);
+                glx_default_shader_set_draw_state(with_color, t->texcoords != NULL);
 
                 switch(t->vertex_type) {
                         case VERTEX_INT:
@@ -139,11 +138,6 @@ void tesselator_draw(struct tesselator* t, int with_color) {
                 if(t->texcoords) {
                         glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 0, t->texcoords);
                         glEnableVertexAttribArray(2);
-                        glUniform1f(glGetUniformLocation(glx_default_shader_program(), "u_TextureEnabled"), 1.0F);
-                        /* Reset texcoord scale — font rendering sets 1/8192 */
-                        glUniform1f(glGetUniformLocation(glx_default_shader_program(), "u_TexCoordScale"), 1.0F);
-                } else {
-                        glUniform1f(glGetUniformLocation(glx_default_shader_program(), "u_TextureEnabled"), 0.0F);
                 }
 
                 glDrawArrays(GL_TRIANGLES, 0, t->quad_count * 6);

@@ -68,6 +68,15 @@ static pthread_mutex_t water_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t water_cond = PTHREAD_COND_INITIALIZER;
 
 bool water_shader_active(void) {
+        /* Keep the original BetterSpades fast path unless the user explicitly
+           enables KyroSpades' enhanced water.  Previously this returned true
+           whenever the camera was above water, even with water_shader=0.  That
+           removed underwater blocks from chunk meshes, started a worker thread,
+           rebuilt a large water cache, and rendered a separate water surface
+           every frame.  On low-end/mobile GPUs this was one of the biggest
+           regressions compared with the original client. */
+        if(!settings.water_shader && !settings.water_waves)
+                return false;
         return camera_y > WATER_LEVEL + 0.05F && map_size_x > 0 && map_size_z > 0;
 }
 
@@ -320,8 +329,8 @@ void water_reflection_pass(void) {
         if(!water_shader_active())
                 return;
 
-        wr.last_cam_x = camera_x;
-        wr.last_cam_z = camera_z;
+        float prev_cam_x = wr.last_cam_x;
+        float prev_cam_z = wr.last_cam_z;
 
         if(pthread_mutex_trylock(&water_lock) != 0)
                 return;
@@ -334,10 +343,12 @@ void water_reflection_pass(void) {
         /* Invalidate the cache when the camera has moved more than 1 block
            horizontally so that stale reflection rays from the old position
            aren't rendered at the wrong world coordinates. */
-        if(wr.cache && (fabsf(camera_x - wr.last_cam_x) > 1.0F || fabsf(camera_z - wr.last_cam_z) > 1.0F)) {
+        if(wr.cache && (fabsf(camera_x - prev_cam_x) > 1.0F || fabsf(camera_z - prev_cam_z) > 1.0F)) {
                 memset(wr.cache, 0, (size_t)wr.size_x * wr.size_z * sizeof(uint32_t));
                 wr.cursor = 0;
         }
+        wr.last_cam_x = camera_x;
+        wr.last_cam_z = camera_z;
 
         if(!wr.thread_started) {
                 if(pthread_create(&wr.thread, NULL, water_worker, NULL) != 0) {

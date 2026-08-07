@@ -1561,8 +1561,11 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                         glColor3f(1.0F, 1.0F, 1.0F);
                 }
 
-                // Always render team scores at top of screen
-                if(network_connected && network_logged_in) {
+                // Optional compact team scores at top of screen.  This was
+                // always-on in KyroSpades and cost a couple font/quad draws
+                // every single gameplay frame; keep the feature, but don't
+                // tax the BetterSpades-style fast HUD unless requested.
+                if(settings.show_live_player_count && network_connected && network_logged_in) {
                         for(int i = 0; i < 2; i++) {
                                 struct Team team;
                                 float x_offset;

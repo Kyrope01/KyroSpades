@@ -79,6 +79,8 @@ void glx_draw_gradient_quad_2d(float x, float y, float w, float h, float r1, flo
 void glx_draw_screen_quad(void);
 void glx_use_default_shader(void);
 int glx_default_shader_program(void);
+void glx_default_shader_set_draw_state(int with_vertex_color, int texture_enabled);
+void glx_default_shader_set_texcoord_scale(float scale);
 #endif
 
 #endif

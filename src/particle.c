@@ -315,28 +315,34 @@ void particle_render() {
         // Draw regular (untextured) particles
         tesselator_draw(&particle_tesselator, 1);
 
-        // Draw textured rain particles — one pass per raindrop texture (Mineclonia uses 3)
-        // Enable GL_TEXTURE_2D + GL_MODULATE so the raindrop PNG is actually sampled
-        // (without these, fixed-function GL ignores the bound texture and renders the
-        // white vertex color — the "white billboard" bug).
-        glActiveTexture(GL_TEXTURE0);
-        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
-        glEnable(GL_TEXTURE_2D);
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        glDisable(GL_CULL_FACE); // rain billboards must be visible from any angle
+        // Draw textured rain particles only when rain is actually present.  The
+        // old path toggled texture/blend/cull state and rebound textures every
+        // frame even with weather disabled, adding needless driver work to the
+        // normal gameplay loop.
+        int rain_quads = rain_tesselator[0].quad_count + rain_tesselator[1].quad_count + rain_tesselator[2].quad_count;
+        if(rain_quads > 0) {
+                // Mineclonia uses 3 raindrop textures. Enable GL_TEXTURE_2D +
+                // GL_MODULATE so the raindrop PNG alpha is sampled correctly.
+                glActiveTexture(GL_TEXTURE0);
+                glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+                glEnable(GL_TEXTURE_2D);
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                glDisable(GL_CULL_FACE); // rain billboards must be visible from any angle
 
-        static const struct texture* rain_textures[3] = {&texture_rain1, &texture_rain2, &texture_rain3};
-        for(int i = 0; i < 3; i++) {
-                if(rain_tesselator[i].quad_count > 0) {
-                        glBindTexture(GL_TEXTURE_2D, rain_textures[i]->texture_id);
-                        tesselator_draw(&rain_tesselator[i], 1);
+                static const struct texture* rain_textures[3] = {&texture_rain1, &texture_rain2, &texture_rain3};
+                for(int i = 0; i < 3; i++) {
+                        if(rain_tesselator[i].quad_count > 0) {
+                                glBindTexture(GL_TEXTURE_2D, rain_textures[i]->texture_id);
+                                tesselator_draw(&rain_tesselator[i], 1);
+                        }
                 }
-        }
 
-        glBindTexture(GL_TEXTURE_2D, 0);
-        glDisable(GL_BLEND);
-        glDisable(GL_TEXTURE_2D);
+                glBindTexture(GL_TEXTURE_2D, 0);
+                glDisable(GL_BLEND);
+                glDisable(GL_TEXTURE_2D);
+                glEnable(GL_CULL_FACE);
+        }
 }
 
 void particle_create_casing(struct Player* p) {

@@ -380,30 +380,6 @@ void display() {
            not live there or settings only take effect once in-game. */
         window_apply();
 
-        /* Capture the framebuffer that is bound RIGHT NOW, at the very top of the
-           frame, before we touch any post-process FBO. This is the framebuffer
-           SDL left bound coming out of the previous frame's swap — i.e. the one
-           that actually gets presented, and exactly the one the (working)
-           shaders-off direct-render path draws into implicitly. Earlier code
-           trusted a value captured in window_init / window_update (after swap),
-           which on iOS could read an MSAA/renderbuffer-resolve leftover rather
-           than the presented view FBO; binding that for the post-process
-           composite sent the whole frame — world, HUD, even a debug clear —
-           off-screen, leaving the last presented frame (the serverlist) frozen.
-           Reading it live here removes that guesswork. */
-        GLint live_screen_fbo = 0;
-        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &live_screen_fbo);
-        if(live_screen_fbo > 0)
-                window_gl_default_framebuffer = (int)live_screen_fbo;
-
-        if(network_map_transfer) {
-                glClearColor(0.0F, 0.0F, 0.0F, 1.0F);
-        } else {
-                float fc[3];
-                fog_color_render(fc);
-                glClearColor(fc[0], fc[1], fc[2], fog_color[3]);
-        }
-
         /* Treat near-zero slider values as OFF: the on-screen sliders can't
            always land exactly on 0 (touch precision), and a visually-nil
            post-process pass would otherwise keep running. */
@@ -414,20 +390,36 @@ void display() {
                                   || settings.vignette > 0.5F || settings.volumetric_light || settings.lens_flare
                                   || settings.chromatic_aberration || settings.filmic_tonemapping));
 
+        /* Avoid a driver-synchronising glGetIntegerv every frame on the normal
+           fast path.  We only need the live framebuffer id when a post-process
+           pass may bind away from the screen (or on iOS, where the drawable FBO
+           can be non-zero). */
+        GLint live_screen_fbo = window_gl_default_framebuffer;
+        if(needs_postproc) {
+                glGetIntegerv(GL_FRAMEBUFFER_BINDING, &live_screen_fbo);
+                if(live_screen_fbo > 0)
+                        window_gl_default_framebuffer = (int)live_screen_fbo;
+        }
+
+        if(network_map_transfer) {
+                glClearColor(0.0F, 0.0F, 0.0F, 1.0F);
+        } else {
+                float fc[3];
+                fog_color_render(fc);
+                glClearColor(fc[0], fc[1], fc[2], fog_color[3]);
+        }
+
         if(hud_active->render_world || network_connected) {
-                /* Per-frame backup re-capture, in case SDL recreated the FBO mid-run
-                   (orientation change etc.) between swap and the next swap. NON-ZERO
-                   GUARD is critical: this is exactly where v12 silently broke — it
-                   stored any value >= 0 including 0, and a single 0 read here wiped
-                   the good FBO id captured at startup, sending every subsequent
-                   render off-screen. We only accept positive values; on desktop the
-                   var stays 0 (the correct default FBO there) because nothing here
-                   ever overwrites it. */
-                {
+                /* Per-frame backup re-capture only when post-processing is on.
+                   glGetIntegerv can stall the pipeline, so keep it out of the
+                   default gameplay path. */
+                if(needs_postproc) {
                         GLint fb = -1;
                         glGetIntegerv(GL_FRAMEBUFFER_BINDING, &fb);
-                        if(fb > 0)
+                        if(fb > 0) {
                                 window_gl_default_framebuffer = fb;
+                                live_screen_fbo = fb;
+                        }
                 }
 
 #if defined(OS_IOS)
@@ -1067,7 +1059,8 @@ void display() {
                    the real 3D scene -- everything from here on (view-model
                    rendering, HUD ortho projection, etc.) will overwrite
                    matrix_view/matrix_projection for its own purposes. */
-                damagenumbers_capture_camera();
+                if(settings.damage_numbers)
+                        damagenumbers_capture_camera();
 
                 if(!network_map_transfer) {
                         /* Sky gradient: drawn as a background BEFORE the 3D scene so
@@ -2169,11 +2162,11 @@ int main(int argc, char** argv) {
         settings.color_correction = 0;
         settings.multisamples = 0;
         settings.shadow_entities = 0;
-        settings.ambient_occlusion = 1;
+        settings.ambient_occlusion = 0;
         settings.ao_multiplier = 1.0F;
-        settings.shadow_quality = 1;
+        settings.shadow_quality = 0;
         settings.shadow_intensity = 0.40F;
-        settings.sky_gradient = 1;
+        settings.sky_gradient = 0;
         settings.sky_gradient_intensity = 0.5F;
         settings.water_waves = 0;
         settings.water_wave_intensity = 2.0F;
@@ -2192,7 +2185,8 @@ int main(int argc, char** argv) {
         settings.ui_accent_b = 200;
         settings.ui_rgb = 0;
         settings.ui_rgb_speed = 1.0F;
-        settings.healthbar = 1;
+        settings.hud_shadows = 0;
+        settings.healthbar = 0;
         settings.ammo_crosshair = 0;
         settings.greedy_meshing = 0;
         /* The look formula is `setting / 5.0F * MOUSE_SENSITIVITY`, so the
@@ -2223,19 +2217,23 @@ int main(int argc, char** argv) {
         settings.skin_player = 0;
         settings.skin_intel = 0;
         settings.skin_tent = 0;
-        settings.exposure = 5.0F;
-        settings.contrast = 13.0F;
-        settings.vignette = 10.0F;
+        /* BetterSpades' smoothness comes from keeping the default render path
+           simple.  Color grading/filmic/vignette are still available in the
+           settings menu, but they must be opt-in: any non-zero value forces a
+           full-screen FBO + shader pass every frame. */
+        settings.exposure = 0.0F;
+        settings.contrast = 0.0F;
+        settings.vignette = 0.0F;
         settings.volumetric_light = 0;
         settings.volumetric_light_strength = 0.2F;
         settings.volumetric_light_brightness = 0.3F;
         settings.volumetric_light_range = 1.0F;
         /* ── New post-proc shaders ───────────────────────────────────────────
-           Only filmic tone mapping is on by default.  Chromatic aberration is
-           available as an opt-in effect.  (Bloom has been removed entirely.) */
+           These are available as opt-in visual effects, but default off so the
+           client keeps the original BetterSpades fast render path. */
         settings.chromatic_aberration = 0;
         settings.chromatic_aberration_strength = 1.5F;
-        settings.filmic_tonemapping = 1;
+        settings.filmic_tonemapping = 0;
         settings.chat_mention_r = 255;
         settings.chat_mention_g = 255;
         /* Movement-feel / network smoothing defaults: all on, each can be

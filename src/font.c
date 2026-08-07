@@ -300,11 +300,9 @@ void font_render(float x, float y, float h, char* text) {
 #if defined(OPENGL_ES)
 	if(gles_version >= 2) {
 		glx_use_default_shader();
-		glUniform4fv(glGetUniformLocation(glx_default_shader_program(), "u_Color"), 1, gles_current_color);
-		glUniform1f(glGetUniformLocation(glx_default_shader_program(), "u_HasVertexColor"), 0.0F);
-		glUniform1f(glGetUniformLocation(glx_default_shader_program(), "u_TextureEnabled"), 1.0F);
+		glx_default_shader_set_draw_state(0, 1);
 		/* Font texcoords are baked as 8192x8192; scale down by 1/8192 */
-		glUniform1f(glGetUniformLocation(glx_default_shader_program(), "u_TexCoordScale"), 1.0F / 8192.0F);
+		glx_default_shader_set_texcoord_scale(1.0F / 8192.0F);
 
 		glActiveTexture(GL_TEXTURE0);
 		glBindTexture(GL_TEXTURE_2D, font->texture_id);
@@ -312,7 +310,6 @@ void font_render(float x, float y, float h, char* text) {
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-		glUniform1i(glGetUniformLocation(glx_default_shader_program(), "u_Texture"), 0);
 		glEnable(GL_BLEND);
 		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 

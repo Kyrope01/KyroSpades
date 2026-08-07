@@ -324,17 +324,10 @@ void cameracontroller_fps(float dt) {
 		float target = (!players[local_player_id].physics.airborne && hsp > 0.4F)
 			? fminf(hsp / 8.0F, 1.25F) * 0.8F : 0.0F;
 		cam_bob_strength += (target - cam_bob_strength) * fminf(dt * 8.0F, 1.0F);
-		if(target > 0.0F) {
+		if(target > 0.0F)
 			/* ~2.8-4.8 Hz: head-bob territory, NOT a buzz (the old rate
 			   reached ~8.5 Hz lateral + 17 Hz vertical - vibrated). */
 			cam_bob_phase += dt * (2.8F + 2.0F * target);
-			/* Wrap phase at 2*PI to prevent floating-point precision loss
-			   over very long sessions. Without this, after hours of play
-			   the phase value grows large enough that sinf/cosf lose
-			   precision, causing visible micro-jitter and artifacts. */
-			if(cam_bob_phase > 6.2831853F)
-				cam_bob_phase -= 6.2831853F;
-		}
 	} else {
 		cam_bob_strength = 0.0F;
 	}
@@ -408,26 +401,18 @@ void cameracontroller_fps_render() {
 	   hit tests are computed from the unmodified globals). */
 	float ex = camera_x, ey = camera_y, ez = camera_z;
 	float rx = camera_rot_x, ry = camera_rot_y;
-	float up_vx = 0.0F, up_vy = 1.0F, up_vz = 0.0F;
 
 	if(settings.view_bob && cam_bob_strength > 0.001F) {
-		/* Rotational head sway: replaces positional bob to prevent near
-		   terrain from shearing against the glued viewmodel. */
-		float strength = cam_bob_strength;
-		float roll = sinf(cam_bob_phase) * 0.010F * strength;
-		float nod = cosf(cam_bob_phase) * 0.0055F * strength;
-		ry += nod;
-		/* Positional vertical offset only while grounded. When airborne,
-		   even a small ey offset creates parallax jitter against terrain
-		   when panning (the camera is falling under gravity, so any
-		   additional vertical translation shears the view). Rotational
-		   sway (roll/nod above) is safe because it doesn't translate. */
-		if(!players[local_player_id].physics.airborne) {
-			ey += sinf(cam_bob_phase + 1.5707963F) * 0.010F * strength;
-		}
-		up_vx = cosf(rx) * sinf(roll);
-		up_vy = cosf(roll);
-		up_vz = -sinf(rx) * sinf(roll);
+		/* Single-frequency quadrature ellipse (lat = cos, up = sin): one
+		   smooth circular sway at walking cadence. The previous version
+		   ran the vertical axis at 2x the phase frequency, which turns
+		   into visible high-frequency vibration at high frame rates. */
+		float lat = cosf(cam_bob_phase) * 0.045F * cam_bob_strength;
+		float up = sinf(cam_bob_phase) * 0.032F * cam_bob_strength;
+		/* yaw-right vector: derivative of (sin rx, cos rx) is (cos rx, -sin rx) */
+		ex += cosf(rx) * lat;
+		ez -= sinf(rx) * lat;
+		ey += up;
 	}
 
 	if(settings.camera_shake && cam_shake_value > 0.0001F) {
@@ -441,7 +426,7 @@ void cameracontroller_fps_render() {
 	}
 
 	matrix_lookAt(matrix_view, ex, ey, ez, ex + sin(rx) * sin(ry), ey + cos(ry), ez + cos(rx) * sin(ry),
-				  up_vx, up_vy, up_vz);
+				  0.0F, 1.0F, 0.0F);
 }
 
 // Spectator camera velocity with smooth acceleration/deceleration

@@ -68,6 +68,7 @@ static bool bloodmarks_tesselator_ready = false;
    implementation did -- was pure wasted CPU on the common case where
    nothing changed since the last frame. */
 static bool bloodmarks_dirty = true;
+static bool bloodmarks_any_active = false;
 
 static float bloodmarks_frand(void) {
 	/* ms_rand() returns a 15-bit value (0..32767) */
@@ -84,8 +85,11 @@ void bloodmarks_init(void) {
 }
 
 void bloodmarks_clear(void) {
+	if(!bloodmarks_any_active && !bloodmarks_tesselator.quad_count)
+		return;
 	for(int k = 0; k < BLOODMARKS_MAX; k++)
 		marks[k].active = false;
+	bloodmarks_any_active = false;
 	bloodmarks_dirty = true;
 }
 
@@ -120,6 +124,7 @@ static void bloodmarks_spawn(int bx, int by, int bz, int axis, int dir, bool by_
 	struct blood_mark* m = bloodmarks_alloc_slot();
 
 	m->active = true;
+	bloodmarks_any_active = true;
 	m->by_local = by_local;
 	m->time = 0.0F;
 	m->fade = 0.0F;
@@ -218,6 +223,10 @@ void bloodmarks_update(float dt) {
 		return;
 	}
 
+	if(!bloodmarks_any_active)
+		return;
+
+	bool any_active = false;
 	for(int k = 0; k < BLOODMARKS_MAX; k++) {
 		struct blood_mark* m = &marks[k];
 		if(!m->active)
@@ -230,6 +239,8 @@ void bloodmarks_update(float dt) {
 			if(m->fade >= 1.0F) {
 				m->active = false;
 				bloodmarks_dirty = true;
+			} else {
+				any_active = true;
 			}
 			continue;
 		}
@@ -239,8 +250,11 @@ void bloodmarks_update(float dt) {
 		if(!bloodmarks_anchor_solid(m)) {
 			m->active = false;
 			bloodmarks_dirty = true;
+			continue;
 		}
+		any_active = true;
 	}
+	bloodmarks_any_active = any_active;
 }
 
 /* Emit one blot's quad into the tesselator. `u,v` are in block-local [0,1]
@@ -277,7 +291,7 @@ static void bloodmarks_emit_blot(int axis, float fixed_coord, float base_x, floa
 }
 
 void bloodmarks_render(void) {
-	if(!settings.blood_marks)
+	if(!settings.blood_marks || (!bloodmarks_any_active && bloodmarks_tesselator.quad_count == 0))
 		return;
 
 	if(bloodmarks_dirty) {

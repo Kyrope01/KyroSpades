@@ -1167,30 +1167,36 @@ void read_PacketHandshakeInit(void* data, int len) {
 
 void read_PacketVersionGet(void* data, int len) {
         struct PacketVersionSend ver;
-        ver.client = 'K';
+        /* The aos:// version packet only has a one-byte client id, and common
+           servers only know the original BetterSpades id ('B').  Sending a new
+           KyroSpades-only id ('K') makes /client print "Unknown" even though
+           the OS/detail string below already identifies this client as
+           KyroSpades.  Keep the wire-level id BetterSpades-compatible so the
+           protocol stays BS-like and servers don't mis-label it as Unknown. */
+        ver.client = 'B';
         ver.major = KYROSPADES_MAJOR;
         ver.minor = KYROSPADES_MINOR;
         ver.revision = KYROSPADES_PATCH;
 #ifndef OPENGL_ES
 #ifdef OS_WINDOWS
-        char* os = "KyroSpades (Windows) " BS_VER_INFO;
+        char* os = "KyroSpades (Windows)";
 #endif
 #ifdef OS_LINUX
-        char* os = "KyroSpades (Linux) " BS_VER_INFO;
+        char* os = "KyroSpades (Linux)";
 #endif
 #ifdef OS_APPLE
-        char* os = "KyroSpades (Apple) " BS_VER_INFO;
+        char* os = "KyroSpades (Apple)";
 #endif
 #ifdef OS_HAIKU
-        char* os = "KyroSpades (Haiku) " BS_VER_INFO;
+        char* os = "KyroSpades (Haiku)";
 #endif
 #else
 #if defined(OS_IOS)
-        char* os = "KyroSpades (iOS) " BS_VER_INFO;
+        char* os = "KyroSpades (iOS)";
 #elif defined(USE_TOUCH)
-        char* os = "KyroSpades (Android) " BS_VER_INFO;
+        char* os = "KyroSpades (Android)";
 #else
-        char* os = "KyroSpades (Embedded) " BS_VER_INFO;
+        char* os = "KyroSpades (Embedded)";
 #endif
 #endif
         strcpy(ver.operatingsystem, os);
@@ -1479,7 +1485,14 @@ int network_update() {
                         network_stats_last = window_time();
                 }
 
-                network_service();
+                /* If the frame already serviced ENet at the start (the
+                   low-latency path in main.c), don't immediately poll the
+                   socket a second time at the end of the same frame.  At very
+                   high FPS that double zero-timeout enet_host_service() call
+                   showed up as pure overhead compared with BetterSpades while
+                   adding almost no latency benefit. */
+                if(!settings.net_early_opt)
+                        network_service();
                 /* a disconnect processed above clears network_connected;
                    preserve the old early-exit behavior */
                 if(!network_connected)

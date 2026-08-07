@@ -57,6 +57,7 @@ struct damage_indicator {
 };
 
 static struct damage_indicator indicators[DAMAGENUMBERS_MAX];
+static bool indicators_any_active = false;
 
 /* Cached once per frame via damagenumbers_capture_camera(): the world-space
    view/projection matrices at the moment the 3D scene camera was finalized.
@@ -78,8 +79,11 @@ void damagenumbers_init(void) {
 }
 
 void damagenumbers_clear(void) {
+	if(!indicators_any_active)
+		return;
 	for(int k = 0; k < DAMAGENUMBERS_MAX; k++)
 		indicators[k].active = false;
+	indicators_any_active = false;
 }
 
 static struct damage_indicator* damagenumbers_find_recent(int victim_id) {
@@ -133,6 +137,7 @@ void damagenumbers_add(int victim_id, int damage, float x, float y, float z) {
 
 	struct damage_indicator* slot = damagenumbers_alloc_slot();
 	slot->active = true;
+	indicators_any_active = true;
 	slot->victim_id = victim_id;
 	slot->damage = damage;
 	slot->crit = damage >= DAMAGENUMBERS_CRIT_THRESHOLD;
@@ -162,6 +167,10 @@ void damagenumbers_update(float dt) {
 		return;
 	}
 
+	if(!indicators_any_active)
+		return;
+
+	bool any_active = false;
 	for(int k = 0; k < DAMAGENUMBERS_MAX; k++) {
 		struct damage_indicator* ind = &indicators[k];
 		if(!ind->active)
@@ -174,11 +183,13 @@ void damagenumbers_update(float dt) {
 			ind->active = false;
 			continue;
 		}
+		any_active = true;
 
 		ind->x += ind->vx * dt;
 		ind->y += ind->vy * dt;
 		ind->z += ind->vz * dt;
 	}
+	indicators_any_active = any_active;
 }
 
 /* Projects a world point to 2D screen coordinates in this engine's HUD space
@@ -214,7 +225,7 @@ void damagenumbers_capture_camera(void) {
 }
 
 void damagenumbers_render(void) {
-	if(!settings.damage_numbers)
+	if(!settings.damage_numbers || !indicators_any_active)
 		return;
 
 	font_select(FONT_FIXEDSYS);

@@ -520,6 +520,21 @@ int glx_default_shader_program(void) {
         return default_shader;
 }
 
+void glx_default_shader_set_draw_state(int with_vertex_color, int texture_enabled) {
+        if(gles_version >= 2 && default_shader) {
+                glUniform4fv(loc_u_Color, 1, gles_current_color);
+                glUniform1f(loc_u_HasVertexColor, with_vertex_color ? 1.0F : 0.0F);
+                glUniform1f(loc_u_TextureEnabled, texture_enabled ? 1.0F : 0.0F);
+                if(texture_enabled)
+                        glUniform1f(loc_u_TexCoordScale, 1.0F);
+        }
+}
+
+void glx_default_shader_set_texcoord_scale(float scale) {
+        if(gles_version >= 2 && default_shader)
+                glUniform1f(loc_u_TexCoordScale, scale);
+}
+
 static void glx_ensure_quad_vbo(void) {
         if(quad_vbo)
                 return;
