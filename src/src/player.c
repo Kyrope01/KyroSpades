@@ -1,0 +1,1985 @@
+
+/*
+	Copyright (c) 2017-2020 ByteBit
+
+	This file is part of KyroSpades.
+
+	KyroSpades is free software: you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation, either version 3 of the License, or
+	(at your option) any later version.
+
+	KyroSpades is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
+
+	You should have received a copy of the GNU General Public License
+	along with KyroSpades.  If not, see <http://www.gnu.org/licenses/>.
+*/
+
+#include <stdlib.h>
+#include "demo.h"
+#include <math.h>
+#include <limits.h>
+
+#include "common.h"
+#include "camera.h"
+#include "player.h"
+#include "sound.h"
+#include "map.h"
+#include "matrix.h"
+#include "model.h"
+#include "font.h"
+#include "cameracontroller.h"
+#include "config.h"
+#include "glx.h"
+#include "tracer.h"
+#include "weapon.h"
+#include "window.h"
+#include "particle.h"
+#include "hud.h"
+#include "bloodmarks.h"
+#include "damagenumbers.h"
+#include <math.h>
+#include "cameracontroller.h"
+static float os_sprint_state=0, os_sprint_smooth=0, os_raise_state=1, os_last_time=0, os_aim_state=0, os_aim_smooth=0;
+/* First-person look sway state. Keeping this across render frames lets mouse
+   deltas be filtered instead of snapping the arms once per input event. */
+static float os_sway_x=0, os_sway_y=0, os_last_rot_x=0, os_last_rot_y=0;
+static int os_sway_initialized=0;
+static float os_lerp_smooth(float cur,float tgt,float dt,float p){float f=1.0f-powf(p,dt);return cur+(tgt-cur)*f;}
+
+static void player_draw_esp_box(struct Player* p);
+
+struct GameState gamestate;
+
+// Check if a player is obscured from the camera's viewpoint
+static int player_is_obscured(struct Player* p) {
+        struct Camera_HitType hit;
+        float tx = p->physics.eye.x;
+        float ty = p->physics.eye.y + player_height(p) * 0.5F;
+        float tz = p->physics.eye.z;
+        camera_hit_mask(&hit, -1, camera_x, camera_y, camera_z,
+                        tx - camera_x, ty - camera_y, tz - camera_z, 1024.0F);
+        // Player is obscured if terrain is hit before the player hitbox.
+        return hit.type == CAMERA_HITTYPE_BLOCK;
+}
+
+// Check if a player is within frustum and render distance
+static int player_in_view(struct Player* p) {
+	float rd = settings.render_distance + 2.0F;
+	return camera_CubeInFrustum(p->pos.x, p->pos.y, p->pos.z, 1.0F, 2.0F)
+	       && distance2D(p->pos.x, p->pos.z, camera_x, camera_z) <= rd * rd;
+}
+
+/* Check if a block position overlaps with the local player's AABB */
+int overlaps_with_player(int bx, int by, int bz) {
+        if(camera_mode != CAMERAMODE_FPS || local_player_id >= PLAYERS_MAX) {
+                return 0;
+        }
+        
+        struct Player* p = &players[local_player_id];
+        if(!p->alive || p->team == TEAM_SPECTATOR) {
+                return 0;
+        }
+        
+        /* Horizontal footprint: the player is 0.9 wide, centered on pos
+           (the same +/-0.45 player_clipbox sweeps). */
+        if(bx < (int)floorf(p->pos.x - 0.45F) || bx > (int)floorf(p->pos.x + 0.45F))
+                return 0;
+        if(bz < (int)floorf(p->pos.z - 0.45F) || bz > (int)floorf(p->pos.z + 0.45F))
+                return 0;
+
+        /* Vertical extent, in map cells.  pos.y is the EYE BASE, not the
+           feet: a grounded player rests with pos.y about 1.25 (standing) /
+           0.35 (crouched) above the floor (player_boxclipmove's landing
+           cell sits one cell below the feet).  The feet therefore occupy
+           floor(pos.y - 1.25) / floor(pos.y - 0.35), the collision body
+           fills the cells above them, and the head hitbox reaches
+           pos.y + 1.40 standing / +1.35 crouched.
+
+           The old code built the box as [pos.y, pos.y + 1.85], which starts
+           a full cell ABOVE the feet -- so the air cell you stand in never
+           overlapped and a block could be placed into your own feet while
+           standing.  The cell directly below the feet is deliberately NOT
+           included: that is the cell you land on / bridge with while
+           airborne, and it must stay placeable. */
+        int y_min = (int)floorf(p->pos.y - (p->input.keys.crouch ? 0.35F : 1.25F));
+        int y_max = (int)floorf(p->pos.y + (p->input.keys.crouch ? 1.35F : 1.40F));
+        return by >= y_min && by <= y_max;
+}
+
+int button_map[3];
+
+struct CorpseEntry corpses[CORPSE_MAX];
+
+unsigned char local_player_id = 0;
+unsigned char local_player_health = 100;
+unsigned char local_player_blocks = 50;
+unsigned char local_player_grenades = 3;
+unsigned char local_player_ammo, local_player_ammo_reserved;
+unsigned char local_player_respawn_time = 0;
+float local_player_death_time = 0.0F;
+unsigned char local_player_respawn_cnt_last = 255;
+unsigned char local_player_newteam;
+unsigned char local_player_lasttool;
+
+float local_player_last_damage_timer;
+float local_player_last_damage_x;
+float local_player_last_damage_y;
+float local_player_last_damage_z;
+
+char local_player_drag_active = 0;
+int local_player_drag_x;
+int local_player_drag_y;
+int local_player_drag_z;
+int local_player_drag_amount = 0;
+
+/* Pending block placement when airborne */
+char local_player_pending_block_active = 0;
+int local_player_pending_block_x;
+int local_player_pending_block_y;
+int local_player_pending_block_z;
+
+int player_intersection_type = -1;
+int player_intersection_player = 0;
+float player_intersection_dist = 1024.0F;
+
+struct Player players[PLAYERS_MAX];
+
+#define FALL_DAMAGE_VELOCITY 0.58F
+#define FALL_SLOW_DOWN 0.24F
+#define SQRT 0.70710678F
+#define WEAPON_PRIMARY 1
+#define FALL_DAMAGE_SCALAR 4096
+
+void player_save_corpse(int player_id) {
+	if(player_id < 0 || player_id >= PLAYERS_MAX)
+		return;
+	if(!settings.disable_corpse_despawn)
+		return;
+
+	struct Player* p = &players[player_id];
+
+	/* find a free slot */
+	int slot = -1;
+	for(int k = 0; k < CORPSE_MAX; k++) {
+		if(!corpses[k].active) {
+			slot = k;
+			break;
+		}
+	}
+	/* if full, evict oldest (first active slot) */
+	if(slot < 0) {
+		for(int k = 0; k < CORPSE_MAX; k++) {
+			if(corpses[k].active) {
+				slot = k;
+				break;
+			}
+		}
+	}
+	if(slot < 0)
+		return;
+
+	corpses[slot].active = 1;
+	corpses[slot].player_id = player_id;
+	corpses[slot].pos = p->pos;
+	corpses[slot].orientation = p->orientation;
+	corpses[slot].orientation_smooth = p->orientation_smooth;
+	corpses[slot].velocity = p->physics.velocity;
+	corpses[slot].team = p->team;
+}
+
+void player_clear_corpses(void) {
+	for(int k = 0; k < CORPSE_MAX; k++)
+		corpses[k].active = 0;
+}
+
+void player_update_corpses(float dt) {
+	if(!settings.disable_corpse_despawn)
+		return;
+
+	for(int k = 0; k < CORPSE_MAX; k++) {
+		if(!corpses[k].active)
+			continue;
+
+		/* skip corpses whose player is still dead (regular path handles them) */
+		int pid = corpses[k].player_id;
+		if(pid >= 0 && pid < PLAYERS_MAX && !players[pid].alive && players[pid].connected)
+			continue;
+
+		/* freeze settled corpses */
+		if(corpses[k].velocity.x * corpses[k].velocity.x
+			 + corpses[k].velocity.y * corpses[k].velocity.y
+			 + corpses[k].velocity.z * corpses[k].velocity.z < 0.001F)
+			continue;
+
+		corpses[k].velocity.y -= dt;
+
+		AABB dead_bb = {0};
+		aabb_set_size(&dead_bb, 0.7F, 0.15F, 0.7F);
+		aabb_set_center(&dead_bb,
+			corpses[k].pos.x + corpses[k].velocity.x * dt * 32.0F,
+			corpses[k].pos.y + corpses[k].velocity.y * dt * 32.0F,
+			corpses[k].pos.z + corpses[k].velocity.z * dt * 32.0F);
+
+		if(!aabb_intersection_terrain(&dead_bb, 0)) {
+			corpses[k].pos.x += corpses[k].velocity.x * dt * 32.0F;
+			corpses[k].pos.y += corpses[k].velocity.y * dt * 32.0F;
+			corpses[k].pos.z += corpses[k].velocity.z * dt * 32.0F;
+		} else {
+			corpses[k].velocity.x *= 0.36F;
+			corpses[k].velocity.y *= -0.36F;
+			corpses[k].velocity.z *= 0.36F;
+		}
+	}
+}
+
+void player_render_corpses(void) {
+	if(!settings.disable_corpse_despawn)
+		return;
+
+	for(int k = 0; k < CORPSE_MAX; k++) {
+		if(!corpses[k].active)
+			continue;
+
+		int pid = corpses[k].player_id;
+
+		/* skip if the player is still dead and connected (regular render handles it) */
+		if(pid >= 0 && pid < PLAYERS_MAX && !players[pid].alive && players[pid].connected)
+			continue;
+
+		struct CorpseEntry* c = &corpses[k];
+
+		float l = sqrt(distance3D(c->orientation_smooth.x, c->orientation_smooth.y, c->orientation_smooth.z, 0, 0, 0));
+		float ox = c->orientation_smooth.x / l;
+		float oz = c->orientation_smooth.z / l;
+
+		matrix_push(matrix_model);
+		matrix_translate(matrix_model, c->pos.x, c->pos.y + 0.25F, c->pos.z);
+		matrix_pointAt(matrix_model, ox, 0.0F, oz);
+		matrix_rotate(matrix_model, 90.0F, 0.0F, 1.0F, 0.0F);
+		if(c->velocity.y < 0.05F && c->pos.y < 1.5F)
+			matrix_translate(matrix_model, 0.0F, (sin(game_time() * 1.5F) - 1.0F) * 0.1F, 0.0F);
+		matrix_upload();
+		kv6_render(&model_playerdead, c->team);
+		matrix_pop(matrix_model);
+	}
+}
+
+void player_init() {
+	for(int k = 0; k < PLAYERS_MAX; k++) {
+		player_reset(&players[k]);
+		players[k].score = 0;
+		player_prev_snap(k);
+	}
+	player_clear_corpses();
+}
+
+void player_reset(struct Player* p) {
+	p->connected = 0;
+	p->alive = 0;
+	p->held_item = TOOL_GUN;
+	p->weapon = 0;
+	p->weapon_last_shot = 0;
+	p->block.red = 111;
+	p->block.green = 111;
+	p->block.blue = 111;
+	p->physics.velocity.x = 0.0F;
+	p->physics.velocity.y = 0.0F;
+	p->physics.velocity.z = 0.0F;
+	p->physics.jump = 0;
+	p->physics.airborne = 0;
+	p->physics.wade = 0;
+	p->input.keys.packed = 0;
+	p->input.buttons.packed = 0;
+	p->net_offset.x = p->net_offset.y = p->net_offset.z = 0.0F;
+	p->server_pos_time = 0.0F;
+}
+
+void player_on_held_item_change(struct Player* p) {
+	if(p->input.buttons.lmb)
+		p->input.buttons.lmb_start = game_time() + 0.8F;
+	if(p->input.buttons.rmb)
+		p->input.buttons.rmb_start = game_time() + 0.8F;
+
+	p->item_disabled = game_time();
+	p->items_show_start = game_time();
+	p->item_showup = game_time() + 0.3F;
+	p->items_show = 1;
+}
+
+int player_can_spectate(struct Player* p) {
+	// Validate local_player_id before accessing players array
+	if(local_player_id >= PLAYERS_MAX) {
+		return 0;
+	}
+	return p->connected
+		&& ((players[local_player_id].team != TEAM_SPECTATOR && p->team == players[local_player_id].team)
+			|| (players[local_player_id].team == TEAM_SPECTATOR && p->team != TEAM_SPECTATOR));
+}
+
+float player_swing_func(float x) {
+	x -= (int)x;
+	return (x < 0.5F) ? (x * 4.0F - 1.0F) : (3.0F - x * 4.0F);
+}
+
+float player_spade_func(float x) {
+	return 1.0F - (x * 5 - (int)(x * 5));
+}
+
+float* player_tool_func(const struct Player* p) {
+	static float ret[3];
+	ret[0] = ret[1] = ret[2] = 0.0F;
+	switch(p->held_item) {
+		case TOOL_SPADE: {
+			float t = game_time() - p->spade_use_timer;
+			if(p->spade_use_type == 1 && t > 0.2F) {
+				return ret;
+			}
+			if(p->spade_use_type == 2 && t > 1.0F) {
+				return ret;
+			}
+			if(p == &players[local_player_id] && camera_mode == CAMERAMODE_FPS) {
+				if(p->spade_use_type == 1) {
+					ret[0] = player_spade_func(t) * 90.0F;
+					return ret;
+				}
+				if(p->spade_use_type == 2) {
+					/* One continuous pickaxe dig: wind-up (raise), slam down,
+					   recover -- the old three-phase keyframes froze the
+					   swing mid-air while thrusting, which read as a glitch.
+					   Smoothstepped so the motion eases in and out. */
+					if(t <= 0.35F) {
+						float k = t / 0.35F;
+						k = k * k * (3.0F - 2.0F * k);
+						ret[0] = 60.0F * k;
+						ret[1] = -22.5F * k;
+						return ret;
+					}
+					if(t <= 0.6F) {
+						float k = (t - 0.35F) / 0.25F;
+						k = k * k * (3.0F - 2.0F * k);
+						ret[0] = 60.0F * (1.0F - k);
+						ret[1] = -22.5F * (1.0F - k);
+						return ret;
+					}
+					/* t > 0.6: resting pose until the next dig */
+				}
+			} else {
+				if(p->input.buttons.lmb) {
+					ret[0] = (player_swing_func((game_time() - p->spade_use_timer) * 2.5F) + 1.0F) / 2.0F * 60.0F;
+					return ret;
+				}
+				if(p->input.buttons.rmb) {
+					ret[0] = (player_swing_func((game_time() - p->spade_use_timer) * 0.5F) + 1.0F) / 2.0F * 60.0F;
+					return ret;
+				}
+			}
+		}
+			// case TOOL_GRENADE:
+			/*if(p->input.buttons.lmb && p!=&players[local_player_id]) {
+				ret[0] = max(-(game_time()-p->input.buttons.lmb_start)*35.0F,-35.0F);
+				return ret;
+			} else {
+				return ret;
+			}*/
+	}
+	return ret;
+}
+
+float* player_tool_translate_func(struct Player* p) {
+	static float ret[3];
+	ret[0] = ret[1] = ret[2] = 0.0F;
+	if(game_time() - p->item_showup < 0.5F) {
+		return ret;
+	}
+	if(p->held_item == TOOL_GUN
+	   && game_time() - p->weapon_last_shot < weapon_delay(p->weapon)) {
+		ret[2] = -(weapon_delay(p->weapon) - (game_time() - p->weapon_last_shot))
+			/ weapon_delay(p->weapon) * weapon_recoil_anim(p->weapon);
+		return ret;
+	}
+
+	if(p->held_item == TOOL_SPADE) {
+		float t = game_time() - p->spade_use_timer;
+		if(t > 1.0F) {
+			return ret;
+		}
+		if(p->spade_use_type == 2) {
+			/* Thrust forward as the pick slams down, pull back as it
+			   recovers -- overlaps the swing instead of freezing it. */
+			if(t > 0.35F && t <= 0.55F) {
+				float k = (t - 0.35F) / 0.20F;
+				k = k * k * (3.0F - 2.0F * k);
+				ret[2] = 0.8F * k;
+				return ret;
+			}
+			if(t > 0.55F && t <= 0.7F) {
+				float k = (t - 0.55F) / 0.15F;
+				k = k * k * (3.0F - 2.0F * k);
+				ret[2] = 0.8F * (1.0F - k);
+				return ret;
+			}
+		}
+	}
+	if(p->held_item == TOOL_GRENADE) {
+		if(p->input.buttons.lmb) {
+			ret[1] = (game_time() - p->input.buttons.lmb_start) * 1.3F;
+			ret[0] = -ret[1];
+			return ret;
+		} else {
+			return ret;
+		}
+	}
+	return ret;
+}
+
+float player_height(const struct Player* p) {
+	return p->input.keys.crouch ? 1.05F : 1.1F;
+}
+
+float player_height2(const struct Player* p) {
+	return p->alive ? 0.0F : 1.0F;
+}
+
+float player_section_height(int section) {
+	switch(section) {
+		case HITTYPE_HEAD: return 1.0F;
+		case HITTYPE_TORSO: return 0.0F;
+		case HITTYPE_ARMS: return 0.25F;
+		case HITTYPE_LEGS: return -1.0F;
+		default: return 0.0F;
+	}
+}
+
+bool player_intersection_exists(struct player_intersection* s) {
+	return s->head || s->torso || s->arms || s->leg_left || s->leg_right;
+}
+
+int player_intersection_choose(struct player_intersection* s, float* dist) {
+	int type;
+	*dist = FLT_MAX;
+
+	if(s->arms && s->distance.arms < *dist) {
+		type = HITTYPE_ARMS;
+		*dist = s->distance.arms;
+	}
+
+	if(s->leg_left && s->distance.leg_left < *dist) {
+		type = HITTYPE_LEGS;
+		*dist = s->distance.leg_left;
+	}
+
+	if(s->leg_right && s->distance.leg_right < *dist) {
+		type = HITTYPE_LEGS;
+		*dist = s->distance.leg_right;
+	}
+
+	if(s->torso && s->distance.torso < *dist) {
+		type = HITTYPE_TORSO;
+		*dist = s->distance.torso;
+	}
+
+	if(s->head && s->distance.head < *dist) {
+		type = HITTYPE_HEAD;
+		*dist = s->distance.head;
+	}
+
+	return type;
+}
+
+/* ------------------------------------------------------------------ */
+/* Movement-feel: render interpolation (partial ticks) and correction  */
+/* blending. All of this is view-only: the simulation remains identical*/
+/* to the 60 Hz server-side physics, only what is drawn is smoothed.   */
+/* ------------------------------------------------------------------ */
+
+struct Position view_offset = {0.0F, 0.0F, 0.0F};
+
+/* provided by network.c (adaptive blend rate from WorldUpdate cadence) */
+extern float network_correction_rate(void);
+
+static struct Position interp_saved_pos[PLAYERS_MAX];
+static struct Position interp_saved_eye[PLAYERS_MAX];
+static int interp_active = 0;
+
+void player_snapshot_prev(void) {
+	for(int k = 0; k < PLAYERS_MAX; k++)
+		if(players[k].connected) {
+			players[k].prev_pos = players[k].pos;
+			players[k].prev_eye = players[k].physics.eye;
+		}
+}
+
+void player_prev_snap(int id) {
+	struct Player* p = &players[id];
+	p->prev_pos = p->pos;
+	p->prev_eye = p->physics.eye;
+	p->net_offset.x = p->net_offset.y = p->net_offset.z = 0.0F;
+}
+
+/* Reposition the player model state to interpolated values for the
+   duration of the world render, then restore. This catches every
+   consumer (models, nametags, shadows, FPV gun) without touching the
+   simulation state used by game logic. */
+void player_render_interpolate_begin(void) {
+	if(interp_active)
+		return;
+	/* Needed when EITHER feature is on: the correction-blend offset is
+	   consumed here at render time even when tick interpolation is off
+	   (alpha = 1.0 keeps the player's current sim position + offset). */
+	if(!settings.render_interpolation && !settings.net_smooth_corrections)
+		return;
+	interp_active = 1;
+	float alpha = settings.render_interpolation ? physics_tick_alpha : 1.0F;
+	for(int k = 0; k < PLAYERS_MAX; k++) {
+		if(!players[k].connected)
+			continue;
+		struct Player* p = &players[k];
+		interp_saved_pos[k] = p->pos;
+		interp_saved_eye[k] = p->physics.eye;
+		p->pos.x = p->prev_pos.x + (p->pos.x - p->prev_pos.x) * alpha + p->net_offset.x;
+		p->pos.y = p->prev_pos.y + (p->pos.y - p->prev_pos.y) * alpha + p->net_offset.y;
+		p->pos.z = p->prev_pos.z + (p->pos.z - p->prev_pos.z) * alpha + p->net_offset.z;
+		p->physics.eye.x = p->prev_eye.x + (interp_saved_eye[k].x - p->prev_eye.x) * alpha + p->net_offset.x;
+		p->physics.eye.y = p->prev_eye.y + (interp_saved_eye[k].y - p->prev_eye.y) * alpha + p->net_offset.y;
+		p->physics.eye.z = p->prev_eye.z + (interp_saved_eye[k].z - p->prev_eye.z) * alpha + p->net_offset.z;
+	}
+}
+
+void player_render_interpolate_end(void) {
+	if(!interp_active)
+		return;
+	for(int k = 0; k < PLAYERS_MAX; k++) {
+		if(!players[k].connected)
+			continue;
+		players[k].pos = interp_saved_pos[k];
+		players[k].physics.eye = interp_saved_eye[k];
+	}
+	interp_active = 0;
+}
+
+/* Server-driven repositioning of a REMOTE player (WorldUpdate / relayed
+   position). The simulation state is corrected instantly so subsequent
+   input-driven prediction stays truthful; only the rendered position is
+   kept continuous via net_offset. */
+void player_net_correct(int k, float nx, float ny, float nz) {
+	struct Player* p = &players[k];
+	float dx = nx - p->pos.x, dy = ny - p->pos.y, dz = nz - p->pos.z;
+	float d2 = dx * dx + dy * dy + dz * dz;
+	float now = window_time();
+
+	/* Velocity refresh: estimate actual velocity from consecutive
+	   authoritative positions (helps footstep timing and extrapolation
+	   during update gaps). Skipped on teleports. */
+	if(d2 < 25.0F && p->server_pos_time > 0.0F) {
+		float dtw = now - p->server_pos_time;
+		if(dtw > 0.05F) {
+			float vx = (nx - p->server_pos.x) / dtw / 32.0F;
+			float vy = (ny - p->server_pos.y) / dtw / 32.0F;
+			float vz = (nz - p->server_pos.z) / dtw / 32.0F;
+			if(vx * vx + vy * vy + vz * vz < 2.25F) { /* cap: 1.5/s internal */
+				p->physics.velocity.x = vx;
+				p->physics.velocity.y = vy;
+				p->physics.velocity.z = vz;
+			}
+		}
+	}
+	p->server_pos.x = nx;
+	p->server_pos.y = ny;
+	p->server_pos.z = nz;
+	p->server_pos_time = now;
+
+	if(d2 > 25.0F || !settings.net_smooth_corrections) {
+		/* > 5 blocks: genuine teleport (spawn/admin move) -- snap everything */
+		p->pos.x = nx;
+		p->pos.y = ny;
+		p->pos.z = nz;
+		p->physics.eye.x = nx;
+		p->physics.eye.y = ny;
+		p->physics.eye.z = nz;
+		player_prev_snap(k);
+		return;
+	}
+
+	/* capture the current on-screen position the same way the render
+	   interpolation computes it, then absorb the whole jump into the
+	   decaying render offset so the transition is invisible */
+	float alpha = settings.render_interpolation ? physics_tick_alpha : 1.0F;
+	float rx = p->prev_pos.x + (p->pos.x - p->prev_pos.x) * alpha + p->net_offset.x;
+	float ry = p->prev_pos.y + (p->pos.y - p->prev_pos.y) * alpha + p->net_offset.y;
+	float rz = p->prev_pos.z + (p->pos.z - p->prev_pos.z) * alpha + p->net_offset.z;
+
+	p->pos.x = nx;
+	p->pos.y = ny;
+	p->pos.z = nz;
+	p->physics.eye.x = nx;
+	p->physics.eye.y = ny;
+	p->physics.eye.z = nz;
+	p->prev_pos = p->pos;
+	p->prev_eye = p->physics.eye;
+
+	p->net_offset.x = rx - nx;
+	p->net_offset.y = ry - ny;
+	p->net_offset.z = rz - nz;
+}
+
+/* Server-forced position correction of the LOCAL player (the classic
+   rubberband). Simulation snaps to the authoritative position (keeping
+   prediction truthful) while the camera keeps a decaying offset. */
+void player_local_correct(float nx, float ny, float nz) {
+	struct Player* p = &players[local_player_id];
+	float dx = nx - p->pos.x, dy = ny - p->pos.y, dz = nz - p->pos.z;
+	float d2 = dx * dx + dy * dy + dz * dz;
+
+	if(d2 > 25.0F || !settings.net_smooth_corrections || !p->alive) {
+		p->pos.x = nx;
+		p->pos.y = ny;
+		p->pos.z = nz;
+		player_prev_snap(local_player_id);
+		view_offset.x = view_offset.y = view_offset.z = 0.0F;
+		return;
+	}
+
+	float alpha = settings.render_interpolation ? physics_tick_alpha : 1.0F;
+	float rx = p->prev_eye.x + (p->physics.eye.x - p->prev_eye.x) * alpha + view_offset.x;
+	float ry = p->prev_eye.y + (p->physics.eye.y - p->prev_eye.y) * alpha + view_offset.y;
+	float rz = p->prev_eye.z + (p->physics.eye.z - p->prev_eye.z) * alpha + view_offset.z;
+
+	p->pos.x = nx;
+	p->pos.y = ny;
+	p->pos.z = nz;
+	p->physics.eye.x = nx;
+	p->physics.eye.y = ny;
+	p->physics.eye.z = nz;
+	p->prev_pos = p->pos;
+	p->prev_eye = p->physics.eye;
+
+	view_offset.x = rx - nx;
+	view_offset.y = ry - ny;
+	view_offset.z = rz - nz;
+}
+
+void player_update(float dt, int locked) {
+	/* dt is identical for every player in this call, so the smoothing
+	   exponents below are loop-invariant -- compute them once instead of
+	   twice per axis (6 pow() calls) for every one of the up to 256
+	   player slots, every physics tick. Also use powf() (float) instead
+	   of pow() (double) since all operands here are float anyway. */
+	const float smooth_decay = powf(0.9F, dt * 60.0F);
+	const float smooth_gain = powf(0.1F, dt * 60.0F);
+
+	/* Correction-blend decay rate (adaptive to measured WorldUpdate
+	   cadence). exp() composes exactly across the small fast-loop steps. */
+	float off_decay = expf(-dt * network_correction_rate());
+
+	for(int k = 0; k < PLAYERS_MAX; k++) {
+		if(players[k].connected) {
+			if(locked) {
+				player_move(&players[k], dt, k);
+			} else {
+				if(k != local_player_id) {
+					// smooth out player orientation
+					players[k].orientation_smooth.x = players[k].orientation_smooth.x * smooth_decay
+						+ players[k].orientation.x * smooth_gain;
+					players[k].orientation_smooth.y = players[k].orientation_smooth.y * smooth_decay
+						+ players[k].orientation.y * smooth_gain;
+					players[k].orientation_smooth.z = players[k].orientation_smooth.z * smooth_decay
+						+ players[k].orientation.z * smooth_gain;
+
+					// decay correction-blend offset (view-only)
+					players[k].net_offset.x *= off_decay;
+					players[k].net_offset.y *= off_decay;
+					players[k].net_offset.z *= off_decay;
+					if(fabsf(players[k].net_offset.x) < 0.001F
+					   && fabsf(players[k].net_offset.y) < 0.001F
+					   && fabsf(players[k].net_offset.z) < 0.001F) {
+						players[k].net_offset.x = players[k].net_offset.y = players[k].net_offset.z
+							= 0.0F;
+					}
+				}
+			}
+		}
+	}
+	player_update_corpses(dt);
+}
+
+void player_render_all() {
+	player_intersection_type = -1;
+	player_intersection_dist = FLT_MAX;
+
+	/* Loop-invariant across all 256 player slots below -- hoisted out of
+	   the per-player branch it used to live in (was a pow() call inside
+	   the render loop, executed once per non-local connected player, every
+	   single frame). */
+	const float render_dist_sq = (settings.render_distance + 2.0F) * (settings.render_distance + 2.0F);
+
+	Ray ray;
+	ray.origin.x = camera_x;
+	ray.origin.y = camera_y;
+	ray.origin.z = camera_z;
+	ray.direction.x = sin(camera_rot_x) * sin(camera_rot_y);
+	ray.direction.y = cos(camera_rot_y);
+	ray.direction.z = cos(camera_rot_x) * sin(camera_rot_y);
+
+	for(int k = 0; k < PLAYERS_MAX; k++) {
+		if(!players[k].connected || players[k].team == TEAM_SPECTATOR)
+			continue;
+
+		if(!players[k].input.buttons.lmb && !players[k].input.buttons.rmb) {
+			players[k].spade_used = 0;
+			if(players[k].spade_use_type == 1)
+				players[k].spade_use_type = 0;
+			if(players[k].spade_use_type == 2)
+				players[k].spade_use_timer = 0;
+		}
+		if(players[k].alive && players[k].held_item == TOOL_SPADE
+		   && (players[k].input.buttons.lmb || players[k].input.buttons.rmb)
+		   && game_time() - players[k].item_showup >= 0.5F) {
+			// now run a hitscan and see if any block or player is in the way
+			struct Camera_HitType hit;
+			if(players[k].input.buttons.lmb && game_time() - players[k].spade_use_timer > 0.2F) {
+				camera_hit_fromplayer(&hit, k, 4.0F);
+				if(hit.y == 0 && hit.type == CAMERA_HITTYPE_BLOCK)
+					hit.type = CAMERA_HITTYPE_NONE;
+				switch(hit.type) {
+					case CAMERA_HITTYPE_BLOCK:
+						sound_create(SOUND_WORLD, &sound_hitground, hit.x + 0.5F, hit.y + 0.5F, hit.z + 0.5F);
+
+						if(k == local_player_id)
+							map_damage(hit.x, hit.y, hit.z, 50);
+
+						if(k == local_player_id && map_damage_action(hit.x, hit.y, hit.z) && hit.y > 1) {
+							struct PacketBlockAction blk;
+							blk.action_type = ACTION_DESTROY;
+							blk.player_id = local_player_id;
+							blk.x = hit.x;
+							blk.y = hit.z;
+							blk.z = 63 - hit.y;
+							network_send(PACKET_BLOCKACTION_ID, &blk, sizeof(blk));
+							local_player_blocks = min(local_player_blocks + 1, 50);
+							// read_PacketBlockAction(&blk,sizeof(blk));
+						} else {
+							particle_create(map_get(hit.x, hit.y, hit.z), hit.xb + 0.5F, hit.yb + 0.5F, hit.zb + 0.5F,
+											2.5F, 1.0F, 4, 0.1F, 0.25F);
+						}
+						break;
+					case CAMERA_HITTYPE_PLAYER:
+						sound_create_sticky(&sound_spade_whack, players + k, k);
+						{
+							float hit_x = players[hit.player_id].physics.eye.x;
+							float hit_y = players[hit.player_id].physics.eye.y
+								+ player_section_height(hit.player_section);
+							float hit_z = players[hit.player_id].physics.eye.z;
+							particle_create(0x0000FF, hit_x, hit_y, hit_z, 3.5F, 1.0F, 8, 0.1F, 0.4F);
+
+							/* Melee blood: splash roughly along the attacker's
+							   facing direction, visible for any player's spade
+							   swing (matches the existing particle bleed effect,
+							   which also fires for non-local players). */
+							bloodmarks_spatter(hit_x, hit_y, hit_z, players[k].orientation.x * 6.0F,
+							                    players[k].orientation.y * 6.0F, players[k].orientation.z * 6.0F,
+							                    k == local_player_id);
+						}
+						if(k == local_player_id) {
+							struct PacketHit h;
+							h.player_id = hit.player_id;
+							h.hit_type = HITTYPE_SPADE;
+							network_send(PACKET_HIT_ID, &h, sizeof(h));
+						}
+						break;
+					case CAMERA_HITTYPE_NONE: sound_create_sticky(&sound_spade_woosh, players + k, k); break;
+				}
+				players[k].spade_use_type = 1;
+				players[k].spade_used = 1;
+				players[k].spade_use_timer = game_time();
+			}
+
+			if(players[k].input.buttons.rmb && game_time() - players[k].spade_use_timer > 1.0F) {
+				if(players[k].spade_used) {
+					camera_hit_fromplayer(&hit, k, 4.0F);
+					if(hit.type == CAMERA_HITTYPE_BLOCK && hit.y > 1) {
+						sound_create(SOUND_WORLD, &sound_hitground, hit.x + 0.5F, hit.y + 0.5F, hit.z + 0.5F);
+						if(k == local_player_id) {
+							struct PacketBlockAction blk;
+							blk.action_type = ACTION_SPADE;
+							blk.player_id = local_player_id;
+							blk.x = hit.x;
+							blk.y = hit.z;
+							blk.z = 63 - hit.y;
+							network_send(PACKET_BLOCKACTION_ID, &blk, sizeof(blk));
+						}
+					} else {
+						sound_create_sticky(&sound_spade_woosh, players + k, k);
+					}
+				}
+				players[k].spade_use_type = 2;
+				players[k].spade_used = 1;
+				players[k].spade_use_timer = game_time();
+			}
+		}
+		if(k != local_player_id) {
+			int should_render = camera_CubeInFrustum(players[k].pos.x, players[k].pos.y, players[k].pos.z, 1.0F, 2.0F)
+				&& distance2D(players[k].pos.x, players[k].pos.z, camera_x, camera_z) <= render_dist_sq;
+			
+			if(should_render) {
+				struct player_intersection intersects = {0};
+				player_render(players + k, k);
+				player_collision(players + k, &ray, &intersects);
+				if(player_intersection_exists(&intersects)) {
+					float d;
+					int type = player_intersection_choose(&intersects, &d);
+					if(d < player_intersection_dist) {
+						player_intersection_dist = d;
+						player_intersection_player = k;
+						player_intersection_type = type;
+					}
+				}
+			}
+
+			if(players[k].alive && players[k].held_item == TOOL_GUN && players[k].input.buttons.lmb) {
+				if(game_time() - players[k].gun_shoot_timer > weapon_delay(players[k].weapon)
+				   && players[k].ammo > 0) {
+					players[k].ammo--;
+					sound_create_sticky(weapon_sound(players[k].weapon), players + k, k);
+
+					float o[3] = {players[k].orientation.x, players[k].orientation.y, players[k].orientation.z};
+
+					weapon_spread(&players[k], o);
+
+					struct Camera_HitType hit;
+					camera_hit(&hit, k, players[k].physics.eye.x, players[k].physics.eye.y + player_height(&players[k]),
+							   players[k].physics.eye.z, o[0], o[1], o[2], 128.0F);
+					tracer_pvelocity(o, &players[k]);
+					tracer_add(players[k].weapon, players[k].physics.eye.x,
+							   players[k].physics.eye.y + player_height(&players[k]), players[k].physics.eye.z, o[0],
+							   o[1], o[2]);
+					particle_create_casing(&players[k]);
+					switch(hit.type) {
+						case CAMERA_HITTYPE_PLAYER: {
+							if(k == local_player_id) {
+								if(hit.player_section == HITTYPE_HEAD) {
+									sound_create(SOUND_LOCAL, &sound_headshot, 0.0F, 0.0F, 0.0F);
+								} else {
+									sound_create(SOUND_LOCAL, &sound_hitbody, 0.0F, 0.0F, 0.0F);
+								}
+							}
+							float hit_x = players[hit.player_id].physics.eye.x;
+							float hit_y = players[hit.player_id].physics.eye.y
+								+ player_section_height(hit.player_section);
+							float hit_z = players[hit.player_id].physics.eye.z;
+							particle_create(0x0000FF, hit_x, hit_y, hit_z, 3.5F, 1.0F, 8, 0.1F, 0.4F);
+
+							/* Blood decal for shots fired by OTHER players too --
+							   purely visual, so it should appear regardless of
+							   who pulled the trigger. Damage numbers, however,
+							   are only shown for hits the local player lands
+							   (see the local-player firing path in weapon.c). */
+							bloodmarks_spatter(hit_x, hit_y, hit_z, o[0] * 12.0F, o[1] * 12.0F, o[2] * 12.0F, false);
+							break;
+						}
+						case CAMERA_HITTYPE_BLOCK:
+							particle_create(map_get(hit.x, hit.y, hit.z), hit.xb + 0.5F, hit.yb + 0.5F, hit.zb + 0.5F,
+											2.5F, 1.0F, 4, 0.1F, 0.25F);
+							break;
+					}
+					players[k].gun_shoot_timer = game_time();
+				}
+			}
+		}
+	}
+
+	/* Draw spectator ESP as a final overlay pass.  Keeping it out of the main
+	   player render loop prevents its deliberately unusual GL state (no fog,
+	   no texture, no lighting, no depth) from leaking into later normal player
+	   models and making visible players turn fog-colored. */
+	if(camera_mode == CAMERAMODE_SPECTATOR && settings.esp_in_spec && !cameracontroller_bodyview_mode) {
+		for(int k = 0; k < PLAYERS_MAX; k++) {
+			if(k == local_player_id || !players[k].connected || players[k].team == TEAM_SPECTATOR)
+				continue;
+			if(!camera_CubeInFrustum(players[k].pos.x, players[k].pos.y, players[k].pos.z, 1.0F, 2.0F)
+			   || distance2D(players[k].pos.x, players[k].pos.z, camera_x, camera_z) > render_dist_sq)
+				continue;
+			if(player_is_obscured(players + k))
+				player_draw_esp_box(players + k);
+		}
+	}
+
+	player_render_corpses();
+}
+
+static float foot_function(const struct Player* p) {
+	float f = (game_time() - p->sound.feet_started_cycle) / (p->input.keys.sprint ? (0.5F / 1.3F) : 0.5F);
+	f = f * 2.0F - 1.0F;
+	return p->sound.feet_cylce ? f : -f;
+}
+
+struct hitbox {
+	float pivot[3];
+	int size[3];
+	float scale;
+};
+
+static const struct hitbox box_head = (struct hitbox) {
+	.pivot = {2.5F, 2.5F, 0.5F},
+	.size = {6, 6, 6},
+	.scale = 0.1F,
+};
+
+static const struct hitbox box_torso = (struct hitbox) {
+	.pivot = {3.5F, 1.5F, 9.5F},
+	.size = {8, 4, 9},
+	.scale = 0.1F,
+};
+
+static const struct hitbox box_torsoc = (struct hitbox) {
+	.pivot = {3.5F, 6.5F, 6.5F},
+	.size = {8, 8, 7},
+	.scale = 0.1F,
+};
+
+static const struct hitbox box_arm_left = (struct hitbox) {
+	.pivot = {5.5F, -0.5F, 5.5F},
+	.size = {2, 9, 6},
+	.scale = 0.1F,
+};
+
+static const struct hitbox box_arm_right = (struct hitbox) {
+	.pivot = {-3.5F, 4.25F, 1.5F},
+	.size = {3, 14, 2},
+	.scale = 0.1F,
+};
+
+static const struct hitbox box_leg = (struct hitbox) {
+	.pivot = {1.0F, 1.5F, 12.0F},
+	.size = {3, 5, 12},
+	.scale = 0.1F,
+};
+
+static const struct hitbox box_legc = (struct hitbox) {
+	.pivot = {1.0F, 1.5F, 7.0F},
+	.size = {3, 7, 8},
+	.scale = 0.1F,
+};
+
+static void player_esp_bounds(const struct hitbox* box, float* x0, float* y0, float* z0, float* x1, float* y1, float* z1) {
+	*x0 = -box->pivot[0] * box->scale;
+	*y0 = -box->pivot[2] * box->scale;
+	*z0 = -box->pivot[1] * box->scale;
+	*x1 = (box->size[0] - box->pivot[0]) * box->scale;
+	*y1 = (box->size[2] - box->pivot[2]) * box->scale;
+	*z1 = (box->size[1] - box->pivot[1]) * box->scale;
+}
+
+static void player_esp_draw_cuboid_lines(float x0, float y0, float z0, float x1, float y1, float z1) {
+	float vertices[] = {
+		x0,y0,z0, x1,y0,z0,  x1,y0,z0, x1,y0,z1,  x1,y0,z1, x0,y0,z1,  x0,y0,z1, x0,y0,z0,
+		x0,y1,z0, x1,y1,z0,  x1,y1,z0, x1,y1,z1,  x1,y1,z1, x0,y1,z1,  x0,y1,z1, x0,y1,z0,
+		x0,y0,z0, x0,y1,z0,  x1,y0,z0, x1,y1,z0,  x1,y0,z1, x1,y1,z1,  x0,y0,z1, x0,y1,z1,
+	};
+	glVertexPointer(3, GL_FLOAT, 0, vertices);
+	glDrawArrays(GL_LINES, 0, 24);
+}
+
+static void player_esp_draw_cuboid_fill(float x0, float y0, float z0, float x1, float y1, float z1) {
+	float vertices[] = {
+		/* bottom */ x0,y0,z0, x1,y0,z1, x1,y0,z0,  x0,y0,z0, x0,y0,z1, x1,y0,z1,
+		/* top    */ x0,y1,z0, x1,y1,z0, x1,y1,z1,  x0,y1,z0, x1,y1,z1, x0,y1,z1,
+		/* -x     */ x0,y0,z0, x0,y1,z0, x0,y1,z1,  x0,y0,z0, x0,y1,z1, x0,y0,z1,
+		/* +x     */ x1,y0,z0, x1,y1,z1, x1,y1,z0,  x1,y0,z0, x1,y0,z1, x1,y1,z1,
+		/* -z     */ x0,y0,z0, x1,y1,z0, x0,y1,z0,  x0,y0,z0, x1,y0,z0, x1,y1,z0,
+		/* +z     */ x0,y0,z1, x0,y1,z1, x1,y1,z1,  x0,y0,z1, x1,y1,z1, x1,y0,z1,
+	};
+	glVertexPointer(3, GL_FLOAT, 0, vertices);
+	glDrawArrays(GL_TRIANGLES, 0, 36);
+}
+
+static void player_esp_draw_hitbox(const struct hitbox* box, int fill) {
+	float x0, y0, z0, x1, y1, z1;
+	player_esp_bounds(box, &x0, &y0, &z0, &x1, &y1, &z1);
+	if(fill)
+		player_esp_draw_cuboid_fill(x0, y0, z0, x1, y1, z1);
+	else
+		player_esp_draw_cuboid_lines(x0, y0, z0, x1, y1, z1);
+}
+
+static void player_esp_color(int team) {
+	switch(team) {
+		case TEAM_1: glColor3ub(gamestate.team_1.red, gamestate.team_1.green, gamestate.team_1.blue); break;
+		case TEAM_2: glColor3ub(gamestate.team_2.red, gamestate.team_2.green, gamestate.team_2.blue); break;
+		default: glColor3ub(255, 220, 32); break;
+	}
+}
+
+static void player_esp_draw_part(const struct hitbox* box, int team) {
+	glColor3ub(10, 10, 10);
+	player_esp_draw_hitbox(box, 1);
+	player_esp_color(team);
+	player_esp_draw_hitbox(box, 0);
+}
+
+static bool hitbox_intersection(mat4 model, const struct hitbox* box, Ray* r, float* distance) {
+	mat4 inv_model;
+	glmc_mat4_inv(model, inv_model);
+
+	vec3 origin, dir;
+	glmc_mat4_mulv3(inv_model, r->origin.coords, 1.0F, origin);
+	glmc_mat4_mulv3(inv_model, r->direction.coords, 0.0F, dir);
+
+	return aabb_intersection_ray(
+		&(AABB) {
+			.min = {-box->pivot[0] * box->scale, -box->pivot[2] * box->scale, -box->pivot[1] * box->scale},
+			.max = {(box->size[0] - box->pivot[0]) * box->scale, (box->size[2] - box->pivot[2]) * box->scale,
+					(box->size[1] - box->pivot[1]) * box->scale},
+		},
+		&(Ray) {
+			.origin.coords = {origin[0], origin[1], origin[2]},
+			.direction.coords = {dir[0], dir[1], dir[2]},
+		},
+		distance);
+}
+
+void player_collision(const struct Player* p, Ray* ray, struct player_intersection* intersects) {
+	if(!p->alive || p->team == TEAM_SPECTATOR)
+		return;
+
+	float l = sqrt(distance3D(p->orientation_smooth.x, p->orientation_smooth.y, p->orientation_smooth.z, 0, 0, 0));
+	float ox = p->orientation_smooth.x / l;
+	float oy = p->orientation_smooth.y / l;
+	float oz = p->orientation_smooth.z / l;
+
+	const struct hitbox* torso = p->input.keys.crouch ? &box_torsoc : &box_torso;
+	const struct hitbox* leg = p->input.keys.crouch ? &box_legc : &box_leg;
+
+	float height = player_height(p) - 0.25F;
+
+	float len = sqrtf(p->orientation.x * p->orientation.x + p->orientation.z * p->orientation.z);
+	float fx = p->orientation.x / len;
+	float fy = p->orientation.z / len;
+
+	float a = (p->physics.velocity.x * fx + fy * p->physics.velocity.z) / (fx * fx + fy * fy);
+	float b = (p->physics.velocity.z - fy * a) / fx;
+	a /= 0.25F;
+	b /= 0.25F;
+
+	float dist; // distance
+
+	matrix_push(matrix_model);
+
+	matrix_identity(matrix_model);
+	matrix_translate(matrix_model, p->physics.eye.x, p->physics.eye.y + height, p->physics.eye.z);
+	float head_scale = sqrtf(p->orientation.x * p->orientation.x + p->orientation.y * p->orientation.y
+		+ p->orientation.z * p->orientation.z);
+	matrix_translate(matrix_model, 0.0F, box_head.pivot[2] * (head_scale * box_head.scale - box_head.scale), 0.0F);
+	matrix_scale3(matrix_model, head_scale);
+	matrix_pointAt(matrix_model, ox, oy, oz);
+	matrix_rotate(matrix_model, 90.0F, 0.0F, 1.0F, 0.0F);
+
+	if(hitbox_intersection(matrix_model, &box_head, ray, &dist)) {
+		intersects->head = 1;
+		intersects->distance.head = dist;
+	}
+
+	matrix_identity(matrix_model);
+	matrix_translate(matrix_model, p->physics.eye.x, p->physics.eye.y + height, p->physics.eye.z);
+	matrix_pointAt(matrix_model, ox, 0.0F, oz);
+	matrix_rotate(matrix_model, 90.0F, 0.0F, 1.0F, 0.0F);
+
+	if(hitbox_intersection(matrix_model, torso, ray, &dist)) {
+		intersects->torso = 1;
+		intersects->distance.torso = dist;
+	}
+
+	matrix_push(matrix_model);
+	matrix_translate(matrix_model, torso->size[0] * 0.1F * 0.5F - leg->size[0] * 0.1F * 0.5F,
+					 -torso->size[2] * 0.1F * (p->input.keys.crouch ? 0.6F : 1.0F),
+					 p->input.keys.crouch ? (-torso->size[2] * 0.1F * 0.75F) : 0.0F);
+	matrix_rotate(matrix_model, 45.0F * foot_function(p) * a, 1.0F, 0.0F, 0.0F);
+	matrix_rotate(matrix_model, 45.0F * foot_function(p) * b, 0.0F, 0.0F, 1.0F);
+
+	if(hitbox_intersection(matrix_model, leg, ray, &dist)) {
+		intersects->leg_left = 1;
+		intersects->distance.leg_left = dist;
+	}
+
+	matrix_pop(matrix_model);
+	matrix_translate(matrix_model, -torso->size[0] * 0.1F * 0.5F + leg->size[0] * 0.1F * 0.5F,
+					 -torso->size[2] * 0.1F * (p->input.keys.crouch ? 0.6F : 1.0F),
+					 p->input.keys.crouch ? (-torso->size[2] * 0.1F * 0.75F) : 0.0F);
+	matrix_rotate(matrix_model, -45.0F * foot_function(p) * a, 1.0F, 0.0F, 0.0F);
+	matrix_rotate(matrix_model, -45.0F * foot_function(p) * b, 0.0F, 0.0F, 1.0F);
+
+	if(hitbox_intersection(matrix_model, leg, ray, &dist)) {
+		intersects->leg_right = 1;
+		intersects->distance.leg_right = dist;
+	}
+
+	matrix_identity(matrix_model);
+	matrix_translate(matrix_model, p->physics.eye.x, p->physics.eye.y + height, p->physics.eye.z);
+	matrix_translate(matrix_model, 0.0F, p->input.keys.crouch * 0.1F - 0.1F * 2, 0.0F);
+	matrix_pointAt(matrix_model, ox, oy, oz);
+	matrix_rotate(matrix_model, 90.0F, 0.0F, 1.0F, 0.0F);
+
+	if(p->input.keys.sprint && !p->input.keys.crouch)
+		matrix_rotate(matrix_model, 45.0F, 1.0F, 0.0F, 0.0F);
+
+	float* angles = player_tool_func(p);
+	matrix_rotate(matrix_model, angles[0], 1.0F, 0.0F, 0.0F);
+	matrix_rotate(matrix_model, angles[1], 0.0F, 1.0F, 0.0F);
+
+	if(hitbox_intersection(matrix_model, &box_arm_left, ray, &dist)) {
+		intersects->arms = 1;
+		intersects->distance.arms = dist;
+	}
+
+	matrix_rotate(matrix_model, -45.0F, 0.0F, 1.0F, 0.0F);
+
+	if(hitbox_intersection(matrix_model, &box_arm_right, ray, &dist)) {
+		intersects->arms = 1;
+		intersects->distance.arms = dist;
+	}
+
+	matrix_pop(matrix_model);
+}
+
+static void player_draw_esp_box(struct Player* p) {
+	if(!p->alive || p->team == TEAM_SPECTATOR)
+		return;
+
+	float l = sqrt(distance3D(p->orientation_smooth.x, p->orientation_smooth.y, p->orientation_smooth.z, 0, 0, 0));
+	if(l <= 0.0001F)
+		return;
+	float ox = p->orientation_smooth.x / l;
+	float oy = p->orientation_smooth.y / l;
+	float oz = p->orientation_smooth.z / l;
+
+	const struct hitbox* torso = p->input.keys.crouch ? &box_torsoc : &box_torso;
+	const struct hitbox* leg = p->input.keys.crouch ? &box_legc : &box_leg;
+	float height = player_height(p) - 0.25F;
+
+	float len = sqrtf(p->orientation.x * p->orientation.x + p->orientation.z * p->orientation.z);
+	if(len <= 0.0001F) len = 1.0F;
+	float fx = p->orientation.x / len;
+	float fy = p->orientation.z / len;
+	float a = (p->physics.velocity.x * fx + fy * p->physics.velocity.z) / fmaxf(fx * fx + fy * fy, 0.0001F);
+	float b = (fabsf(fx) > 0.0001F) ? (p->physics.velocity.z - fy * a) / fx : 0.0F;
+	a /= 0.25F;
+	b /= 0.25F;
+
+	glLineWidth(1.0F);
+	player_esp_color(p->team);
+	/* ESP outlines are informational overlays, not world geometry: disable fog,
+	   lighting and texturing so the line color is exactly the team color.  The
+	   previous version only disabled the spherical fog texture unit; if texture0
+	   or lighting was left enabled by nearby model rendering, the lines could be
+	   blended/modulated into the map fog color. */
+#ifndef OPENGL_ES
+	GLboolean fog_was_on = glIsEnabled(GL_FOG);
+	GLboolean tex_was_on = glIsEnabled(GL_TEXTURE_2D);
+	GLboolean lighting_was_on = glIsEnabled(GL_LIGHTING);
+	GLboolean color_material_was_on = glIsEnabled(GL_COLOR_MATERIAL);
+	GLboolean cull_was_on = glIsEnabled(GL_CULL_FACE);
+	if(fog_was_on) glDisable(GL_FOG);
+	if(tex_was_on) glDisable(GL_TEXTURE_2D);
+	if(lighting_was_on) glDisable(GL_LIGHTING);
+	if(color_material_was_on) glDisable(GL_COLOR_MATERIAL);
+	if(cull_was_on) glDisable(GL_CULL_FACE);
+#endif
+	glx_disable_sphericalfog();
+	glDisable(GL_DEPTH_TEST);
+	glDepthMask(GL_FALSE);
+	glEnableClientState(GL_VERTEX_ARRAY);
+
+	matrix_push(matrix_model);
+	matrix_identity(matrix_model);
+	matrix_translate(matrix_model, p->physics.eye.x, p->physics.eye.y + height, p->physics.eye.z);
+	float head_scale = sqrtf(p->orientation.x * p->orientation.x + p->orientation.y * p->orientation.y
+		+ p->orientation.z * p->orientation.z);
+	matrix_translate(matrix_model, 0.0F, box_head.pivot[2] * (head_scale * box_head.scale - box_head.scale), 0.0F);
+	matrix_scale3(matrix_model, head_scale);
+	matrix_pointAt(matrix_model, ox, oy, oz);
+	matrix_rotate(matrix_model, 90.0F, 0.0F, 1.0F, 0.0F);
+	matrix_upload();
+	player_esp_draw_part(&box_head, p->team);
+
+	matrix_identity(matrix_model);
+	matrix_translate(matrix_model, p->physics.eye.x, p->physics.eye.y + height, p->physics.eye.z);
+	matrix_pointAt(matrix_model, ox, 0.0F, oz);
+	matrix_rotate(matrix_model, 90.0F, 0.0F, 1.0F, 0.0F);
+	matrix_upload();
+	player_esp_draw_part(torso, p->team);
+
+	matrix_push(matrix_model);
+	matrix_translate(matrix_model, torso->size[0] * 0.1F * 0.5F - leg->size[0] * 0.1F * 0.5F,
+					 -torso->size[2] * 0.1F * (p->input.keys.crouch ? 0.6F : 1.0F),
+					 p->input.keys.crouch ? (-torso->size[2] * 0.1F * 0.75F) : 0.0F);
+	matrix_rotate(matrix_model, 45.0F * foot_function(p) * a, 1.0F, 0.0F, 0.0F);
+	matrix_rotate(matrix_model, 45.0F * foot_function(p) * b, 0.0F, 0.0F, 1.0F);
+	matrix_upload();
+	player_esp_draw_part(leg, p->team);
+	matrix_pop(matrix_model);
+
+	matrix_translate(matrix_model, -torso->size[0] * 0.1F * 0.5F + leg->size[0] * 0.1F * 0.5F,
+					 -torso->size[2] * 0.1F * (p->input.keys.crouch ? 0.6F : 1.0F),
+					 p->input.keys.crouch ? (-torso->size[2] * 0.1F * 0.75F) : 0.0F);
+	matrix_rotate(matrix_model, -45.0F * foot_function(p) * a, 1.0F, 0.0F, 0.0F);
+	matrix_rotate(matrix_model, -45.0F * foot_function(p) * b, 0.0F, 0.0F, 1.0F);
+	matrix_upload();
+	player_esp_draw_part(leg, p->team);
+
+	matrix_identity(matrix_model);
+	matrix_translate(matrix_model, p->physics.eye.x, p->physics.eye.y + height, p->physics.eye.z);
+	matrix_translate(matrix_model, 0.0F, p->input.keys.crouch * 0.1F - 0.1F * 2, 0.0F);
+	matrix_pointAt(matrix_model, ox, oy, oz);
+	matrix_rotate(matrix_model, 90.0F, 0.0F, 1.0F, 0.0F);
+	if(p->input.keys.sprint && !p->input.keys.crouch)
+		matrix_rotate(matrix_model, 45.0F, 1.0F, 0.0F, 0.0F);
+	float* angles = player_tool_func(p);
+	matrix_rotate(matrix_model, angles[0], 1.0F, 0.0F, 0.0F);
+	matrix_rotate(matrix_model, angles[1], 0.0F, 1.0F, 0.0F);
+	matrix_upload();
+	player_esp_draw_part(&box_arm_left, p->team);
+	matrix_rotate(matrix_model, -45.0F, 0.0F, 1.0F, 0.0F);
+	matrix_upload();
+	player_esp_draw_part(&box_arm_right, p->team);
+
+	matrix_pop(matrix_model);
+	glDisableClientState(GL_VERTEX_ARRAY);
+	glDepthMask(GL_TRUE);
+	glEnable(GL_DEPTH_TEST);
+	glx_enable_sphericalfog();
+#ifndef OPENGL_ES
+	if(cull_was_on) glEnable(GL_CULL_FACE);
+	if(color_material_was_on) glEnable(GL_COLOR_MATERIAL);
+	if(lighting_was_on) glEnable(GL_LIGHTING);
+	if(tex_was_on) glEnable(GL_TEXTURE_2D);
+	if(fog_was_on) glEnable(GL_FOG);
+#endif
+	glColor3f(1.0F, 1.0F, 1.0F);
+	matrix_upload();
+}
+
+void player_render(struct Player* p, int id) {
+	kv6_calclight(p->pos.x, p->pos.y, p->pos.z);
+
+	/* Spectator ESP is drawn as TigerSpades-style colored outline boxes in
+	   player_render_all(); keep the normal model renderer depth-correct. */
+	int esp_active = 0;
+	int obscured = 0;
+	int in_view = player_in_view(p);
+
+	if(camera_mode == CAMERAMODE_SPECTATOR && p->team != TEAM_SPECTATOR && !cameracontroller_bodyview_mode && settings.show_names_in_spec) {
+		matrix_push(matrix_model);
+		matrix_translate(matrix_model, p->pos.x, p->physics.eye.y + player_height(p) + 1.25F, p->pos.z);
+		matrix_rotate(matrix_model, camera_rot_x / PI * 180.0F + 180.0F, 0.0F, 1.0F, 0.0F);
+		matrix_rotate(matrix_model, -camera_rot_y / PI * 180.0F + 90.0F, 1.0F, 0.0F, 0.0F);
+		matrix_scale(matrix_model, 1.0F / 92.0F, 1.0F / 92.0F, 1.0F / 92.0F);
+		matrix_upload();
+
+		switch(p->team) {
+			case TEAM_1: glColor3ub(gamestate.team_1.red, gamestate.team_1.green, gamestate.team_1.blue); break;
+			case TEAM_2: glColor3ub(gamestate.team_2.red, gamestate.team_2.green, gamestate.team_2.blue); break;
+		}
+
+		font_select(FONT_FIXEDSYS);
+		glEnable(GL_ALPHA_TEST);
+		glAlphaFunc(GL_GREATER, 0.5F);
+		if(esp_active) {
+			glDisable(GL_DEPTH_TEST);
+		}
+		font_centered(0, 0, 64, p->name);
+		if(esp_active) {
+			glEnable(GL_DEPTH_TEST);
+		}
+		glDisable(GL_ALPHA_TEST);
+		matrix_pop(matrix_model);
+		matrix_upload();
+	}
+
+	float l = sqrt(distance3D(p->orientation_smooth.x, p->orientation_smooth.y, p->orientation_smooth.z, 0, 0, 0));
+	float ox = p->orientation_smooth.x / l;
+	float oy = p->orientation_smooth.y / l;
+	float oz = p->orientation_smooth.z / l;
+
+	if(!p->alive) {
+		if(id != local_player_id || camera_mode != CAMERAMODE_DEATH) {
+			matrix_push(matrix_model);
+			matrix_translate(matrix_model, p->pos.x, p->pos.y + 0.25F, p->pos.z);
+			matrix_pointAt(matrix_model, ox, 0.0F, oz);
+			matrix_rotate(matrix_model, 90.0F, 0.0F, 1.0F, 0.0F);
+			if(p->physics.velocity.y < 0.05F && p->pos.y < 1.5F)
+				matrix_translate(matrix_model, 0.0F, (sin(game_time() * 1.5F) - 1.0F) * 0.1F, 0.0F);
+			matrix_upload();
+			if(esp_active) {
+				if(obscured || !in_view) {
+					glColor3ub(0, 0, 0);
+				}
+				glDisable(GL_DEPTH_TEST);
+			}
+			kv6_render(&model_playerdead, p->team);
+			if(esp_active) {
+				glEnable(GL_DEPTH_TEST);
+			}
+			matrix_pop(matrix_model);
+		}
+
+		return;
+	}
+
+	float time = game_time() * 1000.0F;
+
+	struct kv6_t* torso = p->input.keys.crouch ? &model_playertorsoc : &model_playertorso;
+	struct kv6_t* leg = p->input.keys.crouch ? &model_playerlegc : &model_playerleg;
+	float height = player_height(p);
+	if(id != local_player_id)
+		height -= 0.25F;
+
+	float len = sqrtf(p->orientation.x * p->orientation.x + p->orientation.z * p->orientation.z);
+	float fx = p->orientation.x / len;
+	float fy = p->orientation.z / len;
+
+	float a = (p->physics.velocity.x * fx + fy * p->physics.velocity.z) / (fx * fx + fy * fy);
+	float b = (p->physics.velocity.z - fy * a) / fx;
+	a /= 0.25F;
+	b /= 0.25F;
+
+	int render_body = (id != local_player_id || !p->alive || camera_mode != CAMERAMODE_FPS)
+		&& !((camera_mode == CAMERAMODE_BODYVIEW || camera_mode == CAMERAMODE_SPECTATOR)
+			 && cameracontroller_bodyview_mode && cameracontroller_bodyview_player == id);
+
+	int render_fpv = (id == local_player_id && camera_mode == CAMERAMODE_FPS)
+		|| ((camera_mode == CAMERAMODE_BODYVIEW || camera_mode == CAMERAMODE_SPECTATOR)
+			&& cameracontroller_bodyview_mode && cameracontroller_bodyview_player == id);
+
+	// For non-local players (like team select preview models), always render full body
+	if(id >= PLAYERS_MAX) {
+		render_body = 1;
+		render_fpv = 0;
+	}
+
+	// Determine if arms should be rendered
+	// Arms are always rendered for other players, but for local player in FPV mode,
+	// it depends on the player_arms setting and whether ADS is active
+	int render_arms = 1;
+	if(id == local_player_id && camera_mode == CAMERAMODE_FPS) {
+		render_arms = settings.player_arms;
+		// Hide arms when ADS is active (RMB pressed while holding gun)
+		if(p->held_item == TOOL_GUN && p->input.buttons.rmb) {
+			render_arms = 0;
+		}
+	}
+
+	// Render body parts (head, torso, legs) only when render_body is true
+	// In FPV mode with player_arms setting enabled, only arms will be rendered (see below)
+	if(render_body) {
+		if(esp_active) {
+			if(obscured || !in_view) {
+				glColor3ub(0, 0, 0);
+			}
+			glDisable(GL_DEPTH_TEST);
+		}
+		matrix_push(matrix_model);
+		matrix_translate(matrix_model, p->physics.eye.x, p->physics.eye.y + height, p->physics.eye.z);
+		float head_scale
+			= sqrtf(p->orientation.x * p->orientation.x + p->orientation.y * p->orientation.y
+				+ p->orientation.z * p->orientation.z);
+		matrix_translate(matrix_model, 0.0F,
+						 model_playerhead.zpiv * (head_scale * model_playerhead.scale - model_playerhead.scale), 0.0F);
+		matrix_scale3(matrix_model, head_scale);
+		matrix_pointAt(matrix_model, ox, oy, oz);
+		matrix_rotate(matrix_model, 90.0F, 0.0F, 1.0F, 0.0F);
+		matrix_upload();
+		kv6_render(&model_playerhead, p->team);
+		matrix_pop(matrix_model);
+
+		matrix_push(matrix_model);
+		matrix_translate(matrix_model, p->physics.eye.x, p->physics.eye.y + height, p->physics.eye.z);
+		matrix_pointAt(matrix_model, ox, 0.0F, oz);
+		matrix_rotate(matrix_model, 90.0F, 0.0F, 1.0F, 0.0F);
+		matrix_upload();
+		kv6_render(torso, p->team);
+		matrix_pop(matrix_model);
+
+		if(gamestate.gamemode_type == GAMEMODE_CTF
+		   && ((gamestate.gamemode.ctf.team_1_intel
+				&& gamestate.gamemode.ctf.team_1_intel_location.held.player_id == id)
+			   || (gamestate.gamemode.ctf.team_2_intel
+				   && gamestate.gamemode.ctf.team_2_intel_location.held.player_id == id))) {
+			matrix_push(matrix_model);
+			matrix_translate(matrix_model, p->physics.eye.x, p->physics.eye.y + height, p->physics.eye.z);
+			matrix_pointAt(matrix_model, -oz, 0.0F, ox);
+			matrix_translate(
+				matrix_model, (torso->xsiz - model_intel.xsiz) * 0.5F * torso->scale,
+				-(torso->zpiv - torso->zsiz * 0.5F + model_intel.zsiz * (p->input.keys.crouch ? 0.125F : 0.25F))
+					* torso->scale,
+				(torso->ypiv + model_intel.ypiv) * torso->scale);
+			matrix_scale3(matrix_model, torso->scale / model_intel.scale);
+			if(p->input.keys.crouch) {
+				matrix_rotate(matrix_model, -45.0F, 1.0F, 0.0F, 0.0F);
+			}
+			matrix_upload();
+			int t = TEAM_SPECTATOR;
+			if(gamestate.gamemode.ctf.team_1_intel && gamestate.gamemode.ctf.team_1_intel_location.held.player_id == id)
+				t = TEAM_1;
+			if(gamestate.gamemode.ctf.team_2_intel && gamestate.gamemode.ctf.team_2_intel_location.held.player_id == id)
+				t = TEAM_2;
+			kv6_render(&model_intel, t);
+			matrix_pop(matrix_model);
+		}
+
+		matrix_push(matrix_model);
+		matrix_translate(matrix_model, p->physics.eye.x, p->physics.eye.y + height, p->physics.eye.z);
+		matrix_pointAt(matrix_model, ox, 0.0F, oz);
+		matrix_rotate(matrix_model, 90.0F, 0.0F, 1.0F, 0.0F);
+		matrix_translate(matrix_model, torso->xsiz * 0.1F * 0.5F - leg->xsiz * 0.1F * 0.5F,
+						 -torso->zsiz * 0.1F * (p->input.keys.crouch ? 0.6F : 1.0F),
+						 p->input.keys.crouch ? (-torso->zsiz * 0.1F * 0.75F) : 0.0F);
+		matrix_rotate(matrix_model, 45.0F * foot_function(p) * a, 1.0F, 0.0F, 0.0F);
+		matrix_rotate(matrix_model, 45.0F * foot_function(p) * b, 0.0F, 0.0F, 1.0F);
+		matrix_upload();
+		kv6_render(leg, p->team);
+		matrix_pop(matrix_model);
+
+		matrix_push(matrix_model);
+		matrix_translate(matrix_model, p->physics.eye.x, p->physics.eye.y + height, p->physics.eye.z);
+		matrix_pointAt(matrix_model, ox, 0.0F, oz);
+		matrix_rotate(matrix_model, 90.0F, 0.0F, 1.0F, 0.0F);
+		matrix_translate(matrix_model, -torso->xsiz * 0.1F * 0.5F + leg->xsiz * 0.1F * 0.5F,
+						 -torso->zsiz * 0.1F * (p->input.keys.crouch ? 0.6F : 1.0F),
+						 p->input.keys.crouch ? (-torso->zsiz * 0.1F * 0.75F) : 0.0F);
+		matrix_rotate(matrix_model, -45.0F * foot_function(p) * a, 1.0F, 0.0F, 0.0F);
+		matrix_rotate(matrix_model, -45.0F * foot_function(p) * b, 0.0F, 0.0F, 1.0F);
+		matrix_upload();
+		kv6_render(leg, p->team);
+		matrix_pop(matrix_model);
+		if(esp_active) {
+			glEnable(GL_DEPTH_TEST);
+		}
+	}
+
+	matrix_push(matrix_model);
+	if(id == local_player_id && camera_mode == CAMERAMODE_FPS) {
+		/* Anchor the first-person viewmodel to the RENDERED camera instead
+		   of the raw simulated eye. camera_x/y/z already contain the
+		   interpolated eye, player_height and every view-only easer
+		   (correction smoothing, crouch ease, landing dip); gunlag_y keeps
+		   the legacy last_cy vertical gun lag on top. Without this, the gun
+		   stayed at the sim position while the camera glided after server
+		   corrections -> the viewmodel visibly vibrated on laggy servers. */
+		matrix_translate(matrix_model, camera_x, camera_y + cameracontroller_gunlag_y, camera_z);
+	} else {
+		matrix_translate(matrix_model, p->physics.eye.x, p->physics.eye.y + height, p->physics.eye.z);
+	}
+	if(!render_fpv)
+		matrix_translate(matrix_model, 0.0F, p->input.keys.crouch * 0.1F - 0.1F * 2, 0.0F);
+	matrix_pointAt(matrix_model, ox, oy, oz);
+	matrix_rotate(matrix_model, 90.0F, 0.0F, 1.0F, 0.0F);
+	if(render_fpv)
+		matrix_translate(matrix_model, 0.0F, -2 * 0.1F, -2 * 0.1F);
+
+	if(render_fpv) {
+		float curTime = game_time();
+		float dt = curTime - os_last_time;
+		if(os_last_time == 0.0f) dt = 0.016f;
+		if(dt < 0) dt = 0.016f;
+		if(dt > 0.05f) dt = 0.05f;
+		os_last_time = curTime;
+		float sprintTarget = (p->input.keys.sprint && !p->input.keys.crouch && p->alive) ? 1.0f : 0.0f;
+		float mv = sqrtf(p->physics.velocity.x*p->physics.velocity.x + p->physics.velocity.z*p->physics.velocity.z);
+		if(mv < 0.02f) sprintTarget = 0;
+		os_sprint_state = sprintTarget;
+		float ss = os_sprint_state * os_sprint_state;
+		if(ss > os_sprint_smooth) os_sprint_smooth = os_lerp_smooth(os_sprint_smooth, ss, dt, 0.00005f);
+		else os_sprint_smooth = os_lerp_smooth(os_sprint_smooth, ss, dt, 0.0008f);
+		float raiseTarget = 1.0f;
+		if(curTime - p->item_showup < 0.15f) { raiseTarget = (curTime - p->item_showup) / 0.15f; if(raiseTarget < 0) raiseTarget = 0; if(raiseTarget > 1) raiseTarget = 1; }
+		os_raise_state = os_lerp_smooth(os_raise_state, raiseTarget, dt, 0.0005f);
+		/* Crouching takes priority over a stale sprint input (common with the
+		   touch joystick), so it must not suppress the ADS animation. */
+		float aimTarget = (p->held_item == TOOL_GUN && p->input.buttons.rmb
+			&& (!p->input.keys.sprint || p->input.keys.crouch)) ? 1.0f : 0.0f;
+		os_aim_state = aimTarget;
+		os_aim_smooth = os_lerp_smooth(os_aim_smooth, os_aim_state, dt, 0.0008f);
+		float speed = sqrtf(powf(p->physics.velocity.x, 2) + powf(p->physics.velocity.z, 2)) / 0.25f;
+		if(speed > 2.5f) speed = 2.5f;
+		float* f = player_tool_translate_func(p);
+		float swayX=0, swayY=0;
+		if(p == &players[local_player_id]) {
+			if(!os_sway_initialized) {
+				os_last_rot_x = camera_rot_x;
+				os_last_rot_y = camera_rot_y;
+				os_sway_initialized = 1;
+			}
+
+			float dX = camera_rot_x - os_last_rot_x;
+			float dY = camera_rot_y - os_last_rot_y;
+			if(dX > PI) dX -= DOUBLEPI;
+			if(dX < -PI) dX += DOUBLEPI;
+			os_last_rot_x = camera_rot_x;
+			os_last_rot_y = camera_rot_y;
+
+			/* The old code applied the latest mouse-event delta directly to
+			   the model. Input events do not arrive evenly between rendered
+			   frames, so the arms alternated between a jump and no movement;
+			   ADS looked smooth only because it hides the arms. Convert the
+			   delta to its 60 Hz equivalent, clamp it, then use a fast
+			   frame-rate-independent low-pass filter. This preserves responsive
+			   weapon sway without exposing event timing as visible jitter. */
+			float frame_scale = 1.0F / fmaxf(dt * 60.0F, 0.25F);
+			frame_scale = fminf(frame_scale, 4.0F);
+			float target_x = dX * 0.30F * frame_scale;
+			float target_y = dY * 0.22F * frame_scale;
+			target_x = fmaxf(-0.03F, fminf(0.03F, target_x));
+			target_y = fmaxf(-0.03F, fminf(0.03F, target_y));
+			float sway_alpha = 1.0F - expf(-30.0F * dt);
+			os_sway_x += (target_x - os_sway_x) * sway_alpha;
+			os_sway_y += (target_y - os_sway_y) * sway_alpha;
+			swayX = os_sway_x;
+			swayY = os_sway_y;
+		}
+		float s = os_sprint_smooth;
+		if(p->held_item == TOOL_GUN) { matrix_rotate(matrix_model, s * -3.5f, 0.0f, 1.0f, 0.0f); matrix_rotate(matrix_model, s * 10.0f, 1.0f, 0.0f, 0.0f); matrix_rotate(matrix_model, s * -15.0f, 0.0f, 0.0f, 1.0f); matrix_translate(matrix_model, s * 0.08f, s * -0.028f, s * 0.06f); matrix_translate(matrix_model, sinf(curTime*14.0f)*0.007f*s, fabsf(sinf(curTime*14.0f))*-0.006f*s, 0); }
+		else if(p->held_item == TOOL_SPADE) { matrix_rotate(matrix_model, s * 32.0f, 0.0f, 1.0f, 0.0f); matrix_translate(matrix_model, s * 0.10f, s * -0.14f, s * -0.03f); }
+		else if(p->held_item == TOOL_BLOCK) { matrix_rotate(matrix_model, s * -9.0f, 0.0f, 0.0f, 1.0f); matrix_translate(matrix_model, s * 0.05f, s * -0.12f, s * -0.02f); }
+		else { matrix_rotate(matrix_model, s * -9.0f, 0.0f, 0.0f, 1.0f); matrix_translate(matrix_model, s * 0.05f, s * -0.08f, s * -0.02f); }
+		float putdown = 1.0f - os_raise_state;
+		if(putdown > 0.001f) { matrix_rotate(matrix_model, putdown * -35.0f, 0.0f, 0.0f, 1.0f); matrix_translate(matrix_model, putdown * 0.05f, putdown * -0.12f, putdown * 0.04f); }
+		if(os_aim_smooth > 0.001f && p->held_item == TOOL_GUN) { float ads = os_aim_smooth; matrix_translate(matrix_model, -0.045f*ads, 0.013f*ads, 0.045f*ads); }
+		if(p->held_item == TOOL_GUN) {
+			float timeSinceShot = curTime - p->weapon_last_shot;
+			if(timeSinceShot >= 0 && timeSinceShot < 0.40f) {
+				float delay = weapon_delay(p->weapon);
+				float t = 1.0f - timeSinceShot / delay;
+				if(t < 0) t = 0; if(t > 1) t = 1;
+				float kick = t * t * (3.0f - 2.0f * t);
+				float pitch=0, yaw=0, roll=0, back=0, up=0;
+				/* Pick recoil variation once per shot, deterministically from the
+				   shot timestamp. Calling rand() here every render frame changed
+				   yaw and roll throughout one recoil animation, making the gun and
+				   arms visibly vibrate until the animation ended. */
+				unsigned int recoil_seed = (unsigned int)(p->weapon_last_shot * 1000000.0F)
+					^ ((unsigned int)p->weapon * 0x9E3779B9u);
+				recoil_seed ^= recoil_seed >> 16;
+				recoil_seed *= 0x7FEB352Du;
+				recoil_seed ^= recoil_seed >> 15;
+				float rnd = (float)(recoil_seed & 0xFFFFu) / 65535.0F - 0.5F;
+				recoil_seed = recoil_seed * 1664525u + 1013904223u;
+				float rnd2 = (float)(recoil_seed & 0xFFFFu) / 65535.0F - 0.5F;
+				if(p->weapon == WEAPON_RIFLE) { pitch = 12.0f; yaw = rnd*4.0f; roll = rnd2*3.0f; back = 0.22f; up = 0.10f; }
+				else if(p->weapon == WEAPON_SMG) { pitch = 6.0f; yaw = rnd*5.0f; roll = rnd2*2.5f; back = 0.10f; up = 0.05f; }
+				else { pitch = 18.0f; yaw = rnd*6.0f; roll = rnd2*5.0f; back = 0.32f; up = 0.16f; }
+				matrix_rotate(matrix_model, pitch*kick, 1.0f, 0.0f, 0.0f);
+				matrix_rotate(matrix_model, yaw*kick, 0.0f, 1.0f, 0.0f);
+				matrix_rotate(matrix_model, roll*kick, 0.0f, 0.0f, 1.0f);
+				matrix_translate(matrix_model, yaw*kick*0.004f, -up*kick, -back*kick);
+				float bounce = sinf(kick*3.14f*2.5f) * 0.35f * (1.0f-kick);
+				matrix_translate(matrix_model, 0, bounce*0.015f, bounce*0.025f);
+			}
+		}
+		matrix_translate(matrix_model, f[0] + swayX, f[1] + swayY, 0.1F * player_swing_func(time / 1000.0F) * speed + f[2]);
+	} else {
+		if(render_fpv && p->alive) { float speed = sqrtf(powf(p->physics.velocity.x, 2) + powf(p->physics.velocity.z, 2)) / 0.25f; float* f = player_tool_translate_func(p); matrix_translate(matrix_model, f[0], f[1], 0.1F * player_swing_func(time / 1000.0F) * speed + f[2]); }
+	}
+
+	if(!(p->held_item == TOOL_SPADE && render_fpv && camera_mode == CAMERAMODE_FPS)) {
+		float* angles = player_tool_func(p);
+		matrix_rotate(matrix_model, angles[0], 1.0F, 0.0F, 0.0F);
+		matrix_rotate(matrix_model, angles[1], 0.0F, 1.0F, 0.0F);
+	}
+	if(render_arms) {
+		if(esp_active) {
+			if(obscured || !in_view) {
+				glColor3ub(0, 0, 0);
+			}
+			glDisable(GL_DEPTH_TEST);
+		}
+		matrix_upload();
+		kv6_render(&model_playerarms, p->team);
+		if(esp_active) {
+			glEnable(GL_DEPTH_TEST);
+		}
+	}
+
+	matrix_translate(matrix_model, -3.5F * 0.1F + 0.01F, 0.0F, 10 * 0.1F);
+	if(p->held_item == TOOL_SPADE && render_fpv && game_time() - p->item_showup >= 0.25F) {
+		float* angles = player_tool_func(p);
+		float swingPower = sqrtf(angles[0]*angles[0] + angles[1]*angles[1]) / 30.0f;
+		if(swingPower > 0.05f) { matrix_translate(matrix_model, sinf(swingPower*3.14f)*0.04f, 0, swingPower*0.03f); matrix_rotate(matrix_model, swingPower*15.0f, 0.0f, 1.0f, 0.0f); }
+		matrix_translate(matrix_model, 0.0F, (model_spade.zpiv - model_spade.zsiz) * 0.05F, 0.0F);
+		matrix_rotate(matrix_model, angles[0]*1.5f, 1.0F, 0.0F, 0.0F);
+		matrix_rotate(matrix_model, angles[1]*1.5f, 0.0F, 1.0F, 0.0F);
+		matrix_translate(matrix_model, 0.0F, -(model_spade.zpiv - model_spade.zsiz) * 0.05F, 0.0F);
+	}
+
+	matrix_upload();
+	if(esp_active && render_fpv) {
+		if(obscured || !in_view) {
+			glColor3ub(0, 0, 0);
+		}
+		glDisable(GL_DEPTH_TEST);
+	}
+	switch(p->held_item) {
+		case TOOL_SPADE: kv6_render(&model_spade, p->team); break;
+		case TOOL_BLOCK:
+			model_block.red = p->block.red / 255.0F;
+			model_block.green = p->block.green / 255.0F;
+			model_block.blue = p->block.blue / 255.0F;
+			kv6_render(&model_block, p->team);
+			break;
+		case TOOL_GUN:
+			// Don't render gun model for local player in FPV when ADS is active (RMB pressed)
+			if(!(render_fpv && id == local_player_id && p->input.buttons.rmb)) {
+				switch(p->weapon) {
+					case WEAPON_RIFLE: kv6_render(&model_semi, p->team); break;
+					case WEAPON_SMG: kv6_render(&model_smg, p->team); break;
+					case WEAPON_SHOTGUN: kv6_render(&model_shotgun, p->team); break;
+				}
+			}
+			break;
+		case TOOL_GRENADE: kv6_render(&model_grenade, p->team); break;
+	}
+	if(esp_active && render_fpv) {
+		glEnable(GL_DEPTH_TEST);
+	}
+
+	vec4 v = {0.1F, 0, -0.3F, 1};
+	matrix_vector(matrix_model, v);
+	vec4 v2 = {1.1F, 0, -0.3F, 1};
+	matrix_vector(matrix_model, v2);
+
+	p->gun_pos.x = v[0];
+	p->gun_pos.y = v[1];
+	p->gun_pos.z = v[2];
+
+	p->casing_dir.x = v[0] - v2[0];
+	p->casing_dir.y = v[1] - v2[1];
+	p->casing_dir.z = v[2] - v2[2];
+
+	matrix_pop(matrix_model);
+}
+
+int player_clipbox(float x, float y, float z) {
+	int sz;
+
+	if(x < 0 || x >= 512 || y < 0 || y >= 512)
+		return 1;
+	else if(z < 0)
+		return 0;
+	sz = (int)z;
+	if(sz == 63)
+		sz = 62;
+	else if(sz >= 64)
+		return 1;
+	return !map_isair((int)x, 63 - sz, (int)y);
+}
+
+void player_reposition(struct Player* p) {
+	p->physics.eye.x = p->pos.x;
+	p->physics.eye.y = p->pos.y;
+	p->physics.eye.z = p->pos.z;
+	float f = p->physics.lastclimb - game_time();
+	if(f > -0.25F && !p->input.keys.crouch) {
+		p->physics.eye.z += (f + 0.25F) / 0.25F;
+		if(&players[local_player_id] == p) {
+			last_cy = 63.0F - p->physics.eye.z;
+		}
+	}
+}
+
+void player_coordsystem_adjust1(struct Player* p) {
+	float tmp;
+
+	tmp = p->pos.z;
+	p->pos.z = 63.0F - p->pos.y;
+	p->pos.y = tmp;
+
+	tmp = p->physics.eye.z;
+	p->physics.eye.z = 63.0F - p->physics.eye.y;
+	p->physics.eye.y = tmp;
+
+	tmp = p->physics.velocity.z;
+	p->physics.velocity.z = -p->physics.velocity.y;
+	p->physics.velocity.y = tmp;
+
+	tmp = p->orientation.z;
+	p->orientation.z = -p->orientation.y;
+	p->orientation.y = tmp;
+}
+
+void player_coordsystem_adjust2(struct Player* p) {
+	float tmp;
+
+	tmp = p->pos.y;
+	p->pos.y = 63.0F - p->pos.z;
+	p->pos.z = tmp;
+
+	tmp = p->physics.eye.y;
+	p->physics.eye.y = 63.0F - p->physics.eye.z;
+	p->physics.eye.z = tmp;
+
+	tmp = p->physics.velocity.y;
+	p->physics.velocity.y = -p->physics.velocity.z;
+	p->physics.velocity.z = tmp;
+
+	tmp = p->orientation.y;
+	p->orientation.y = -p->orientation.z;
+	p->orientation.z = tmp;
+}
+
+void player_boxclipmove(struct Player* p, float fsynctics) {
+	float offset, m, f, nx, ny, nz, z;
+	long climb = 0;
+
+	f = fsynctics * 32.f;
+	nx = f * p->physics.velocity.x + p->pos.x;
+	ny = f * p->physics.velocity.y + p->pos.y;
+
+	if(p->input.keys.crouch) {
+		offset = 0.45f;
+		m = 0.9f;
+	} else {
+		offset = 0.9f;
+		m = 1.35f;
+	}
+
+	nz = p->pos.z + offset;
+
+	if(p->physics.velocity.x < 0)
+		f = -0.45f;
+	else
+		f = 0.45f;
+	z = m;
+	while(z >= -1.36f && !player_clipbox(nx + f, p->pos.y - 0.45f, nz + z)
+		  && !player_clipbox(nx + f, p->pos.y + 0.45f, nz + z))
+		z -= 0.9f;
+	if(z < -1.36f)
+		p->pos.x = nx;
+	else if(!p->input.keys.crouch && p->orientation.z < 0.5f && !p->input.keys.sprint) {
+		z = 0.35f;
+		while(z >= -2.36f && !player_clipbox(nx + f, p->pos.y - 0.45f, nz + z)
+			  && !player_clipbox(nx + f, p->pos.y + 0.45f, nz + z))
+			z -= 0.9f;
+		if(z < -2.36f) {
+			p->pos.x = nx;
+			climb = 1;
+		} else
+			p->physics.velocity.x = 0;
+	} else
+		p->physics.velocity.x = 0;
+
+	if(p->physics.velocity.y < 0)
+		f = -0.45f;
+	else
+		f = 0.45f;
+	z = m;
+	while(z >= -1.36f && !player_clipbox(p->pos.x - 0.45f, ny + f, nz + z)
+		  && !player_clipbox(p->pos.x + 0.45f, ny + f, nz + z))
+		z -= 0.9f;
+	if(z < -1.36f)
+		p->pos.y = ny;
+	else if(!p->input.keys.crouch && p->orientation.z < 0.5f && !p->input.keys.sprint && !climb) {
+		z = 0.35f;
+		while(z >= -2.36f && !player_clipbox(p->pos.x - 0.45f, ny + f, nz + z)
+			  && !player_clipbox(p->pos.x + 0.45f, ny + f, nz + z))
+			z -= 0.9f;
+		if(z < -2.36f) {
+			p->pos.y = ny;
+			climb = 1;
+		} else
+			p->physics.velocity.y = 0;
+	} else if(!climb)
+		p->physics.velocity.y = 0;
+
+	if(climb) {
+		p->physics.velocity.x *= 0.5f;
+		p->physics.velocity.y *= 0.5f;
+		p->physics.lastclimb = game_time();
+		nz--;
+		m = -1.35f;
+	} else {
+		if(p->physics.velocity.z < 0)
+			m = -m;
+		nz += p->physics.velocity.z * fsynctics * 32.f;
+	}
+
+	p->physics.airborne = 1;
+
+	if(player_clipbox(p->pos.x - 0.45f, p->pos.y - 0.45f, nz + m)
+	   || player_clipbox(p->pos.x - 0.45f, p->pos.y + 0.45f, nz + m)
+	   || player_clipbox(p->pos.x + 0.45f, p->pos.y - 0.45f, nz + m)
+	   || player_clipbox(p->pos.x + 0.45f, p->pos.y + 0.45f, nz + m)) {
+		if(p->physics.velocity.z >= 0) {
+			p->physics.wade = p->pos.z > 61;
+			p->physics.airborne = 0;
+		}
+		p->physics.velocity.z = 0;
+	} else
+		p->pos.z = nz - offset;
+
+	player_reposition(p);
+}
+
+int player_move(struct Player* p, float fsynctics, int id) {
+	if(!p->alive) {
+		p->physics.velocity.y -= fsynctics;
+		AABB dead_bb = {0};
+		aabb_set_size(&dead_bb, 0.7F, 0.15F, 0.7F);
+		aabb_set_center(&dead_bb, p->pos.x + p->physics.velocity.x * fsynctics * 32.0F,
+						p->pos.y + p->physics.velocity.y * fsynctics * 32.0F,
+						p->pos.z + p->physics.velocity.z * fsynctics * 32.0F);
+		if(!aabb_intersection_terrain(&dead_bb, 0)) {
+			p->pos.x += p->physics.velocity.x * fsynctics * 32.0F;
+			p->pos.y += p->physics.velocity.y * fsynctics * 32.0F;
+			p->pos.z += p->physics.velocity.z * fsynctics * 32.0F;
+		} else {
+			p->physics.velocity.x *= 0.36F;
+			p->physics.velocity.y *= -0.36F;
+			p->physics.velocity.z *= 0.36F;
+		}
+		return 0;
+	}
+
+	int local = (id == local_player_id && camera_mode == CAMERAMODE_FPS);
+
+	player_coordsystem_adjust1(p);
+	float f, f2;
+
+	// move player and perform simple physics (gravity, momentum, friction)
+	if(p->physics.jump) {
+		if(settings.player_stats && id == local_player_id) {
+			player_stats_jumps++;
+		}
+		sound_create(local ? SOUND_LOCAL : SOUND_WORLD, p->physics.wade ? &sound_jump_water : &sound_jump, p->pos.x,
+					 63.0F - p->pos.z, p->pos.y);
+		p->physics.jump = 0;
+		p->physics.velocity.z = -0.36f;
+	}
+
+	f = fsynctics; // player acceleration scalar
+	if(p->physics.airborne)
+		f *= 0.1f;
+	else if(p->input.keys.crouch)
+		f *= 0.3f;
+	else if((p->input.buttons.rmb && p->held_item == TOOL_GUN) || p->input.keys.sneak)
+		f *= 0.5f;
+	else if(p->input.keys.sprint)
+		f *= 1.3f;
+
+	if((p->input.keys.up || p->input.keys.down) && (p->input.keys.left || p->input.keys.right))
+		f *= SQRT; // if strafe + forward/backwards then limit diagonal velocity
+
+	float len = sqrtf(p->orientation.x * p->orientation.x + p->orientation.y * p->orientation.y);
+	float sx = -p->orientation.y / len;
+	float sy = p->orientation.x / len;
+
+	if(p->input.keys.up) {
+		p->physics.velocity.x += p->orientation.x * f;
+		p->physics.velocity.y += p->orientation.y * f;
+	} else if(p->input.keys.down) {
+		p->physics.velocity.x -= p->orientation.x * f;
+		p->physics.velocity.y -= p->orientation.y * f;
+	}
+	if(p->input.keys.left) {
+		p->physics.velocity.x -= sx * f;
+		p->physics.velocity.y -= sy * f;
+	} else if(p->input.keys.right) {
+		p->physics.velocity.x += sx * f;
+		p->physics.velocity.y += sy * f;
+	}
+
+	f = fsynctics + 1;
+	p->physics.velocity.z += fsynctics;
+	p->physics.velocity.z /= f; // air friction
+	if(p->physics.wade)
+		f = fsynctics * 6.0F + 1; // water friction
+	else if(!p->physics.airborne)
+		f = fsynctics * 4.0F + 1; // ground friction
+	p->physics.velocity.x /= f;
+	p->physics.velocity.y /= f;
+	f2 = p->physics.velocity.z;
+	player_boxclipmove(p, fsynctics);
+	// hit ground... check if hurt
+
+	int ret = 0;
+
+	if(!p->physics.velocity.z && (f2 > FALL_SLOW_DOWN)) {
+		// slow down on landing
+		p->physics.velocity.x *= 0.5F;
+		p->physics.velocity.y *= 0.5F;
+
+		// view-only landing dip, scaled by fall speed (local player only)
+		if(local && settings.land_dip)
+			cameracontroller_land_dip(fminf((f2 - FALL_SLOW_DOWN) * 0.65F, 0.34F));
+
+		// return fall damage
+		if(f2 > FALL_DAMAGE_VELOCITY) {
+			f2 -= FALL_DAMAGE_VELOCITY;
+			ret = f2 * f2 * FALL_DAMAGE_SCALAR;
+			sound_create(local ? SOUND_LOCAL : SOUND_WORLD, &sound_hurt_fall, p->pos.x, 63.0F - p->pos.z, p->pos.y);
+		} else {
+			sound_create(local ? SOUND_LOCAL : SOUND_WORLD, p->physics.wade ? &sound_land_water : &sound_land, p->pos.x,
+						 63.0F - p->pos.z, p->pos.y);
+			ret = -1;
+		}
+	}
+
+	player_coordsystem_adjust2(p);
+
+	if(p->input.keys.up || p->input.keys.down || p->input.keys.left || p->input.keys.right) {
+		if(game_time() - p->sound.feet_started > (p->input.keys.sprint ? (0.5F / 1.3F) : 0.5F)
+		   && (!p->input.keys.crouch && !p->input.keys.sneak) && !p->physics.airborne
+		   && p->physics.velocity.x * p->physics.velocity.x + p->physics.velocity.z * p->physics.velocity.z
+		           > 0.125F * 0.125F) {
+			struct Sound_wav* footstep = (struct Sound_wav*[]) {
+				&sound_footstep1, &sound_footstep2, &sound_footstep3, &sound_footstep4,
+				&sound_wade1,	  &sound_wade2,		&sound_wade3,	  &sound_wade4,
+			}[(rand() % 4) + (p->physics.wade ? 4 : 0)];
+
+			if(local) {
+				sound_create(SOUND_LOCAL, footstep, p->pos.x, p->pos.y, p->pos.z);
+			} else {
+				sound_create_sticky(footstep, p, id);
+			}
+
+			p->sound.feet_started = game_time();
+		}
+		if(game_time() - p->sound.feet_started_cycle > (p->input.keys.sprint ? (0.5F / 1.3F) : 0.5F)) {
+			p->sound.feet_started_cycle = game_time();
+			p->sound.feet_cylce = !p->sound.feet_cylce;
+		}
+	}
+
+	return ret;
+}
+
+int player_uncrouch(struct Player* p) {
+	player_coordsystem_adjust1(p);
+	float x1 = p->pos.x + 0.45F;
+	float x2 = p->pos.x - 0.45F;
+	float y1 = p->pos.y + 0.45F;
+	float y2 = p->pos.y - 0.45F;
+	float z1 = p->pos.z + 2.25F;
+	float z2 = p->pos.z - 1.35F;
+
+	// first check if player can lower feet (in midair)
+	if(p->physics.airborne
+	   && !(player_clipbox(x1, y1, z1) || player_clipbox(x1, y2, z1) || player_clipbox(x2, y1, z1)
+			|| player_clipbox(x2, y2, z1))) {
+		player_coordsystem_adjust2(p);
+		return 1;
+		// then check if they can raise their head
+	} else if(!(player_clipbox(x1, y1, z2) || player_clipbox(x1, y2, z2) || player_clipbox(x2, y1, z2)
+				|| player_clipbox(x2, y2, z2))) {
+		p->pos.z -= 0.9F;
+		p->physics.eye.z -= 0.9F;
+		if(&players[local_player_id] == p) {
+			last_cy += 0.9F;
+		}
+		player_coordsystem_adjust2(p);
+		return 1;
+	}
+	player_coordsystem_adjust2(p);
+	return 0;
+}
