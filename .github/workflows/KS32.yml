@@ -1,3 +1,395 @@
+name: Build KS Win Linux Mac Android
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build for ${{ matrix.platform }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows
+            arch: x64
+            msystem: UCRT64
+            mingw_prefix: mingw-w64-ucrt-x86_64
+            compiler_pkg: mingw-w64-ucrt-x86_64-gcc
+            win_zip: KyroSpades Windows.zip
+            video_recording: ON
+          - os: ubuntu-latest
+            platform: linux
+            arch: x64
+          - os: macos-15-intel
+            platform: macos
+            arch: x64
+    steps:
+      - name: Checkout your fork
+        uses: actions/checkout@v4
+        
+      - name: Sync upstream KyroSpades
+        run: |
+          cp -r src /tmp/ks-backup-src
+          cp -r cmake /tmp/ks-backup-cmake
+          cp -r .github /tmp/ks-backup-github
+          cp -r deps /tmp/ks-backup-deps
+          cp CMakeLists.txt /tmp/ks-backup-cmakelists 2>/dev/null || true
+          cp README.md /tmp/ks-backup-readme 2>/dev/null || true
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/Kyrope01/KyroSpades.git || true
+          git fetch upstream
+          if ! git merge upstream/main --no-edit; then
+            echo "::warning::Upstream merge failed (diverged history / conflicts) — building WITHOUT latest upstream changes."
+            git merge --abort || true
+          fi
+          rm -rf src && mv /tmp/ks-backup-src src
+          rm -rf cmake && mv /tmp/ks-backup-cmake cmake
+          rm -rf .github && mv /tmp/ks-backup-github .github
+          rm -rf deps && mv /tmp/ks-backup-deps deps
+          mv /tmp/ks-backup-cmakelists CMakeLists.txt 2>/dev/null || true
+          mv /tmp/ks-backup-readme README.md 2>/dev/null || true
+        shell: bash
+
+      - name: Cache CMake dependencies
+        if: matrix.platform != 'windows'
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: ${{ runner.os }}-deps-${{ hashFiles('src/CMakeLists.txt') }}
+
+      - name: Install MSYS2 (Windows)
+        if: matrix.platform == 'windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: ${{ matrix.msystem }}
+          update: true
+          install: >-
+            ${{ matrix.compiler_pkg }}
+            ${{ matrix.mingw_prefix }}-cmake
+            ${{ matrix.mingw_prefix }}-glfw
+            ${{ matrix.mingw_prefix }}-glew
+            ${{ matrix.mingw_prefix }}-openal
+            ${{ matrix.mingw_prefix }}-enet
+            ${{ matrix.mingw_prefix }}-libdeflate
+            ${{ matrix.mingw_prefix }}-pkgconf
+            ${{ matrix.mingw_prefix }}-python
+            zip
+            make
+
+      - name: Install FFmpeg (Windows x64)
+        if: matrix.platform == 'windows' && matrix.arch == 'x64'
+        shell: msys2 {0}
+        run: pacman -S --noconfirm ${{ matrix.mingw_prefix }}-ffmpeg
+
+      - name: Build (Windows)
+        if: matrix.platform == 'windows'
+        shell: msys2 {0}
+        run: |
+          mkdir -p build
+          cd build
+          cmake -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release -DENABLE_VIDEO_RECORDING=${{ matrix.video_recording }} -DCMAKE_POLICY_VERSION_MINIMUM=3.5 ..
+          make -j$(nproc)
+
+      - name: Bundle DLLs (Windows)
+        if: matrix.platform == 'windows'
+        shell: msys2 {0}
+        run: |
+          cd build/KyroSpades
+          case "$MSYSTEM" in
+            UCRT64) dll_pattern="ucrt64" ;;
+            MINGW32) dll_pattern="mingw32" ;;
+            *) dll_pattern="mingw" ;;
+          esac
+          ldd client.exe | grep "$dll_pattern" | awk '{print $3}' | xargs -r -I{} cp {} .
+
+      - name: Zip release (Windows)
+        if: matrix.platform == 'windows'
+        shell: msys2 {0}
+        run: |
+          cd build
+          zip -9r "${{ matrix.win_zip }}" KyroSpades/
+
+      - name: Install dependencies (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential libglfw3-dev libglew-dev libopenal-dev libenet-dev libdeflate-dev libpulse-dev zip libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev patchelf
+
+      - name: Build (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          mkdir -p build
+          cd build
+          cmake -DCMAKE_BUILD_TYPE=Release ..
+          make -j$(nproc)
+
+      - name: Bundle shared libraries (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          cd build/KyroSpades
+          mkdir -p lib
+          set -e
+          for lib in avcodec avformat avutil swresample swscale; do
+            path=$(ldd client | awk -v l="lib$lib" '$1 ~ l {print $3}')
+            [ -n "$path" ] && cp -n "$path" lib/
+          done
+          changed=1
+          while [ "$changed" = "1" ]; do
+            changed=0
+            for f in lib/*.so*; do
+              [ ! -f "$f" ] && continue
+              for dep in $(ldd "$f" 2>/dev/null | grep '=> /' | awk '{print $3}'); do
+                case "$dep" in
+                  */ld-linux*|*/libc.so.*|*/libm.so.*|*/libpthread.so.*|*/libdl.so.*|*/librt.so.*|*/libstdc++.so.*|*/libgcc_s.so.*|*/libresolv*|*/libnss_*|*/libutil*|*/libz.so.*|*/libexpat*)
+                    ;;
+                  *)
+                    base=$(basename "$dep")
+                    [ ! -f "lib/$base" ] && { cp -n "$dep" lib/; changed=1; }
+                    ;;
+                esac
+              done
+            done
+          done
+          patchelf --set-rpath '$ORIGIN/lib' client
+          for f in lib/*.so*; do
+            [ -f "$f" ] && patchelf --set-rpath '$ORIGIN' "$f" 2>/dev/null || true
+          done
+
+      - name: Zip release (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          cd build
+          zip -9r "KyroSpades Linux.zip" KyroSpades/
+
+      - name: Cache source-built macOS deps
+        if: matrix.platform == 'macos'
+        uses: actions/cache@v4
+        with:
+          path: deps-prefix
+          key: macos-x86_64-target11-glew2.2.0-sdl2.30.10-enet1.3.18-libdeflate1.19
+
+      - name: Install build tools (macOS)
+        if: matrix.platform == 'macos'
+        run: brew install cmake pkg-config ffmpeg
+
+      - name: Build dependencies from source (macOS)
+        if: matrix.platform == 'macos'
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: |
+          set -euo pipefail
+          DEPS="$GITHUB_WORKSPACE/deps-prefix"
+          mkdir -p "$DEPS/lib" "$DEPS/include"
+          COMMON="-DCMAKE_BUILD_TYPE=Release \
+                  -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 \
+                  -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+                  -DCMAKE_INSTALL_PREFIX=$DEPS \
+                  -DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+          if [ ! -f "$DEPS/lib/libGLEW.a" ]; then
+            curl -L -o glew.tgz https://github.com/nigels-com/glew/releases/download/glew-2.2.0/glew-2.2.0.tgz
+            tar xzf glew.tgz
+            cmake -S glew-2.2.0/build/cmake -B glew-build $COMMON -DBUILD_SHARED_LIBS=OFF -DBUILD_UTILS=OFF
+            cmake --build glew-build
+            cmake --install glew-build
+          fi
+          if [ ! -f "$DEPS/lib/libSDL2.a" ]; then
+            curl -L -o sdl2.tar.gz https://github.com/libsdl-org/SDL/archive/refs/tags/release-2.30.10.tar.gz
+            tar xzf sdl2.tar.gz
+            cmake -S SDL-release-2.30.10 -B sdl2-build $COMMON \
+                  -DSDL_SHARED=OFF -DSDL_STATIC=ON -DSDL_TEST=OFF
+            cmake --build sdl2-build
+            cmake --install sdl2-build
+          fi
+          if [ ! -f "$DEPS/lib/libenet.a" ]; then
+            curl -L -o enet.tar.gz https://github.com/lsalzman/enet/archive/refs/tags/v1.3.18.tar.gz
+            tar xzf enet.tar.gz
+            cmake -S enet-1.3.18 -B enet-build $COMMON
+            cmake --build enet-build
+            cp enet-build/libenet.a "$DEPS/lib/"
+            cp -r enet-1.3.18/include/enet "$DEPS/include/"
+          fi
+          if [ ! -f "$DEPS/lib/libdeflate.a" ]; then
+            curl -L -o libdeflate.tar.gz https://github.com/ebiggers/libdeflate/archive/refs/tags/v1.19.tar.gz
+            tar xzf libdeflate.tar.gz
+            cmake -S libdeflate-1.19 -B libdeflate-build $COMMON \
+                  -DLIBDEFLATE_BUILD_SHARED_LIB=OFF \
+                  -DLIBDEFLATE_BUILD_STATIC_LIB=ON \
+                  -DLIBDEFLATE_BUILD_GZIP=OFF
+            cmake --build libdeflate-build
+            cmake --install libdeflate-build
+          fi
+
+      - name: Build (macOS)
+        if: matrix.platform == 'macos'
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          cd build
+          cmake -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 \
+                -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+                -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/deps-prefix" \
+                -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+                ..
+          make -j$(sysctl -n hw.logicalcpu)
+
+      - name: Bundle shared libraries (macOS)
+        if: matrix.platform == 'macos'
+        run: |
+          cd build/KyroSpades
+          mkdir -p lib
+          set -e
+          for lib in avcodec avformat avutil swresample swscale SDL2; do
+            path=$(otool -L client | awk -v l="lib$lib" '$1 ~ l {print $1}')
+            [ -n "$path" ] && [ -f "$path" ] && cp -n "$path" lib/
+          done
+          changed=1
+          while [ "$changed" = "1" ]; do
+            changed=0
+            for f in lib/*.dylib; do
+              [ ! -f "$f" ] && continue
+              for dep in $(otool -L "$f" 2>/dev/null | tail -n +2 | awk '{print $1}'); do
+                case "$dep" in
+                  /usr/lib/*|/System/*|@loader_path/*|@rpath/*) ;;
+                  *)
+                    base=$(basename "$dep")
+                    [ ! -f "lib/$base" ] && [ -f "$dep" ] && { cp -n "$dep" lib/; changed=1; }
+                    ;;
+                esac
+              done
+            done
+          done
+          for f in lib/*.dylib; do
+            name=$(basename "$f")
+            install_name_tool -id "@loader_path/$name" "$f" 2>/dev/null || true
+            for dep in $(otool -L "$f" 2>/dev/null | tail -n +2 | awk '{print $1}'); do
+              case "$dep" in
+                /usr/lib/*|/System/*|@loader_path/*|@rpath/*) ;;
+                *)
+                  dylib=$(basename "$dep")
+                  [ -f "lib/$dylib" ] && install_name_tool -change "$dep" "@loader_path/$dylib" "$f"
+                  ;;
+              esac
+            done
+          done
+          for dep in $(otool -L client | tail -n +2 | awk '{print $1}'); do
+            case "$dep" in
+              /usr/lib/*|/System/*|@loader_path/*|@rpath/*) ;;
+              *)
+                dylib=$(basename "$dep")
+                [ -f "lib/$dylib" ] && install_name_tool -change "$dep" "@loader_path/lib/$dylib" client
+                ;;
+            esac
+          done
+          leftover=$(otool -L client | tail -n +2 | awk '{print $1}' \
+                     | grep -Ev '^(/usr/lib/|/System/|@loader_path/|@rpath/)' || true)
+          if [ -n "$leftover" ]; then
+            echo "::error::client still references unbundled absolute dylib paths:"
+            echo "$leftover"
+            exit 1
+          fi
+          bad=0
+          check_refs() {
+            otool -L "$1" | tail -n +2 | awk '{print $1}' | while read -r ref; do
+              case "$ref" in
+                @loader_path/*)
+                  resolved="$2/${ref#@loader_path/}"
+                  if [ ! -f "$resolved" ]; then
+                    echo "::error::$1 references $ref → missing $resolved"
+                    echo "BAD"
+                  fi
+                  ;;
+              esac
+            done
+          }
+          : > /tmp/ks_ref_fail
+          { for f in lib/*.dylib; do check_refs "$f" "lib"; done; check_refs client "."; } \
+            | grep -q BAD && echo fail > /tmp/ks_ref_fail || true
+          if [ -s /tmp/ks_ref_fail ]; then
+            echo "::error::One or more @loader_path references do not resolve (see above)."
+            exit 1
+          fi
+          for f in lib/*.dylib; do
+            [ -f "$f" ] && codesign --force --sign - --timestamp=none "$f"
+          done
+          codesign --force --sign - --timestamp=none client
+          codesign --verify --verbose client || true
+          cd ..
+          APP="KyroSpades.app/Contents"
+          mkdir -p "$APP/MacOS" "$APP/Frameworks" "$APP/Resources"
+          cp KyroSpades/client "$APP/MacOS/KyroSpades"
+          cp KyroSpades/lib/*.dylib "$APP/Frameworks/" 2>/dev/null || true
+          for d in kv6 png wav; do
+            [ -d "KyroSpades/$d" ] && cp -r "KyroSpades/$d" "$APP/Resources/$d"
+          done
+          [ -d "fonts" ] && cp -r "fonts" "$APP/Resources/fonts"
+          [ -d "resources" ] && cp -r "resources" "$APP/Resources/resources"
+          ICON_SRC="resources/icon.png"
+          if [ -f "$ICON_SRC" ]; then
+            ICONSET="$APP/Resources/KyroSpades.iconset"
+            mkdir -p "$ICONSET"
+            for sz in 16 32 128 256 512; do
+              sips -z $sz $sz "$ICON_SRC" --out "$ICONSET/icon_${sz}x${sz}.png" >/dev/null
+              d=$((sz * 2))
+              sips -z $d $d "$ICON_SRC" --out "$ICONSET/icon_${sz}x${sz}@2x.png" >/dev/null
+            done
+            iconutil -c icns "$ICONSET" -o "$APP/Resources/KyroSpades.icns"
+            rm -rf "$ICONSET"
+          fi
+          [ -f "resources/config.ini" ] && cp "resources/config.ini" "$APP/Resources/"
+          cat > "$APP/Info.plist" << 'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleExecutable</key><string>KyroSpades</string>
+            <key>CFBundleIdentifier</key><string>com.kyrope01.kyrospades</string>
+            <key>CFBundleName</key><string>KyroSpades</string>
+            <key>CFBundleIconFile</key><string>KyroSpades</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleVersion</key><string>1.0</string>
+            <key>CFBundleShortVersionString</key><string>1.0</string>
+            <key>LSMinimumSystemVersion</key><string>11.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          PLIST
+          for dep in $(otool -L "$APP/MacOS/KyroSpades" | tail -n +2 | awk '{print $1}'); do
+            case "$dep" in
+              @loader_path/lib/*)
+                dylib=$(basename "$dep")
+                install_name_tool -change "$dep" "@loader_path/../Frameworks/$dylib" "$APP/MacOS/KyroSpades"
+                ;;
+            esac
+          done
+          codesign --force --deep --sign - --timestamp=none "KyroSpades.app"
+
+      - name: Verify macOS binary arch + min OS (macOS)
+        if: matrix.platform == 'macos'
+        run: |
+          BIN=build/KyroSpades.app/Contents/MacOS/KyroSpades
+          file "$BIN"
+          lipo -archs "$BIN" || true
+          otool -l "$BIN" | grep -A4 -E 'LC_VERSION_MIN_MACOSX|LC_BUILD_VERSION' || true
+
+      - name: Zip release (macOS)
+        if: matrix.platform == 'macos'
+        run: |
+          cd build
+          zip -9r "KyroSpades MacOS.zip" KyroSpades.app/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}-${{ matrix.arch }}-build
+          path: build/*.zip
+
   build-android:
     name: Build for Android ${{ matrix.abi }}
     runs-on: ubuntu-latest
@@ -11,8 +403,6 @@
           - abi: armeabi-v7a
             artifact_name: KyroSpades Android 32-bit (armeabi-v7a, older phones).apk
     steps:
-      # NUCLEAR OPTION: Delete the poisoned caches before we even checkout the code.
-      # This uses the pre-installed GitHub CLI to wipe the exact keys that are stuck.
       - name: Purge poisoned Android caches
         env:
           GH_TOKEN: ${{ github.token }}
@@ -98,14 +488,12 @@
           yes | "$SDKMANAGER" --licenses > /dev/null || true
           "$SDKMANAGER" "ndk;27.2.12479018" "cmake;3.22.1"
 
-      # Split into restore and save to prevent saving partial/broken caches
       - name: Restore Android native deps cache
         id: cache-restore
         uses: actions/cache/restore@v4
         with:
           path: build-android/deps-install
-          # Bumped to v6, and explicitly NO restore-keys to prevent fallback poisoning
-          key: android-v6-${{ matrix.abi }}-api21-enet1.3.18-libdeflate1.20-openal1.23.1
+          key: android-v7-${{ matrix.abi }}-api21-enet1.3.18-libdeflate1.20-openal1.23.1
 
       - name: Validate cached architectures (Post-Restore Guard)
         if: steps.cache-restore.outputs.cache-hit == 'true'
@@ -180,7 +568,6 @@
             cmake --install openal-build
           fi
 
-      # Save the cache only if we actually built something new
       - name: Save Android native deps cache
         if: steps.cache-restore.outputs.cache-hit != 'true' || !hashFiles('build-android/deps-install/lib/libopenal.a')
         uses: actions/cache/save@v4
@@ -234,3 +621,96 @@
         with:
           name: android-${{ matrix.abi }}-build
           path: build/*.apk
+
+  build-ios:
+    name: Build for iOS
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        
+      - name: Select Xcode (iPhoneOS SDK)
+        run: |
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Install ninja
+        run: brew install ninja || true
+
+      - name: Cache iOS native deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            build-ios/prefix
+            build-ios/deps-src
+            build-ios/SDL
+            build-ios/openal-soft
+            build-ios/enet
+            build-ios/libdeflate
+          key: ios-arm64-sdl2.30.10-openal1.23.1-enet1.3.18-libdeflate1.20
+
+      - name: Build unsigned .app
+        run: |
+          chmod +x build_ios.sh
+          ./build_ios.sh
+
+      - name: Package unsigned .ipa
+        run: |
+          set -euo pipefail
+          rm -rf Payload
+          mkdir Payload
+          cp -R "build-ios/KyroSpades.app" Payload/
+          mkdir -p build
+          zip -9qry "build/KyroSpades iOS (unsigned).ipa" Payload
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build
+          path: build/*.ipa
+
+  release:
+    name: Create GitHub Release
+    needs: [build, build-android, build-ios]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "*-build"
+          merge-multiple: true
+          path: release-artifacts
+          
+      - name: Get date for release tag
+        id: date
+        run: echo "date=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+        
+      - name: Upload as GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: release
+          name: Latest Win Mac Linux, Android & iOS Build
+          files: |
+            release-artifacts/KyroSpades Windows.zip
+            release-artifacts/KyroSpades Linux.zip
+            release-artifacts/KyroSpades MacOS.zip
+            release-artifacts/KyroSpades Android arm64-v8a.apk
+            release-artifacts/KyroSpades Android 32-bit (armeabi-v7a, older phones).apk
+            release-artifacts/KyroSpades iOS (unsigned).ipa
+          body: |
+            Latest version of the game for Windows, Linux, Android, macOS and iOS.
+
+            WHICH FILE SHOULD I DOWNLOAD?
+            - Windows (most PCs): KyroSpades Windows.zip
+            - Linux (most PCs): KyroSpades Linux.zip
+            - Android (most phones): KyroSpades Android arm64-v8a.apk
+            - Android 32-BIT (older phones): KyroSpades Android 32-bit (armeabi-v7a, older phones).apk
+            - macOS (Intel): KyroSpades MacOS.zip
+            - iOS: KyroSpades iOS (unsigned).ipa — UNSIGNED, sideload with AltStore/Sideloadly or re-sign with your own certificate.
+
+            Only use a "32-bit" file if your device is old or explicitly says it runs a 32-bit operating system. Most computers and phones made after ~2010 are 64-bit and should use the regular files.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
