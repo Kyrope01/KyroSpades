@@ -153,7 +153,7 @@ jobs:
         run: |
           cd build
           zip -9r "KyroSpades Linux.zip" KyroSpades/
-      # --- MACOS ONLY BUILD STEPS (x86_64, targets macOS 11.0+) ---
+      # --- MACOS ONLY BUILD STEPS ---
       - name: Cache source-built macOS deps
         if: matrix.platform == 'macos'
         uses: actions/cache@v4
@@ -372,97 +372,6 @@ jobs:
           name: ${{ matrix.platform }}-${{ matrix.arch }}-build
           path: build/*.zip
 
-  build-linux32:
-    name: Build for linux x86
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    steps:
-      - name: Checkout your fork
-        uses: actions/checkout@v4
-      - name: Sync upstream KyroSpades
-        run: |
-          cp -r src /tmp/ks-backup-src
-          cp -r cmake /tmp/ks-backup-cmake
-          cp -r .github /tmp/ks-backup-github
-          cp -r deps /tmp/ks-backup-deps
-          cp CMakeLists.txt /tmp/ks-backup-cmakelists 2>/dev/null || true
-          cp README.md /tmp/ks-backup-readme 2>/dev/null || true
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git remote add upstream https://github.com/Kyrope01/KyroSpades.git || true
-          git fetch upstream
-          if ! git merge upstream/main --no-edit; then
-            echo "::warning::Upstream merge failed (diverged history / conflicts) — building WITHOUT latest upstream changes."
-            git merge --abort || true
-          fi
-          rm -rf src && mv /tmp/ks-backup-src src
-          rm -rf cmake && mv /tmp/ks-backup-cmake cmake
-          rm -rf .github && mv /tmp/ks-backup-github .github
-          rm -rf deps && mv /tmp/ks-backup-deps deps
-          mv /tmp/ks-backup-cmakelists CMakeLists.txt 2>/dev/null || true
-          mv /tmp/ks-backup-readme README.md 2>/dev/null || true
-        shell: bash
-      - name: Build in 32-bit Linux container
-        run: |
-          set -euo pipefail
-          docker run --rm --platform linux/386 \
-            -v "$GITHUB_WORKSPACE:/work" \
-            -w /work \
-            debian:bookworm \
-            bash -lc '
-              set -euo pipefail
-              export DEBIAN_FRONTEND=noninteractive
-              apt-get update
-              apt-get install -y \
-                ca-certificates curl git cmake build-essential pkg-config zip patchelf file \
-                libgl1-mesa-dev libglfw3-dev libglew-dev libopenal-dev \
-                libenet-dev libdeflate-dev
-              rm -rf build
-              mkdir -p build
-              cd build
-              cmake -DCMAKE_BUILD_TYPE=Release \
-                    -DENABLE_VIDEO_RECORDING=OFF \
-                    -DCMAKE_DISABLE_FIND_PACKAGE_PulseAudio=TRUE \
-                    -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
-                    ..
-              make -j$(nproc)
-              command -v file >/dev/null && file KyroSpades/client || true
-            '
-      - name: Bundle shared libraries (Linux x86)
-        run: |
-          set -euo pipefail
-          docker run --rm --platform linux/386 \
-            -v "$GITHUB_WORKSPACE:/work" \
-            -w /work/build/KyroSpades \
-            debian:bookworm \
-            bash -lc '
-              set -euo pipefail
-              export DEBIAN_FRONTEND=noninteractive
-              apt-get update
-              apt-get install -y patchelf libc6 libstdc++6 libgcc-s1
-              mkdir -p lib
-              for dep in $(ldd client 2>/dev/null | grep "=> /" | awk "{print \\$3}"); do
-                case "$dep" in
-                  */ld-linux*|*/libc.so.*|*/libm.so.*|*/libpthread.so.*|*/libdl.so.*|*/librt.so.*|*/libstdc++.so.*|*/libgcc_s.so.*)
-                    ;;
-                  *)
-                    cp -n "$dep" lib/ 2>/dev/null || true
-                    ;;
-                esac
-              done
-              patchelf --set-rpath "\$ORIGIN/lib" client
-            '
-      - name: Zip release (Linux x86)
-        run: |
-          sudo chown -R $(id -u):$(id -g) build
-          cd build
-          zip -9r "KyroSpades Linux 32-bit (x86, older PCs).zip" KyroSpades/
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-x86-build
-          path: build/*.zip
-
   build-android:
     name: Build for Android ${{ matrix.abi }}
     runs-on: ubuntu-latest
@@ -473,8 +382,6 @@ jobs:
         include:
           - abi: arm64-v8a
             artifact_name: KyroSpades Android arm64-v8a.apk
-          - abi: armeabi-v7a
-            artifact_name: KyroSpades Android 32-bit (armeabi-v7a, older phones).apk
     steps:
       - name: Checkout your fork
         uses: actions/checkout@v4
@@ -557,8 +464,6 @@ jobs:
           DEPS="$GITHUB_WORKSPACE/build-android/deps-install"
           mkdir -p "$DEPS/lib" "$DEPS/include"
 
-          # Guard against poisoned caches: verify every restored static lib was
-          # actually built for THIS ABI, and delete+rebuild any that were not.
           READELF="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
           case "${{ matrix.abi }}" in
             arm64-v8a)   MACHINE="AArch64" ;;
@@ -697,7 +602,7 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: [build, build-linux32, build-android, build-ios]
+    needs: [build, build-android, build-ios]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -719,23 +624,17 @@ jobs:
           files: |
             release-artifacts/KyroSpades Windows.zip
             release-artifacts/KyroSpades Linux.zip
-            release-artifacts/KyroSpades Linux 32-bit (x86, older PCs).zip
             release-artifacts/KyroSpades MacOS.zip
             release-artifacts/KyroSpades Android arm64-v8a.apk
-            release-artifacts/KyroSpades Android 32-bit (armeabi-v7a, older phones).apk
             release-artifacts/KyroSpades iOS (unsigned).ipa
           body: |
             Latest version of the game for Windows, Linux, Android, macOS and iOS.
 
             WHICH FILE SHOULD I DOWNLOAD?
-            - Windows (most PCs): KyroSpades Windows.zip
-            - Linux (most PCs): KyroSpades Linux.zip
-            - Linux 32-BIT (older PCs): KyroSpades Linux 32-bit (x86, older PCs).zip
-            - Android (most phones): KyroSpades Android arm64-v8a.apk
-            - Android 32-BIT (older phones): KyroSpades Android 32-bit (armeabi-v7a, older phones).apk
+            - Windows: KyroSpades Windows.zip
+            - Linux: KyroSpades Linux.zip
+            - Android: KyroSpades Android arm64-v8a.apk
             - macOS (Intel): KyroSpades MacOS.zip
             - iOS: KyroSpades iOS (unsigned).ipa — UNSIGNED, sideload with AltStore/Sideloadly or re-sign with your own certificate.
-
-            Only use a "32-bit" file if your device is old or explicitly says it runs a 32-bit operating system. On Windows, check Settings > System > About > "System type". Most computers and phones made after ~2010 are 64-bit and should use the regular files.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
