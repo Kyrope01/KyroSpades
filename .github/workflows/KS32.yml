@@ -1,0 +1,310 @@
+name: Build KS 32-bit (Linux x86 + Android)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-linux32:
+    name: Build for linux x86 (32bit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout your fork
+        uses: actions/checkout@v4
+      - name: Sync upstream KyroSpades
+        run: |
+          cp -r src /tmp/ks-backup-src
+          cp -r cmake /tmp/ks-backup-cmake
+          cp -r .github /tmp/ks-backup-github
+          cp -r deps /tmp/ks-backup-deps
+          cp CMakeLists.txt /tmp/ks-backup-cmakelists 2>/dev/null || true
+          cp README.md /tmp/ks-backup-readme 2>/dev/null || true
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/Kyrope01/KyroSpades.git || true
+          git fetch upstream
+          if ! git merge upstream/main --no-edit; then
+            echo "::warning::Upstream merge failed (diverged history / conflicts) — building WITHOUT latest upstream changes."
+            git merge --abort || true
+          fi
+          rm -rf src && mv /tmp/ks-backup-src src
+          rm -rf cmake && mv /tmp/ks-backup-cmake cmake
+          rm -rf .github && mv /tmp/ks-backup-github .github
+          rm -rf deps && mv /tmp/ks-backup-deps deps
+          mv /tmp/ks-backup-cmakelists CMakeLists.txt 2>/dev/null || true
+          mv /tmp/ks-backup-readme README.md 2>/dev/null || true
+        shell: bash
+      - name: Build in 32-bit Linux container
+        run: |
+          set -euo pipefail
+          docker run --rm --platform linux/386 \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -w /work \
+            debian:bookworm \
+            bash -lc '
+              set -euo pipefail
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install -y \
+                ca-certificates curl git cmake build-essential pkg-config zip patchelf file \
+                libgl1-mesa-dev libglfw3-dev libglew-dev libopenal-dev \
+                libenet-dev libdeflate-dev
+              rm -rf build
+              mkdir -p build
+              cd build
+              cmake -DCMAKE_BUILD_TYPE=Release \
+                    -DENABLE_VIDEO_RECORDING=OFF \
+                    -DCMAKE_DISABLE_FIND_PACKAGE_PulseAudio=TRUE \
+                    -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+                    ..
+              make -j$(nproc)
+              command -v file >/dev/null && file KyroSpades/client || true
+            '
+      - name: Bundle shared libraries (Linux x86)
+        run: |
+          set -euo pipefail
+          docker run --rm --platform linux/386 \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -w /work/build/KyroSpades \
+            debian:bookworm \
+            bash -lc '
+              set -euo pipefail
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install -y patchelf libc6 libstdc++6 libgcc-s1
+              mkdir -p lib
+              for dep in $(ldd client 2>/dev/null | grep "=> /" | awk "{print \\$3}"); do
+                case "$dep" in
+                  */ld-linux*|*/libc.so.*|*/libm.so.*|*/libpthread.so.*|*/libdl.so.*|*/librt.so.*|*/libstdc++.so.*|*/libgcc_s.so.*)
+                    ;;
+                  *)
+                    cp -n "$dep" lib/ 2>/dev/null || true
+                    ;;
+                esac
+              done
+              patchelf --set-rpath "\$ORIGIN/lib" client
+            '
+      - name: Zip release (Linux x86)
+        run: |
+          sudo chown -R $(id -u):$(id -g) build
+          cd build
+          zip -9r "KyroSpades Linux 32-bit (x86, older PCs).zip" KyroSpades/
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86-build
+          path: build/*.zip
+
+  build-android32:
+    name: Build for Android armeabi-v7a (32bit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout your fork
+        uses: actions/checkout@v4
+      - name: Sync upstream KyroSpades
+        run: |
+          cp -r src /tmp/ks-backup-src
+          cp -r cmake /tmp/ks-backup-cmake
+          cp -r .github /tmp/ks-backup-github
+          cp -r deps /tmp/ks-backup-deps
+          cp CMakeLists.txt /tmp/ks-backup-cmakelists 2>/dev/null || true
+          cp README.md /tmp/ks-backup-readme 2>/dev/null || true
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/Kyrope01/KyroSpades.git || true
+          git fetch upstream
+          if ! git merge upstream/main --no-edit; then
+            echo "::warning::Upstream merge failed (diverged history / conflicts) — building WITHOUT latest upstream changes."
+            git merge --abort || true
+          fi
+          rm -rf src && mv /tmp/ks-backup-src src
+          rm -rf cmake && mv /tmp/ks-backup-cmake cmake
+          rm -rf .github && mv /tmp/ks-backup-github .github
+          rm -rf deps && mv /tmp/ks-backup-deps deps
+          mv /tmp/ks-backup-cmakelists CMakeLists.txt 2>/dev/null || true
+          mv /tmp/ks-backup-readme README.md 2>/dev/null || true
+        shell: bash
+      - name: Ensure Android asset script exists
+        run: |
+          if [[ ! -f package_android_assets.sh ]]; then
+            echo "package_android_assets.sh missing after upstream merge — creating inline"
+            cat > package_android_assets.sh << 'ASSETS_EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          KS_DIR="${1:-$SCRIPT_DIR}"
+          ASSETS="$KS_DIR/android/app/src/main/assets"
+          [[ -d "$KS_DIR/resources" ]] || { echo "::error::resources/ directory not found"; exit 1; }
+          if [[ ! -f "$KS_DIR/bsresources.zip" ]]; then
+            echo "bsresources.zip not found — downloading ..."
+            curl -L --fail -o "$KS_DIR/bsresources.zip" http://aos.party/bsresources.zip
+          fi
+          rm -rf "$ASSETS"
+          mkdir -p "$ASSETS"
+          echo "[1/3] Copying resources/ ..."
+          cp -R "$KS_DIR/resources/." "$ASSETS/"
+          rm -f "$ASSETS/icon.rc"
+          echo "[2/3] Extracting bsresources.zip ..."
+          unzip -o -q "$KS_DIR/bsresources.zip" -d "$ASSETS"
+          find "$ASSETS" -name '.gitignore' -delete
+          if [[ -d "$KS_DIR/resources.override" ]]; then
+            echo "[3/3] Applying resources.override/ ..."
+            cp -R "$KS_DIR/resources.override/." "$ASSETS/"
+          else
+            echo "[3/3] No resources.override/ — skipping"
+          fi
+          echo "Done. config.ini: $( [[ -f "$ASSETS/config.ini" ]] && echo present || echo MISSING )"
+          ASSETS_EOF
+            chmod +x package_android_assets.sh
+          fi
+        shell: bash
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install Android NDK + CMake
+        run: |
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          "$SDKMANAGER" "ndk;27.2.12479018" "cmake;3.22.1"
+      # Separate key prefix (ks32-) so this workflow never restores the
+      # poisoned caches from the main workflow.
+      - name: Cache Android native deps
+        uses: actions/cache@v4
+        with:
+          path: build-android/deps-install
+          key: ks32-android-v1-armeabi-v7a-api21-enet1.3.18-libdeflate1.20-openal1.23.1
+      - name: Build native deps (enet + libdeflate + openal)
+        run: |
+          set -euo pipefail
+          NDK="$ANDROID_HOME/ndk/27.2.12479018"
+          DEPS="$GITHUB_WORKSPACE/build-android/deps-install"
+          mkdir -p "$DEPS/lib" "$DEPS/include"
+
+          # Guard against poisoned caches: verify any restored lib is really
+          # 32-bit ARM, and rebuild it if not.
+          READELF="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          for lib in libenet.a libdeflate.a libopenal.a; do
+            if [ -f "$DEPS/lib/$lib" ] && ! "$READELF" -h "$DEPS/lib/$lib" 2>/dev/null | grep -m1 "Machine:" | grep -q "ARM"; then
+              echo "Cached $lib has wrong architecture for armeabi-v7a - removing and rebuilding"
+              rm -f "$DEPS/lib/$lib"
+            fi
+          done
+
+          COMMON="-DCMAKE_TOOLCHAIN_FILE=$NDK/build/cmake/android.toolchain.cmake \
+                  -DANDROID_ABI=armeabi-v7a \
+                  -DANDROID_PLATFORM=android-21 \
+                  -DANDROID_STL=c++_static \
+                  -DCMAKE_BUILD_TYPE=Release \
+                  -DCMAKE_INSTALL_PREFIX=$DEPS \
+                  -DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+          if [ ! -f "$DEPS/lib/libenet.a" ]; then
+            curl -L -o enet.tar.gz https://github.com/lsalzman/enet/archive/refs/tags/v1.3.18.tar.gz
+            tar xzf enet.tar.gz
+            cmake -S enet-1.3.18 -B enet-build $COMMON
+            cmake --build enet-build --parallel
+            find enet-build -name 'libenet.a' -exec cp {} "$DEPS/lib/" \;
+            cp -r enet-1.3.18/include/enet "$DEPS/include/"
+          fi
+          if [ ! -f "$DEPS/lib/libdeflate.a" ]; then
+            curl -L -o libdeflate.tar.gz https://github.com/ebiggers/libdeflate/archive/refs/tags/v1.20.tar.gz
+            tar xzf libdeflate.tar.gz
+            cmake -S libdeflate-1.20 -B libdeflate-build $COMMON \
+                  -DLIBDEFLATE_BUILD_SHARED_LIB=OFF \
+                  -DLIBDEFLATE_BUILD_STATIC_LIB=ON \
+                  -DLIBDEFLATE_BUILD_GZIP=OFF \
+                  -DLIBDEFLATE_BUILD_TESTS=OFF
+            cmake --build libdeflate-build --parallel
+            cmake --install libdeflate-build
+          fi
+          if [ ! -f "$DEPS/lib/libopenal.a" ]; then
+            curl -L -o openal.tar.gz https://github.com/kcat/openal-soft/archive/refs/tags/1.23.1.tar.gz
+            tar xzf openal.tar.gz
+            cmake -S openal-soft-1.23.1 -B openal-build $COMMON \
+                  -DLIBTYPE=STATIC \
+                  -DALSOFT_EXAMPLES=OFF \
+                  -DALSOFT_TESTS=OFF \
+                  -DALSOFT_UTILS=OFF \
+                  -DALSOFT_BACKEND_OPENSL=ON \
+                  -DALSOFT_BACKEND_OBOE=OFF
+            cmake --build openal-build --parallel
+            cmake --install openal-build
+          fi
+      - name: Package game assets into the APK project
+        run: |
+          chmod +x package_android_assets.sh
+          ./package_android_assets.sh
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('android/**/*.gradle', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+      - name: Restore release keystore (optional)
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+            echo "KS_RELEASE_KEYSTORE=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
+            echo "Release keystore restored from secrets."
+          else
+            echo "No ANDROID_KEYSTORE_BASE64 secret set."
+            echo "The release APK will be signed with the debug key (still installable on phones)."
+          fi
+      - name: Build APK (assembleRelease)
+        env:
+          KS_RELEASE_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KS_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KS_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleRelease -PksAbiFilters=armeabi-v7a --no-daemon
+      - name: Collect APK
+        run: |
+          mkdir -p build
+          cp android/app/build/outputs/apk/release/*.apk "build/KyroSpades Android 32-bit (armeabi-v7a, older phones).apk"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-armeabi-v7a-build
+          path: build/*.apk
+
+  release:
+    name: Create KS32 Release
+    needs: [build-linux32, build-android32]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "*-build"
+          merge-multiple: true
+          path: release-artifacts
+      - name: Upload as KS32 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: KS32
+          name: KS32
+          files: |
+            release-artifacts/KyroSpades Linux 32-bit (x86, older PCs).zip
+            release-artifacts/KyroSpades Android 32-bit (armeabi-v7a, older phones).apk
+          body: |
+            KS32 — 32-bit builds of KyroSpades for older hardware.
+
+            WHAT IS IN THIS RELEASE?
+            - KyroSpades Linux 32-bit (x86, older PCs).zip — for PCs running a 32-bit (i386/x86) Linux system.
+            - KyroSpades Android 32-bit (armeabi-v7a, older phones).apk — for older or budget Android phones with 32-bit ARM CPUs (Android 5.0+).
+
+            DO I NEED THESE?
+            Only if your device or operating system is 32-bit. Most computers and phones made after ~2010 are 64-bit — those should use the regular 64-bit builds from the main release instead. On Windows/Linux check Settings > System > About > "System type"; on Android, 32-bit phones simply cannot install 64-bit APKs, so grab the armeabi-v7a one here.
+
+            The Android APK is signed with the debug key unless a release keystore secret is configured — it is still installable on phones.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
