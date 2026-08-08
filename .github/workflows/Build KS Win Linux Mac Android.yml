@@ -1,5 +1,3 @@
-name: Build KS Win Linux Mac Android 32bit
-
 on:
   workflow_dispatch:
 
@@ -29,7 +27,6 @@ jobs:
     steps:
       - name: Checkout your fork
         uses: actions/checkout@v4
-        
       - name: Sync upstream KyroSpades
         run: |
           cp -r src /tmp/ks-backup-src
@@ -53,14 +50,12 @@ jobs:
           mv /tmp/ks-backup-cmakelists CMakeLists.txt 2>/dev/null || true
           mv /tmp/ks-backup-readme README.md 2>/dev/null || true
         shell: bash
-
       - name: Cache CMake dependencies
         if: matrix.platform != 'windows'
         uses: actions/cache@v4
         with:
           path: build/_deps
           key: ${{ runner.os }}-deps-${{ hashFiles('src/CMakeLists.txt') }}
-
       # --- WINDOWS ONLY BUILD STEPS ---
       - name: Install MSYS2 (Windows)
         if: matrix.platform == 'windows'
@@ -80,12 +75,10 @@ jobs:
             ${{ matrix.mingw_prefix }}-python
             zip
             make
-
       - name: Install FFmpeg (Windows x64)
         if: matrix.platform == 'windows' && matrix.arch == 'x64'
         shell: msys2 {0}
         run: pacman -S --noconfirm ${{ matrix.mingw_prefix }}-ffmpeg
-
       - name: Build (Windows)
         if: matrix.platform == 'windows'
         shell: msys2 {0}
@@ -94,7 +87,6 @@ jobs:
           cd build
           cmake -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release -DENABLE_VIDEO_RECORDING=${{ matrix.video_recording }} -DCMAKE_POLICY_VERSION_MINIMUM=3.5 ..
           make -j$(nproc)
-
       - name: Bundle DLLs (Windows)
         if: matrix.platform == 'windows'
         shell: msys2 {0}
@@ -106,21 +98,18 @@ jobs:
             *) dll_pattern="mingw" ;;
           esac
           ldd client.exe | grep "$dll_pattern" | awk '{print $3}' | xargs -r -I{} cp {} .
-
       - name: Zip release (Windows)
         if: matrix.platform == 'windows'
         shell: msys2 {0}
         run: |
           cd build
           zip -9r "${{ matrix.win_zip }}" KyroSpades/
-
       # --- LINUX ONLY BUILD STEPS ---
       - name: Install dependencies (Linux)
         if: matrix.platform == 'linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake build-essential libglfw3-dev libglew-dev libopenal-dev libenet-dev libdeflate-dev libpulse-dev zip libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev patchelf
-
       - name: Build (Linux)
         if: matrix.platform == 'linux'
         run: |
@@ -128,7 +117,6 @@ jobs:
           cd build
           cmake -DCMAKE_BUILD_TYPE=Release ..
           make -j$(nproc)
-
       - name: Bundle shared libraries (Linux)
         if: matrix.platform == 'linux'
         run: |
@@ -160,25 +148,21 @@ jobs:
           for f in lib/*.so*; do
             [ -f "$f" ] && patchelf --set-rpath '$ORIGIN' "$f" 2>/dev/null || true
           done
-
       - name: Zip release (Linux)
         if: matrix.platform == 'linux'
         run: |
           cd build
           zip -9r "KyroSpades Linux.zip" KyroSpades/
-
-      # --- MACOS ONLY BUILD STEPS ---
+      # --- MACOS ONLY BUILD STEPS (x86_64, targets macOS 11.0+) ---
       - name: Cache source-built macOS deps
         if: matrix.platform == 'macos'
         uses: actions/cache@v4
         with:
           path: deps-prefix
           key: macos-x86_64-target11-glew2.2.0-sdl2.30.10-enet1.3.18-libdeflate1.19
-
       - name: Install build tools (macOS)
         if: matrix.platform == 'macos'
         run: brew install cmake pkg-config ffmpeg
-
       - name: Build dependencies from source (macOS)
         if: matrix.platform == 'macos'
         env:
@@ -225,7 +209,6 @@ jobs:
             cmake --build libdeflate-build
             cmake --install libdeflate-build
           fi
-
       - name: Build (macOS)
         if: matrix.platform == 'macos'
         env:
@@ -241,7 +224,6 @@ jobs:
                 -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
                 ..
           make -j$(sysctl -n hw.logicalcpu)
-
       - name: Bundle shared libraries (macOS)
         if: matrix.platform == 'macos'
         run: |
@@ -372,7 +354,6 @@ jobs:
             esac
           done
           codesign --force --deep --sign - --timestamp=none "KyroSpades.app"
-
       - name: Verify macOS binary arch + min OS (macOS)
         if: matrix.platform == 'macos'
         run: |
@@ -380,13 +361,11 @@ jobs:
           file "$BIN"
           lipo -archs "$BIN" || true
           otool -l "$BIN" | grep -A4 -E 'LC_VERSION_MIN_MACOSX|LC_BUILD_VERSION' || true
-
       - name: Zip release (macOS)
         if: matrix.platform == 'macos'
         run: |
           cd build
           zip -9r "KyroSpades MacOS.zip" KyroSpades.app/
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -400,7 +379,6 @@ jobs:
     steps:
       - name: Checkout your fork
         uses: actions/checkout@v4
-        
       - name: Sync upstream KyroSpades
         run: |
           cp -r src /tmp/ks-backup-src
@@ -424,7 +402,6 @@ jobs:
           mv /tmp/ks-backup-cmakelists CMakeLists.txt 2>/dev/null || true
           mv /tmp/ks-backup-readme README.md 2>/dev/null || true
         shell: bash
-
       - name: Build in 32-bit Linux container
         run: |
           set -euo pipefail
@@ -451,7 +428,6 @@ jobs:
               make -j$(nproc)
               command -v file >/dev/null && file KyroSpades/client || true
             '
-
       - name: Bundle shared libraries (Linux x86)
         run: |
           set -euo pipefail
@@ -476,13 +452,11 @@ jobs:
               done
               patchelf --set-rpath "\$ORIGIN/lib" client
             '
-
       - name: Zip release (Linux x86)
         run: |
           sudo chown -R $(id -u):$(id -g) build
           cd build
           zip -9r "KyroSpades Linux 32-bit (x86, older PCs).zip" KyroSpades/
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -504,7 +478,6 @@ jobs:
     steps:
       - name: Checkout your fork
         uses: actions/checkout@v4
-        
       - name: Sync upstream KyroSpades
         run: |
           cp -r src /tmp/ks-backup-src
@@ -528,7 +501,6 @@ jobs:
           mv /tmp/ks-backup-cmakelists CMakeLists.txt 2>/dev/null || true
           mv /tmp/ks-backup-readme README.md 2>/dev/null || true
         shell: bash
-
       - name: Ensure Android asset script exists
         run: |
           if [[ ! -f package_android_assets.sh ]]; then
@@ -563,34 +535,43 @@ jobs:
             chmod +x package_android_assets.sh
           fi
         shell: bash
-
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-
       - name: Install Android NDK + CMake
         run: |
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           yes | "$SDKMANAGER" --licenses > /dev/null || true
           "$SDKMANAGER" "ndk;27.2.12479018" "cmake;3.22.1"
-
-      - name: Clean stale Android deps
-        run: rm -rf build-android
-
       - name: Cache Android native deps
         uses: actions/cache@v4
         with:
           path: build-android/deps-install
-          key: android-v3-${{ matrix.abi }}-api21-enet1.3.18-libdeflate1.20-openal1.23.1
-
+          key: android-v4-${{ matrix.abi }}-api21-enet1.3.18-libdeflate1.20-openal1.23.1
       - name: Build native deps (enet + libdeflate + openal)
         run: |
           set -euo pipefail
           NDK="$ANDROID_HOME/ndk/27.2.12479018"
           DEPS="$GITHUB_WORKSPACE/build-android/deps-install"
           mkdir -p "$DEPS/lib" "$DEPS/include"
+
+          # Guard against poisoned caches: verify every restored static lib was
+          # actually built for THIS ABI, and delete+rebuild any that were not.
+          READELF="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          case "${{ matrix.abi }}" in
+            arm64-v8a)   MACHINE="AArch64" ;;
+            armeabi-v7a) MACHINE="ARM" ;;
+            *)           MACHINE="Unknown" ;;
+          esac
+          for lib in libenet.a libdeflate.a libopenal.a; do
+            if [ -f "$DEPS/lib/$lib" ] && ! "$READELF" -h "$DEPS/lib/$lib" 2>/dev/null | grep -m1 "Machine:" | grep -q "$MACHINE"; then
+              echo "Cached $lib has wrong architecture for ${{ matrix.abi }} - removing and rebuilding"
+              rm -f "$DEPS/lib/$lib"
+            fi
+          done
+
           COMMON="-DCMAKE_TOOLCHAIN_FILE=$NDK/build/cmake/android.toolchain.cmake \
                   -DANDROID_ABI=${{ matrix.abi }} \
                   -DANDROID_PLATFORM=android-21 \
@@ -630,12 +611,10 @@ jobs:
             cmake --build openal-build --parallel
             cmake --install openal-build
           fi
-
       - name: Package game assets into the APK project
         run: |
           chmod +x package_android_assets.sh
           ./package_android_assets.sh
-
       - name: Cache Gradle
         uses: actions/cache@v4
         with:
@@ -643,7 +622,6 @@ jobs:
             ~/.gradle/caches
             ~/.gradle/wrapper
           key: gradle-${{ hashFiles('android/**/*.gradle', 'android/gradle/wrapper/gradle-wrapper.properties') }}
-
       - name: Restore release keystore (optional)
         env:
           KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -656,7 +634,6 @@ jobs:
             echo "No ANDROID_KEYSTORE_BASE64 secret set."
             echo "The release APK will be signed with the debug key (still installable on phones)."
           fi
-
       - name: Build APK (assembleRelease)
         env:
           KS_RELEASE_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
@@ -666,12 +643,10 @@ jobs:
           cd android
           chmod +x gradlew
           ./gradlew assembleRelease -PksAbiFilters=${{ matrix.abi }} --no-daemon
-
       - name: Collect APK
         run: |
           mkdir -p build
           cp android/app/build/outputs/apk/release/*.apk "build/${{ matrix.artifact_name }}"
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -685,15 +660,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        
       - name: Select Xcode (iPhoneOS SDK)
         run: |
           sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
           xcrun --sdk iphoneos --show-sdk-version
-
       - name: Install ninja
         run: brew install ninja || true
-
       - name: Cache iOS native deps
         uses: actions/cache@v4
         with:
@@ -705,12 +677,10 @@ jobs:
             build-ios/enet
             build-ios/libdeflate
           key: ios-arm64-sdl2.30.10-openal1.23.1-enet1.3.18-libdeflate1.20
-
       - name: Build unsigned .app
         run: |
           chmod +x build_ios.sh
           ./build_ios.sh
-
       - name: Package unsigned .ipa
         run: |
           set -euo pipefail
@@ -719,7 +689,6 @@ jobs:
           cp -R "build-ios/KyroSpades.app" Payload/
           mkdir -p build
           zip -9qry "build/KyroSpades iOS (unsigned).ipa" Payload
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -739,11 +708,9 @@ jobs:
           pattern: "*-build"
           merge-multiple: true
           path: release-artifacts
-          
       - name: Get date for release tag
         id: date
         run: echo "date=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
-        
       - name: Upload as GitHub Release
         uses: softprops/action-gh-release@v2
         with:
