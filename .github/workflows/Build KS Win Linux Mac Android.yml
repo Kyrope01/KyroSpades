@@ -454,11 +454,9 @@ jobs:
             '
       - name: Zip release (Linux x86)
         run: |
-          # Docker created build/ as root; hand it back to the runner user so
-          # zip is allowed to create the output file inside it.
           sudo chown -R $(id -u):$(id -g) build
           cd build
-          zip -9r "KyroSpades Linux (32bit).zip" KyroSpades/
+          zip -9r "KyroSpades Linux 32-bit (x86, older PCs).zip" KyroSpades/
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -476,7 +474,7 @@ jobs:
           - abi: arm64-v8a
             artifact_name: KyroSpades Android arm64-v8a.apk
           - abi: armeabi-v7a
-            artifact_name: KyroSpades Android (32bit armeabi-v7a).apk
+            artifact_name: KyroSpades Android 32-bit (armeabi-v7a, older phones).apk
     steps:
       - name: Checkout your fork
         uses: actions/checkout@v4
@@ -705,11 +703,23 @@ jobs:
           files: |
             release-artifacts/KyroSpades Windows.zip
             release-artifacts/KyroSpades Linux.zip
-            release-artifacts/KyroSpades Linux (32bit).zip
+            release-artifacts/KyroSpades Linux 32-bit (x86, older PCs).zip
             release-artifacts/KyroSpades MacOS.zip
             release-artifacts/KyroSpades Android arm64-v8a.apk
-            release-artifacts/KyroSpades Android (32bit armeabi-v7a).apk
+            release-artifacts/KyroSpades Android 32-bit (armeabi-v7a, older phones).apk
             release-artifacts/KyroSpades iOS (unsigned).ipa
-          body: Latest version of the game compiled for Windows x64, Linux x86_64/i386, Android arm64-v8a/armeabi-v7a (Android 5.0+), macOS and iOS. The iOS .ipa is UNSIGNED — sideload it with AltStore/Sideloadly (free Apple ID works) or re-sign it with your own certificate.
+          body: |
+            Latest version of the game for Windows, Linux, Android, macOS and iOS.
+
+            WHICH FILE SHOULD I DOWNLOAD?
+            - Windows (most PCs): KyroSpades Windows.zip
+            - Linux (most PCs): KyroSpades Linux.zip
+            - Linux 32-BIT (older PCs): KyroSpades Linux 32-bit (x86, older PCs).zip
+            - Android (most phones): KyroSpades Android arm64-v8a.apk
+            - Android 32-BIT (older phones): KyroSpades Android 32-bit (armeabi-v7a, older phones).apk
+            - macOS (Intel): KyroSpades MacOS.zip
+            - iOS: KyroSpades iOS (unsigned).ipa — UNSIGNED, sideload with AltStore/Sideloadly or re-sign with your own certificate.
+
+            Only use a "32-bit" file if your device is old or explicitly says it runs a 32-bit operating system. On Windows, check Settings > System > About > "System type". Most computers and phones made after ~2010 are 64-bit and should use the regular files.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
