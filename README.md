@@ -133,12 +133,118 @@ to the top of the server list.
 
 <dt>Damage Numbers
 <dd>    Damage done to enemy on hit shown as floating numbers when this option is enabled.
+
+<dt>Discord Rich Presence
+<dd>    Shows "Playing KyroSpades" as your Discord activity, with the server name,
+live player count and time elapsed (Discord desktop app only; can be turned
+off in settings as "Discord Rich Presence").
+
+<dt>Video Recording
+<dd>    Record gameplay to MP4 video at a configurable FPS and bitrate by
+pressing F7, with system audio capture on Linux (PulseAudio monitor).
+Recordings are saved to <code>videos/recordings/</code>.
+
+<dt>Instant Replay Buffer
+<dd>    A continuously running replay buffer keeps the last seconds of gameplay
+(configurable length); press F8 to instantly save it as an MP4 to
+<code>videos/replays/</code>, with on-screen flash feedback.
+
+<dt>Demo Playback Controls
+<dd>    While watching a demo you can pause/resume, skip 10 seconds back or
+forward and halve/double the playback speed with dedicated hotkeys.
+
+<dt>Persistent Chat Logs
+<dd>    All in-game chat is written to daily log files, and the chat log menu
+can load older messages from up to 30 days back while connected, so no
+conversation is ever lost.
+
+<dt>Chat Input History
+<dd>    Press the arrow keys while typing to recall previously sent messages
+and commands.
+
+<dt>Chat Customization
+<dd>    Chat background opacity, spacing between messages and reversed order
+while the chat window is open are all adjustable.
+
+<dt>Free Aim
+<dd>    The crosshair moves freely inside an adjustable horizontal/vertical
+deadzone before the view starts to follow it.
+
+<dt>Zoomable Map
+<dd>    The big map supports 5 zoom levels, cycled with the map zoom key.
+
+<dt>Realistic Sun Shadows
+<dd>    Blocks cast directional shadows from the sun with adjustable darkness,
+adding real depth to the world.
+
+<dt>Sky Gradient
+<dd>    The sky is rendered as a blended gradient with adjustable intensity
+instead of a flat color.
+
+<dt>3D Rain and Snow
+<dd>    Weather particles can optionally be rendered as full 3D cubes instead
+of flat billboards.
+
+<dt>Motion Interpolation and Precise Frame Pacing
+<dd>    Rendering interpolates between the fixed 60 Hz physics ticks so motion
+stays smooth at any framerate, and the frame cap hits its deadlines exactly.
+
+<dt>Network Smoothing Options
+<dd>    Optional smoothing of server position corrections (no visible
+rubber-banding), faster position updates, immediate network flushing and
+loss-tolerant aim sync for a much better feel on bad connections.
+
+<dt>Raw Aim and Instant Crouch
+<dd>    Optional 1:1 aim input with no low-pass filtering so shots exactly
+follow the crosshair, and server-instant crouch physics where only the camera
+eases down.
+
+<dt>Immersive Camera Feel
+<dd>    Subtle view bobbing while walking, a small camera dip when landing from
+a fall and camera shake from gunfire and explosions (all view-only; can be
+disabled via config.ini).
+
+<dt>New HUD Elements
+<dd>    Optional smooth segmented health bar, segmented magazine ammo display
+around the crosshair and text shadows on HUD elements.
+
+<dt>Customizable UI Accent With RGB Mode
+<dd>    The UI accent color is fully customizable, including an animated RGB
+cycling mode with adjustable speed, plus adjustable menu spacing and padding.
+
+<dt>Spectator Player Names
+<dd>    Optionally shows player names above characters while spectating.
+
+<dt>Persistent Corpses
+<dd>    Option to keep dead player models lying on the map permanently instead
+of despawning after a few seconds.
 </dl>
 
 ## Quick Setup: Dynamic Wallpapers
 To add custom wallpapers, drop any `.png` images you like into the `png/bg/`
 directory of your client, and the client will cycle through them randomly each
 time the game is started.
+
+## Discord Rich Presence (build setup)
+Discord Rich Presence is compiled in by default on desktop builds
+(`-DENABLE_RPC=ON`; forced off on Android/iOS since the Discord mobile app
+has no local presence socket). It is implemented in plain C over Discord's
+local IPC (`src/discord_ipc.c`) — no external SDK or library required — and
+is a silent no-op when Discord isn't running.
+
+For it to actually show up, builds need a Discord application ID:
+
+1. Create an application (e.g. named `KyroSpades` — this name is what Discord
+   displays as the activity) at
+   [discord.com/developers/applications](https://discord.com/developers/applications).
+2. Copy its **Application ID** (a number, not a secret) and configure the
+   build with `-DDISCORD_APP_ID=<id>` — or set it as the default of the
+   `DISCORD_APP_ID` cache variable in the top-level `CMakeLists.txt`.
+3. Under the app's **Rich Presence → Art Assets**, upload the images the
+   client references: a large artwork named `pic03` and a small icon named
+   `logo` (the activity works without them, just without pictures).
+
+Without an application ID the client builds fine and simply stays silent.
 
 <p align=center>
 The essential features are complete and have been fully implemented, but active
