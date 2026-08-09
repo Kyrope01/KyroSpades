@@ -2243,6 +2243,7 @@ int main(int argc, char** argv) {
         settings.mouse_sensitivity = 5.0F;
         settings.show_news = 1;
         settings.show_fps = 0;
+        settings.discord_rpc = 1;
         settings.volume = 10;
         settings.voxlap_models = 0;
         settings.force_displaylist = 0;

@@ -79,10 +79,6 @@
 #include <SDL2/SDL.h>
 #endif
 
-#ifdef USE_RPC
-#include <discord_rpc.h>
-#endif
-
 #ifdef _WIN32
 #define OS_WINDOWS
 #include <sys/stat.h>

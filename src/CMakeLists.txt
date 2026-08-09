@@ -209,6 +209,7 @@ list(APPEND CLIENT_SOURCES log.c)
 list(APPEND CLIENT_SOURCES minheap.c)
 list(APPEND CLIENT_SOURCES hashtable.c)
 list(APPEND CLIENT_SOURCES rpc.c)
+list(APPEND CLIENT_SOURCES discord_ipc.c)
 list(APPEND CLIENT_SOURCES recorder.c)
 list(APPEND CLIENT_SOURCES tesselator.c)
 list(APPEND CLIENT_SOURCES microui.c)
@@ -445,9 +446,11 @@ else()
         target_compile_definitions(${KS_TARGET} PRIVATE OPENGL_ES)
 endif()
 
+# Rich Presence no longer uses the retired C++ discord-rpc SDK; rpc.c +
+# discord_ipc.c implement the local Discord IPC protocol in plain C with no
+# extra libraries to link.
 if(ENABLE_RPC)
-        target_link_libraries(${KS_TARGET} discord-rpc stdc++)
-        target_compile_definitions(${KS_TARGET} PRIVATE USE_RPC DISCORD_DISABLE_IO_THREAD)
+        target_compile_definitions(${KS_TARGET} PRIVATE USE_RPC DISCORD_APP_ID="${DISCORD_APP_ID}")
 endif()
 if(DEFINED ENV{BUILD_NUMBER})
         target_compile_definitions(${KS_TARGET} PRIVATE JENKINS_BUILD="$ENV{BUILD_NUMBER}")

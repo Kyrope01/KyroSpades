@@ -261,6 +261,19 @@ static void window_impl_keys(GLFWwindow* window, int key, int scancode, int acti
 		config_key_translate(key, 0, results);
 
 		for(int k = 0; k < count; k++) {
+			/* Multiple registrations can map ONE physical key to the SAME
+			   internal action (e.g. view_map rebound to M on top of the fixed,
+			   invisible classic-M alias). Dispatch each internal action only
+			   once — otherwise toggle actions fire twice per press and cancel
+			   themselves out, making the key look dead. */
+			int duplicate = 0;
+			for(int j = 0; j < k; j++)
+				if(results[j] == results[k]) {
+					duplicate = 1;
+					break;
+				}
+			if(duplicate)
+				continue;
 			keys(hud_window, results[k], scancode, a, mods & (GLFW_MOD_CONTROL | GLFW_MOD_SUPER));
 
 			if(hud_active->input_keyboard)
@@ -721,6 +734,19 @@ static void window_dispatch_key(int sym, int action, int mod) {
 		config_key_translate(sym, 0, results);
 
 		for(int k = 0; k < count; k++) {
+			/* Multiple registrations can map ONE physical key to the SAME
+			   internal action (e.g. view_map rebound to M on top of the fixed,
+			   invisible classic-M alias). Dispatch each internal action only
+			   once — otherwise toggle actions fire twice per press and cancel
+			   themselves out, making the key look dead. */
+			int duplicate = 0;
+			for(int j = 0; j < k; j++)
+				if(results[j] == results[k]) {
+					duplicate = 1;
+					break;
+				}
+			if(duplicate)
+				continue;
 			keys(hud_window, results[k], sym, action, mod);
 
 			if(hud_active->input_keyboard)

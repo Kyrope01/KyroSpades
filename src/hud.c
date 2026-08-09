@@ -2352,7 +2352,10 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                 if(camera_mode != CAMERAMODE_SELECTION) {
                         glColor3f(1.0F, 1.0F, 1.0F);
                         // large
-                        if(window_key_down(WINDOW_KEY_MAP)) {
+                        /* Never overlay the big map while typing in chat (same
+                           guard the scoreboard above has): a map state armed
+                           through any path must not flash while typing. */
+                        if(chat_input_mode == CHAT_NO_INPUT && window_key_down(WINDOW_KEY_MAP)) {
                                 float minimap_x = (settings.window_width - (map_size_x + 1) * scalef) / 2.0F;
                                 float minimap_y = ((600 - map_size_z - 1) / 2.0F + map_size_z + 1) * scalef;
 
@@ -4139,6 +4142,7 @@ static bool serverlist_join_pending = false;
 static char serverlist_join_addr[256];
 static char serverlist_join_name[32];
 static bool serverlist_join_has_name = false;
+static int serverlist_join_max = 0;
 
 static struct serverlist_news_entry {
         struct texture image;
@@ -4360,7 +4364,7 @@ static void pinned_toggle(const char* identifier) {
         pinned_save();
 }
 
-static void server_c(char* address, char* name) {
+static void server_c(char* address, char* name, int slots) {
         chat_clear(0);
 
         if(file_exists(address)) {
@@ -4380,7 +4384,9 @@ static void server_c(char* address, char* name) {
                 if(name && address) {
                         rpc_setv(RPC_VALUE_SERVERNAME, name);
                         rpc_setv(RPC_VALUE_SERVERURL, address);
-                        rpc_seti(RPC_VALUE_SLOTS, 32);
+                        /* Real slot count from the server list when joining
+                           from it; 32 (classic AoS max) as fallback. */
+                        rpc_seti(RPC_VALUE_SLOTS, slots > 0 ? slots : 32);
                 } else {
                         rpc_seti(RPC_VALUE_SLOTS, 0);
                 }
@@ -4656,6 +4662,7 @@ static void hud_serverlist_render(mu_Context* ctx, float scalex, float scaley) {
                                                                 sizeof(serverlist_join_name) - 1);
                                                 serverlist_join_name[sizeof(serverlist_join_name) - 1] = '\0';
                                                 serverlist_join_has_name = true;
+                                                serverlist_join_max = 0; /* news tiles carry no player counts */
                                                 serverlist_join_pending = true;
                                         } else {
                                                 file_url(current->url);
@@ -4679,12 +4686,12 @@ static void hud_serverlist_render(mu_Context* ctx, float scalex, float scaley) {
                 mu_layout_row(ctx, 4, (int[]) {-c - b, -b, -a, -1}, 0);
 
                 if(hud_textbox(ctx, serverlist_input, sizeof(serverlist_input), 0) & MU_RES_SUBMIT)
-                        server_c(serverlist_input, NULL);
+                        server_c(serverlist_input, NULL, 0);
                 if(mu_button_ex(ctx, "Join", 16, MU_OPT_ALIGNRIGHT))
-                        server_c(serverlist_input, NULL);
+                        server_c(serverlist_input, NULL, 0);
 
                 if(mu_button_ex(ctx, "Local", 16, MU_OPT_ALIGNRIGHT))
-                        server_c("aos://16777343:32887", NULL);
+                        server_c("aos://16777343:32887", NULL, 0);
 
                 if(mu_button_ex(ctx, "Refresh", 17, MU_OPT_ALIGNRIGHT) && !request_serverlist)
                         hud_serverlist_init();
@@ -4836,6 +4843,7 @@ static void hud_serverlist_render(mu_Context* ctx, float scalex, float scaley) {
                                                                 sizeof(serverlist_join_name) - 1);
                                                 serverlist_join_name[sizeof(serverlist_join_name) - 1] = '\0';
                                                 serverlist_join_has_name = true;
+                                                serverlist_join_max = serverlist[k].max;
                                                 serverlist_join_pending = true;
                                         } else {
                                                 strncpy(serverlist_selected, serverlist[k].identifier,
@@ -5023,7 +5031,9 @@ static void hud_serverlist_render(mu_Context* ctx, float scalex, float scaley) {
         if(serverlist_join_pending) {
                 serverlist_join_pending = false;
                 server_c(serverlist_join_addr,
-                                 serverlist_join_has_name ? serverlist_join_name : NULL);
+                                 serverlist_join_has_name ? serverlist_join_name : NULL,
+                                 serverlist_join_max);
+                serverlist_join_max = 0;
         }
 }
 

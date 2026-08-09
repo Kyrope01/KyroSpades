@@ -381,6 +381,7 @@ void config_save() {
         config_seti("client", "skin_intel", settings.skin_intel);
         config_seti("client", "skin_tent", settings.skin_tent);
         config_seti("client", "debug_log", settings.debug_log);
+        config_seti("client", "discord_rpc", settings.discord_rpc);
         config_seti("client", "recording_fps", settings.recording_fps);
         config_seti("client", "recording_bitrate", settings.recording_bitrate_kbps);
         config_seti("client", "replay_enabled", settings.replay_enabled);
@@ -557,6 +558,7 @@ IMPORT_SETTING(settings.camera_movement, camera_movement, atoi(value));
                 IMPORT_SETTING(settings.skin_intel, skin_intel, max(0, atoi(value)));
                 IMPORT_SETTING(settings.skin_tent, skin_tent, max(0, atoi(value)));
                 IMPORT_SETTING(settings.debug_log, debug_log, atoi(value));
+                IMPORT_SETTING(settings.discord_rpc, discord_rpc, atoi(value));
                 IMPORT_SETTING(settings.recording_fps, recording_fps, atoi(value));
                 IMPORT_SETTING(settings.recording_bitrate_kbps, recording_bitrate, atoi(value));
                 IMPORT_SETTING(settings.replay_enabled, replay_enabled, atoi(value));
@@ -662,12 +664,26 @@ int config_key_translate(int key, int dir, int* results) {
 }
 
 struct config_key_pair* config_key(int key) {
+        /* Multiple registrations may share an internal id: the named binding
+           plus unnamed aliases for classic keys (e.g. view_map=B with a
+           silent M alias). config_reload() re-sorts the list by category for
+           the controls menu, and nameless aliases (category "") always sort
+           before named entries. Taking the raw first match here therefore
+           returned the alias and silently dropped the named entry's
+           properties — `toggle` for view_map, which degraded it to a
+           hold-key that also fired while typing in chat. Prefer the named
+           registration; fall back to any match for alias-only internals. */
+        struct config_key_pair* fallback = NULL;
         for(int k = 0; k < list_size(&config_keys); k++) {
                 struct config_key_pair* a = list_get(&config_keys, k);
-                if(a->internal == key)
-                        return a;
+                if(a->internal == key) {
+                        if(a->name[0])
+                                return a;
+                        if(!fallback)
+                                fallback = a;
+                }
         }
-        return NULL;
+        return fallback;
 }
 
 void config_key_reset_togglestates() {
@@ -953,6 +969,17 @@ void config_reload() {
                                  .max = 10,
                                  .name = "Volume",
                          });
+#ifdef USE_RPC
+        list_add(&config_settings,
+                         &(struct config_setting) {
+                                 .value = &settings_tmp.discord_rpc,
+                                 .type = CONFIG_TYPE_INT,
+                                 .min = 0,
+                                 .max = 1,
+                                 .name = "Discord Rich Presence",
+                                 .help = "Show the game as your Discord activity",
+                         });
+#endif
         list_add(&config_settings,
                          &(struct config_setting) {
                                  .value = &settings_tmp.window_width,

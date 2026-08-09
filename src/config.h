@@ -137,6 +137,7 @@ extern struct RENDER_OPTIONS {
         int skin_intel;
         int skin_tent;
         int debug_log;
+        int discord_rpc;
         int recording_fps;
         int recording_bitrate_kbps;
         int replay_enabled;
