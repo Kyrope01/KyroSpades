@@ -146,11 +146,42 @@ void chunk_render(struct chunk_render_call* c) {
         }
 }
 
-void chunk_draw_visible() {
-        struct chunk_render_call chunks_draw[CHUNKS_PER_DIM * CHUNKS_PER_DIM * 2];
-        int index = 0;
+/* Persistent scratch buffer for the visible-chunk list.  It is allocated
+   once and only ever grows (when the render distance increases); it is never
+   freed per frame.  The previous version malloc()ed ~60-230 KB every single
+   frame, which on Windows contends with the up-to-15 chunk-generation worker
+   threads that are simultaneously allocating and freeing multi-hundred-KB
+   tesselator buffers on the same process heap — heap lock contention and
+   fragmentation that made the main thread's frame time spike (bad FPS on
+   exactly the strong multi-core machines that spawn the most workers).
+   chunk_draw_visible() only ever runs on the main thread, so the static is
+   safe. */
+static struct chunk_render_call* chunk_draw_buf = NULL;
+static int chunk_draw_buf_cap = 0;
 
+void chunk_draw_visible() {
         int overshoot = (settings.render_distance + CHUNK_SIZE - 1) / CHUNK_SIZE + 1;
+
+        // The loop below scans (CHUNKS_PER_DIM + 2*overshoot)^2 candidate
+        // positions.  With a large render distance (the spectator fog
+        // distance setting goes up to 512) that exceeds the old fixed
+        // 2*CHUNKS_PER_DIM^2 stack array, writing past its end and corrupting
+        // nearby stack memory — which showed up as big patches of terrain
+        // never being drawn.  Size the buffer from the actual iteration count.
+        int iter = CHUNKS_PER_DIM + 2 * overshoot;
+        int cap = iter * iter;
+        if(cap > chunk_draw_buf_cap) {
+                struct chunk_render_call* grown = realloc(chunk_draw_buf,
+                                                          sizeof(struct chunk_render_call) * (size_t)cap);
+                if(!grown) {
+                        log_error("chunk_draw_visible: out of memory (%i chunk slots)", cap);
+                        return;
+                }
+                chunk_draw_buf = grown;
+                chunk_draw_buf_cap = cap;
+        }
+        struct chunk_render_call* chunks_draw = chunk_draw_buf;
+        int index = 0;
 
         // hoisted: was a libm pow() call inside the double loop, every frame
         float rd = settings.render_distance + 1.414F * CHUNK_SIZE;
@@ -160,7 +191,7 @@ void chunk_draw_visible() {
         for(int y = -overshoot; y < CHUNKS_PER_DIM + overshoot; y++) {
                 for(int x = -overshoot; x < CHUNKS_PER_DIM + overshoot; x++) {
                         float d = distance2D((x + 0.5F) * CHUNK_SIZE, (y + 0.5F) * CHUNK_SIZE, camera_x, camera_z);
-                        if(d <= rd_sq) {
+                        if(d <= rd_sq && index < cap) {
                                 uint32_t tmp_x = ((uint32_t)x) % CHUNKS_PER_DIM;
                                 uint32_t tmp_y = ((uint32_t)y) % CHUNKS_PER_DIM;
 
@@ -185,6 +216,7 @@ void chunk_draw_visible() {
 
         for(int k = 0; k < index; k++)
                 chunk_render(chunks_draw + k);
+        /* chunks_draw is a persistent buffer; nothing to free here. */
 }
 
 static __attribute__((always_inline)) inline bool solid_array_isair(struct libvxl_chunk_copy* blocks, uint32_t x,

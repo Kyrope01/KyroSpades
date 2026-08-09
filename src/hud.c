@@ -748,6 +748,15 @@ static void hud_ingame_render3D() {
                         matrix_translate(matrix_model, 0.0F,
                                                          -(rotating_model->zsiz * 0.5F + rotating_model->zpiv) * rotating_model->scale, -10.0F);
                         matrix_rotate(matrix_model, window_time() * 90.0F, 0.0F, 1.0F, 0.0F);
+                        /* Put the model's bounding-box centre on the rotation
+                           axis so the spinning intel doesn't wobble around a
+                           point that is off the pole.  The offset is applied
+                           in the model's scaled space (after kv6_render's
+                           pivot translate), so it is in world units. */
+                        matrix_translate(matrix_model,
+                                         -((rotating_model->xsiz * 0.5F - rotating_model->xpiv) * rotating_model->scale),
+                                         0.0F,
+                                         -((rotating_model->zsiz * 0.5F - rotating_model->zpiv) * rotating_model->scale));
                         matrix_upload();
                         glViewport(-settings.window_width * 0.4F, settings.window_height * 0.2F, settings.window_width,
                                            settings.window_height);
@@ -1671,7 +1680,7 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 }
                         }
 
-                        float height = 21.F * max(count_team1, count_team2);
+                        float height = 24.F * max(count_team1, count_team2);
                         for(int i = 0; i < 3; i++) {
                                 if(i == 2 && count_spec == 0) {
                                         continue;
@@ -1727,14 +1736,14 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 glColor4f(r, g, b, 1.F);
                                 texture_draw_empty(x_offset, 450 * scalef - y_offset, 300, 24.F);
                                 glColor4f(r * 0.75F, g * 0.75F, b * 0.75F, 0.75F);
-                                texture_draw_empty(x_offset, 450 * scalef - y_offset, 300, i == 2 ? (21.F * (count_spec + 1)): height);
+                                texture_draw_empty(x_offset, 450 * scalef - y_offset, 300, i == 2 ? (24.F * (count_spec + 1)): height);
                                 glDisable(GL_BLEND);
 
                                 glColor3ub(255, 255, 255);
                                 if(i != 2) {
-                                        font_render(x_offset + 300.F - font_length(16.F, score_str), 447 * scalef, 16.0F, score_str);
-                                        font_render(x_offset + 4.F,
-                                                        450 * scalef - 4.F, 16.0F, team.name);
+                                        font_render(x_offset + 300.F - font_length(16.F, score_str) - 8.F, 447 * scalef, 16.0F, score_str);
+                                        font_render(x_offset + 8.F,
+                                                        450 * scalef - 6.F, 16.0F, team.name);
                                 } else {
                                         font_centered(x_offset + 150.F,
                                                         450 * scalef - y_offset - 4.F, 16.0F, "Spectator");
@@ -1774,7 +1783,7 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 glEnable(GL_BLEND);
                                 glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
                                 glColor4f(1.F, 1.F, 1.F, 0.7F);
-                                font_render(x_offset + 4.F, 450 * scalef - 6.F - (20 * (cntt[mul - 1] + 1)) - y_offset,
+                                font_render(x_offset + 8.F, 450 * scalef - 8.F - (24 * (cntt[mul - 1] + 1)) - y_offset,
                                                         16.0F, id_str);
 
                                 if(players[pt[k].id].alive) {
@@ -1783,13 +1792,13 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                         glColor4f(1.F, 1.F, 1.F, 0.5F);
                                 }
 
-                                font_render(x_offset + 36.F,
-                                                        450 * scalef - 6.F - (20 * (cntt[mul - 1] + 1)) - y_offset, 16.0F, players[pt[k].id].name);
+                                font_render(x_offset + 48.F,
+                                                        450 * scalef - 8.F - (24 * (cntt[mul - 1] + 1)) - y_offset, 16.0F, players[pt[k].id].name);
                                 glDisable(GL_BLEND);
                                 if(mul != 2) {
                                         sprintf(id_str, "%i", pt[k].score);
-                                        font_render(x_offset + 300.F - font_length(16.F, id_str) - 4.F,
-                                                                450 * scalef - 6.F - (20 * (cntt[mul - 1] + 1)), 16, id_str);
+                                        font_render(x_offset + 300.F - font_length(16.F, id_str) - 8.F,
+                                                                450 * scalef - 8.F - (24 * (cntt[mul - 1] + 1)), 16, id_str);
                                 }
                                 if(gamestate.gamemode_type == GAMEMODE_CTF
                                    && ((gamestate.gamemode.ctf.team_1_intel
@@ -1797,8 +1806,8 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                            || (gamestate.gamemode.ctf.team_2_intel
                                                    && gamestate.gamemode.ctf.team_2_intel_location.held.player_id == pt[k].id))) {
                                         texture_draw(&texture_intel,
-                                                                 x_offset + 300.F - font_length(16.F, id_str) - 4.F - 24.F,
-                                                                 450 * scalef - 6.F - (20 * (cntt[mul - 1] + 1)),
+                                                                 x_offset + 300.F - font_length(16.F, id_str) - 8.F - 24.F,
+                                                                 450 * scalef - 8.F - (24 * (cntt[mul - 1] + 1)),
                                                                  18.0F, 18.0F);
                                 }
                                 cntt[mul - 1]++;
@@ -1999,6 +2008,12 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                         }
 
                         hud_texture_draw(item_mini, settings.window_width - texture_health.width - 8.F, item_mini->height + 8.F, texture_health.width, texture_health.height);
+                        /* The block icon stays tinted with the held block's
+                           color, but the counter text must stay readable --
+                           e.g. when you copy the ground's (dark) color, a
+                           dark number would vanish against the HUD. */
+                        if(players[local_id].held_item == TOOL_BLOCK)
+                                glColor3f(1.0F, 1.0F, 1.0F);
                         hud_font_render(settings.window_width - texture_health.width - 12.F - font_length(30.F, item_mini_str), 37.F, 30.F, item_mini_str, 1.F);
                         font_select(FONT_FIXEDSYS);
                         glColor3f(1.0F, 1.0F, 1.0F);
@@ -2146,11 +2161,13 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                         sprintf(line, "Voxels: %s", num_buf);
                         hud_font_render_outlined(right_edge - font_length(h, line), y + h * 3, h, line, 1.F);
 
-                        int* pick_pos = camera_terrain_pick(1);
+                        int* pick_pos = camera_terrain_pick_local(1);
                         if(pick_pos) {
-                                double dx = pick_pos[0] - camera_x;
-                                double dy = pick_pos[1] - camera_y;
-                                double dz = pick_pos[2] - camera_z;
+                                float ex, ey, ez;
+                                camera_local_eye(&ex, &ey, &ez);
+                                double dx = pick_pos[0] - ex;
+                                double dy = pick_pos[1] - ey;
+                                double dz = pick_pos[2] - ez;
                                 double dist = sqrt(dx*dx + dy*dy + dz*dz);
                                 sprintf(line, "Dist: %.0f", dist);
                         } else {
@@ -2909,9 +2926,11 @@ void hud_ingame_mouseclick(double x, double y, int button, int action, int mods)
                         }
                 }
                 if(local_player_drag_active && action == WINDOW_RELEASE && players[local_player_id].held_item == TOOL_BLOCK) {
-                        int* pos = camera_terrain_pick(0);
+                        float ex, ey, ez;
+                        camera_local_eye(&ex, &ey, &ez);
+                        int* pos = camera_terrain_pick_local(0);
                         if(pos != NULL && pos[1] > 1
-                           && chebyshev(pos[0] - camera_x, pos[1] - camera_y, pos[2] - camera_z) < 3.0F
+                           && chebyshev(pos[0] - ex, pos[1] - ey, pos[2] - ez) < 3.0F
                            && !overlaps_with_player(pos[0], pos[1], pos[2])) {
                                 int amount = map_cube_line(local_player_drag_x, local_player_drag_z, 63 - local_player_drag_y, pos[0],
                                                                                    pos[2], 63 - pos[1], NULL);
@@ -2933,9 +2952,11 @@ void hud_ingame_mouseclick(double x, double y, int button, int action, int mods)
                 local_player_drag_active = 0;
                 if(action == WINDOW_PRESS && players[local_player_id].held_item == TOOL_BLOCK
                    && window_time() - players[local_player_id].item_showup >= 0.5F) {
-                        int* pos = camera_terrain_pick(0);
+                        float ex, ey, ez;
+                        camera_local_eye(&ex, &ey, &ez);
+                        int* pos = camera_terrain_pick_local(0);
                         if(pos != NULL && pos[1] > 1
-                           && chebyshev(pos[0] - camera_x, pos[1] - camera_y, pos[2] - camera_z) < 3.0F
+                           && chebyshev(pos[0] - ex, pos[1] - ey, pos[2] - ez) < 3.0F
                            && !overlaps_with_player(pos[0], pos[1], pos[2])) {
                                 local_player_drag_active = 1;
                                 local_player_drag_x = pos[0];
@@ -3112,6 +3133,24 @@ static const char* hud_ingame_completeword(const char* s) {
 }
 
 static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
+        /* Key repeat: GLFW delivers GLFW_REPEAT events that the handler used
+           to drop, so holding a key did nothing and actions felt like they
+           landed on release.  Normalize repeat to press for the keys that
+           are safe (and useful) to auto-repeat: palette cursor movement,
+           color picking, and the chat text cursor. */
+        if(action == WINDOW_REPEAT) {
+                switch(key) {
+                        case WINDOW_KEY_CURSOR_UP:
+                        case WINDOW_KEY_CURSOR_DOWN:
+                        case WINDOW_KEY_CURSOR_LEFT:
+                        case WINDOW_KEY_CURSOR_RIGHT:
+                        case WINDOW_KEY_PICKCOLOR:
+                                action = WINDOW_PRESS;
+                                break;
+                        default:
+                                break;
+                }
+        }
         if(action == WINDOW_PRESS && internal > 0) {
                 for(int i = 0; i < list_size(&config_macros); i++) {
                         struct config_macro* m = list_get(&config_macros, i);
@@ -3368,6 +3407,14 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
                                 if(tool_switch) {
                                         sound_create(SOUND_LOCAL, &sound_switch, 0.0F, 0.0F, 0.0F);
                                         player_on_held_item_change(players + local_player_id);
+                                        /* Direct number-key selection is deliberate:
+                                           don't flash the rotating tool-switch
+                                           overlay (it only appears when switching
+                                           via the scroll wheel / Q, which is the
+                                           discoverable path).  The item_showup
+                                           cooldown set above is kept, so the new
+                                           tool still can't fire instantly. */
+                                        players[local_player_id].items_show = 0;
                                 }
                         }
 
@@ -3494,8 +3541,9 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
 
                         if(key == WINDOW_KEY_PICKCOLOR && players[local_player_id].held_item == TOOL_BLOCK) {
                                 players[local_player_id].item_disabled = window_time();
-                                players[local_player_id].items_show_start = window_time();
-                                players[local_player_id].items_show = 1;
+                                /* No tool-switch overlay here: copying a color
+                                   is not a tool change, and showing the overlay
+                                   made it peek through the colour palette. */
 
                                 struct Camera_HitType hit;
                                 camera_hit_fromplayer(&hit, local_player_id, 128.0F);

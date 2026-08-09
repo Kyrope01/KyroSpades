@@ -249,7 +249,16 @@ execute_process(
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
   OUTPUT_VARIABLE GIT_COMMIT_HASH
   OUTPUT_STRIP_TRAILING_WHITESPACE
+  ERROR_QUIET
+  RESULT_VARIABLE GIT_COMMIT_HASH_RESULT
 )
+
+# If the build runs outside a git checkout (e.g. a source tarball), the
+# command fails and OUTPUT_VARIABLE stays empty.  Keep the "?" placeholder
+# so the version string never shows a bare gap.
+if(GIT_COMMIT_HASH_RESULT OR NOT GIT_COMMIT_HASH)
+        set(GIT_COMMIT_HASH "?")
+endif()
 
 include(CheckIPOSupported)
 check_ipo_supported(RESULT lto_supported OUTPUT error)

@@ -84,29 +84,30 @@ int overlaps_with_player(int bx, int by, int bz) {
                 return 0;
         }
         
-        /* Build player AABB based on crouch state */
-        AABB player_box;
-        float half_width = 0.45F; /* Half of player width (0.9 total) */
-        float height = p->input.keys.crouch ? 0.9F : 1.85F;
-        
-        /* Player box centered at player position (feet level) */
-        player_box.min_x = p->pos.x - half_width;
-        player_box.max_x = p->pos.x + half_width;
-        player_box.min_z = p->pos.z - half_width;
-        player_box.max_z = p->pos.z + half_width;
-        player_box.min_y = p->pos.y;
-        player_box.max_y = p->pos.y + height;
-        
-        /* Block is a 1x1x1 cube at integer coordinates */
-        AABB block_box;
-        block_box.min_x = (float)bx;
-        block_box.max_x = (float)bx + 1.0F;
-        block_box.min_z = (float)bz;
-        block_box.max_z = (float)bz + 1.0F;
-        block_box.min_y = (float)by;
-        block_box.max_y = (float)by + 1.0F;
-        
-        return aabb_intersection(&player_box, &block_box);
+        /* Horizontal footprint: the player is 0.9 wide, centered on pos
+           (the same +/-0.45 player_clipbox sweeps). */
+        if(bx < (int)floorf(p->pos.x - 0.45F) || bx > (int)floorf(p->pos.x + 0.45F))
+                return 0;
+        if(bz < (int)floorf(p->pos.z - 0.45F) || bz > (int)floorf(p->pos.z + 0.45F))
+                return 0;
+
+        /* Vertical extent, in map cells.  pos.y is the EYE BASE, not the
+           feet: a grounded player rests with pos.y about 1.25 (standing) /
+           0.35 (crouched) above the floor (player_boxclipmove's landing
+           cell sits one cell below the feet).  The feet therefore occupy
+           floor(pos.y - 1.25) / floor(pos.y - 0.35), the collision body
+           fills the cells above them, and the head hitbox reaches
+           pos.y + 1.40 standing / +1.35 crouched.
+
+           The old code built the box as [pos.y, pos.y + 1.85], which starts
+           a full cell ABOVE the feet -- so the air cell you stand in never
+           overlapped and a block could be placed into your own feet while
+           standing.  The cell directly below the feet is deliberately NOT
+           included: that is the cell you land on / bridge with while
+           airborne, and it must stay placeable. */
+        int y_min = (int)floorf(p->pos.y - (p->input.keys.crouch ? 0.35F : 1.25F));
+        int y_max = (int)floorf(p->pos.y + (p->input.keys.crouch ? 1.35F : 1.40F));
+        return by >= y_min && by <= y_max;
 }
 
 int button_map[3];
@@ -346,21 +347,25 @@ float* player_tool_func(const struct Player* p) {
 					return ret;
 				}
 				if(p->spade_use_type == 2) {
-					if(t <= 0.4F) {
-						ret[0] = 60.0F - player_spade_func(t / 2.0F) * 60.0F;
-						ret[1] = -t / 0.4F * 22.5F;
+					/* One continuous pickaxe dig: wind-up (raise), slam down,
+					   recover -- the old three-phase keyframes froze the
+					   swing mid-air while thrusting, which read as a glitch.
+					   Smoothstepped so the motion eases in and out. */
+					if(t <= 0.35F) {
+						float k = t / 0.35F;
+						k = k * k * (3.0F - 2.0F * k);
+						ret[0] = 60.0F * k;
+						ret[1] = -22.5F * k;
 						return ret;
 					}
-					if(t <= 0.7F) {
-						ret[0] = 60.0F;
-						ret[1] = -22.5F;
+					if(t <= 0.6F) {
+						float k = (t - 0.35F) / 0.25F;
+						k = k * k * (3.0F - 2.0F * k);
+						ret[0] = 60.0F * (1.0F - k);
+						ret[1] = -22.5F * (1.0F - k);
 						return ret;
 					}
-					if(t <= 1.0F) {
-						ret[0] = player_spade_func((t - 0.7F) / 5 / 0.3F) * 60.0F;
-						ret[1] = (t - 0.7F) / 0.4F * 22.5F - 22.5F;
-						return ret;
-					}
+					/* t > 0.6: resting pose until the next dig */
 				}
 			} else {
 				if(p->input.buttons.lmb) {
@@ -403,12 +408,18 @@ float* player_tool_translate_func(struct Player* p) {
 			return ret;
 		}
 		if(p->spade_use_type == 2) {
-			if(t > 0.4F && t <= 0.7F) {
-				ret[2] = (t - 0.4F) / 0.3F * 0.8F;
+			/* Thrust forward as the pick slams down, pull back as it
+			   recovers -- overlaps the swing instead of freezing it. */
+			if(t > 0.35F && t <= 0.55F) {
+				float k = (t - 0.35F) / 0.20F;
+				k = k * k * (3.0F - 2.0F * k);
+				ret[2] = 0.8F * k;
 				return ret;
 			}
-			if(t > 0.7F) {
-				ret[2] = (0.3F - (t - 0.7F)) / 0.3F * 0.8F;
+			if(t > 0.55F && t <= 0.7F) {
+				float k = (t - 0.55F) / 0.15F;
+				k = k * k * (3.0F - 2.0F * k);
+				ret[2] = 0.8F * (1.0F - k);
 				return ret;
 			}
 		}

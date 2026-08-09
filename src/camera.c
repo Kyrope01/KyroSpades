@@ -30,6 +30,8 @@
 #include "camera.h"
 #include "config.h"
 #include "window.h"
+#include "tesselator.h"
+#include "glx.h"
 
 enum camera_mode camera_mode = CAMERAMODE_SPECTATOR;
 
@@ -305,105 +307,185 @@ int* camera_terrain_pick(unsigned char mode) {
 	return camera_terrain_pickEx(mode, camera_x, camera_y, camera_z, rx, ry, rz);
 }
 
-// kindly borrowed from
-// https://stackoverflow.com/questions/16505905/walk-a-line-between-two-points-in-a-3d-voxel-space-visiting-all-cells
-// adapted, original code by Wivlaro
+/* Exact voxel traversal (Amanatides & Woo, "A Fast Voxel Traversal Algorithm
+   for Ray Tracing").  Replaces the old BetterSpades DDA, which used an
+   error-term heuristic that skipped cells on some rays, mis-identified the
+   "previous" (placement) cell, and misbehaved on axis-aligned directions.
+
+   mode 0: returns the last AIR cell before the first solid cell -- the
+           position a placed block would occupy.  Returns NULL when the ray
+           starts inside solid (there is no air cell to place into) or when
+           it leaves the map.
+   mode 1: returns the first solid cell (ret[0..2]) plus the air cell before
+           it (ret[3..5]).  NULL when the ray leaves the map.
+*/
 int* camera_terrain_pickEx(unsigned char mode, float gx0, float gy0, float gz0, float ray_x, float ray_y, float ray_z) {
-	float gx1 = gx0 + ray_x * 128.0F;
-	float gy1 = gy0 + ray_y * 128.0F;
-	float gz1 = gz0 + ray_z * 128.0F;
+	static int ret[6];
 
-	int gx0idx = floor(gx0);
-	int gy0idx = floor(gy0);
-	int gz0idx = floor(gz0);
+	float len = sqrtf(ray_x * ray_x + ray_y * ray_y + ray_z * ray_z);
+	if(len < 1e-6F)
+		return NULL;
 
-	int gx1idx = floor(gx1);
-	int gy1idx = floor(gy1);
-	int gz1idx = floor(gz1);
+	/* Normalize the direction; the old code travelled 128 * |dir| units,
+	   which is 128 units along the normalized direction. */
+	float dx = ray_x / len;
+	float dy = ray_y / len;
+	float dz = ray_z / len;
 
-	int sx = gx1idx > gx0idx ? 1 : gx1idx < gx0idx ? -1 : 0;
-	int sy = gy1idx > gy0idx ? 1 : gy1idx < gy0idx ? -1 : 0;
-	int sz = gz1idx > gz0idx ? 1 : gz1idx < gz0idx ? -1 : 0;
-
-	int gx = gx0idx;
-	int gy = gy0idx;
-	int gz = gz0idx;
-
-	int gxp = gx0idx + (gx1idx > gx0idx ? 1 : 0);
-	int gyp = gy0idx + (gy1idx > gy0idx ? 1 : 0);
-	int gzp = gz0idx + (gz1idx > gz0idx ? 1 : 0);
-
-	float vx = gx1 == gx0 ? 1 : gx1 - gx0;
-	float vy = gy1 == gy0 ? 1 : gy1 - gy0;
-	float vz = gz1 == gz0 ? 1 : gz1 - gz0;
-
-	float vxvy = vx * vy;
-	float vxvz = vx * vz;
-	float vyvz = vy * vz;
-
-	float errx = (gxp - gx0) * vyvz;
-	float erry = (gyp - gy0) * vxvz;
-	float errz = (gzp - gz0) * vxvy;
-
-	float derrx = sx * vyvz;
-	float derry = sy * vxvz;
-	float derrz = sz * vxvy;
-
+	int gx = (int)floorf(gx0);
+	int gy = (int)floorf(gy0);
+	int gz = (int)floorf(gz0);
 	int gx_pre = gx, gy_pre = gy, gz_pre = gz;
 
-	static int ret[6];
-	ret[0] = ret[1] = ret[2] = 0;
-	ret[3] = ret[4] = ret[5] = 0;
+	float stepx = (dx > 0.0F) ? 1.0F : (dx < 0.0F ? -1.0F : 0.0F);
+	float stepy = (dy > 0.0F) ? 1.0F : (dy < 0.0F ? -1.0F : 0.0F);
+	float stepz = (dz > 0.0F) ? 1.0F : (dz < 0.0F ? -1.0F : 0.0F);
 
-	while(1) {
-		if(gx >= map_size_x || gx < 0 || gy >= map_size_y || gy < 0 || gz >= map_size_z || gz < 0) {
+	/* tMax: distance along the ray until the next voxel boundary per axis.
+	   Zero components get +inf so they never win the comparison. */
+	float tmaxx = (stepx > 0.0F) ? ((gx + 1 - gx0) / dx) : (stepx < 0.0F ? ((gx - gx0) / dx) : INFINITY);
+	float tmaxy = (stepy > 0.0F) ? ((gy + 1 - gy0) / dy) : (stepy < 0.0F ? ((gy - gy0) / dy) : INFINITY);
+	float tmaxz = (stepz > 0.0F) ? ((gz + 1 - gz0) / dz) : (stepz < 0.0F ? ((gz - gz0) / dz) : INFINITY);
+
+	float dtx = (dx != 0.0F) ? fabsf(1.0F / dx) : INFINITY;
+	float dty = (dy != 0.0F) ? fabsf(1.0F / dy) : INFINITY;
+	float dtz = (dz != 0.0F) ? fabsf(1.0F / dz) : INFINITY;
+
+	float t = 0.0F;
+	const float maxdist = 128.0F;
+
+	while(t <= maxdist) {
+		if(gx < 0 || gx >= map_size_x || gy < 0 || gy >= map_size_y || gz < 0 || gz >= map_size_z)
 			return NULL;
+
+		if(mode == 0) {
+			if(!map_isair(gx, gy, gz)) {
+				/* Starting inside solid: there is no air cell to place into. */
+				if(gx_pre == gx && gy_pre == gy && gz_pre == gz)
+					return NULL;
+				ret[0] = gx_pre;
+				ret[1] = gy_pre;
+				ret[2] = gz_pre;
+				ret[3] = ret[4] = ret[5] = 0;
+				return ret;
+			}
+		} else if(!map_isair(gx, gy, gz)) {
+			ret[0] = gx;
+			ret[1] = gy;
+			ret[2] = gz;
+			ret[3] = gx_pre;
+			ret[4] = gy_pre;
+			ret[5] = gz_pre;
+			return ret;
 		}
-		switch(mode) {
-			case 0:
-				if(!map_isair(gx, gy, gz) && map_isair(gx_pre, gy_pre, gz_pre)) {
-					ret[0] = gx_pre;
-					ret[1] = gy_pre;
-					ret[2] = gz_pre;
-					return ret;
-				}
-				break;
-			case 1:
-				if(!map_isair(gx, gy, gz)) {
-					ret[0] = gx;
-					ret[1] = gy;
-					ret[2] = gz;
-					ret[3] = gx_pre;
-					ret[4] = gy_pre;
-					ret[5] = gz_pre;
-					return ret;
-				}
-				break;
-		}
+
 		gx_pre = gx;
 		gy_pre = gy;
 		gz_pre = gz;
 
-		if(gx == gx1idx && gy == gy1idx && gz == gz1idx)
-			break;
-
-		int xr = (int)fabsf(errx);
-		int yr = (int)fabsf(erry);
-		int zr = (int)fabsf(errz);
-
-		if(sx != 0 && (sy == 0 || xr < yr) && (sz == 0 || xr < zr)) {
-			gx += sx;
-			errx += derrx;
-		} else if(sy != 0 && (sz == 0 || yr < zr)) {
-			gy += sy;
-			erry += derry;
-		} else if(sz != 0) {
-			gz += sz;
-			errz += derrz;
+		if(tmaxx < tmaxy && tmaxx < tmaxz) {
+			gx += (int)stepx;
+			t = tmaxx;
+			tmaxx += dtx;
+		} else if(tmaxy < tmaxz) {
+			gy += (int)stepy;
+			t = tmaxy;
+			tmaxy += dty;
+		} else {
+			gz += (int)stepz;
+			t = tmaxz;
+			tmaxz += dtz;
 		}
 	}
 
 	return NULL;
+}
+
+void camera_local_eye(float* x, float* y, float* z) {
+	*x = players[local_player_id].physics.eye.x;
+	*y = players[local_player_id].physics.eye.y + player_height(&players[local_player_id]);
+	*z = players[local_player_id].physics.eye.z;
+}
+
+int* camera_terrain_pick_local(unsigned char mode) {
+	float rx, ry, rz;
+	if(settings.free_aim && camera_mode == CAMERAMODE_FPS)
+		camera_vector_from_angles(camera_crosshair_rot_x, camera_crosshair_rot_y, &rx, &ry, &rz);
+	else
+		camera_vector_from_angles(camera_rot_x, camera_rot_y, &rx, &ry, &rz);
+
+	float ox, oy, oz;
+	camera_local_eye(&ox, &oy, &oz);
+	return camera_terrain_pickEx(mode, ox, oy, oz, rx, ry, rz);
+}
+
+static struct tesselator camera_inside_tess;
+
+void camera_inside_block_render(void) {
+	/* Margin (world units) around the camera point.  A solid voxel whose
+	   AABB, expanded by this margin, contains the camera gets blacked out.
+	   The near plane is 0.1, so 0.12 covers "head poking into a block"
+	   without blacking out walls you are merely standing against. */
+	const float margin = 0.12F;
+	int cx = (int)floorf(camera_x);
+	int cy = (int)floorf(camera_y);
+	int cz = (int)floorf(camera_z);
+
+	if(!camera_inside_tess.vertices)
+		tesselator_create(&camera_inside_tess, VERTEX_FLOAT, 0, 0);
+	tesselator_clear(&camera_inside_tess);
+	tesselator_set_color(&camera_inside_tess, rgba(0, 0, 0, 255));
+
+	int any = 0;
+	for(int dx = -1; dx <= 1; dx++) {
+		for(int dy = -1; dy <= 1; dy++) {
+			for(int dz = -1; dz <= 1; dz++) {
+				int vx = cx + dx, vy = cy + dy, vz = cz + dz;
+				if(vx < 0 || vx >= map_size_x || vy < 0 || vy >= map_size_y || vz < 0 || vz >= map_size_z)
+					continue;
+				if(camera_x < (float)vx - margin || camera_x > (float)(vx + 1) + margin)
+					continue;
+				if(camera_y < (float)vy - margin || camera_y > (float)(vy + 1) + margin)
+					continue;
+				if(camera_z < (float)vz - margin || camera_z > (float)(vz + 1) + margin)
+					continue;
+				if(map_isair(vx, vy, vz))
+					continue;
+
+				/* All six faces, culling disabled: seen from inside the
+				   voxel the far faces blacken the view; geometry closer
+				   than those faces stays visible (depth-tested below). */
+				tesselator_addf_cube_face(&camera_inside_tess, CUBE_FACE_X_N, (float)vx, (float)vy, (float)vz, 1.0F);
+				tesselator_addf_cube_face(&camera_inside_tess, CUBE_FACE_X_P, (float)vx, (float)vy, (float)vz, 1.0F);
+				tesselator_addf_cube_face(&camera_inside_tess, CUBE_FACE_Y_N, (float)vx, (float)vy, (float)vz, 1.0F);
+				tesselator_addf_cube_face(&camera_inside_tess, CUBE_FACE_Y_P, (float)vx, (float)vy, (float)vz, 1.0F);
+				tesselator_addf_cube_face(&camera_inside_tess, CUBE_FACE_Z_N, (float)vx, (float)vy, (float)vz, 1.0F);
+				tesselator_addf_cube_face(&camera_inside_tess, CUBE_FACE_Z_P, (float)vx, (float)vy, (float)vz, 1.0F);
+				any = 1;
+			}
+		}
+	}
+	if(!any)
+		return;
+
+	matrix_identity(matrix_model);
+	matrix_upload();
+
+	GLboolean cull_was_on = glIsEnabled(GL_CULL_FACE);
+	GLboolean blend_was_on = glIsEnabled(GL_BLEND);
+	glDisable(GL_CULL_FACE);
+	glDisable(GL_BLEND);
+	glDisable(GL_TEXTURE_2D);
+	glDepthFunc(GL_LEQUAL);
+	glDepthMask(GL_TRUE);
+
+	tesselator_draw(&camera_inside_tess, 1);
+
+	glDepthFunc(GL_LEQUAL);
+	if(cull_was_on)
+		glEnable(GL_CULL_FACE);
+	if(blend_was_on)
+		glEnable(GL_BLEND);
 }
 
 void camera_ExtractFrustum() {

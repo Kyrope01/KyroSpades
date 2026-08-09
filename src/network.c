@@ -1210,8 +1210,25 @@ static void versioninfo_put_string(unsigned char* out, int* pos, const char* s, 
 }
 
 static const char* versioninfo_locale(void) {
-        const char* lang = getenv("LANG");
-        if(!lang || !lang[0] || !strcmp(lang, "C") || !strcmp(lang, "POSIX"))
+        /* The client's own UI language is the authoritative source: it is
+           what the player actually sees, it cannot be broken by the system
+           locale, and it is what servers should localize for. */
+        if(settings.ui_language[0])
+                return settings.ui_language;
+
+        /* Fallback for configs that predate the setting: proper GNU locale
+           precedence -- LC_ALL overrides LC_MESSAGES overrides LANG.  "C"
+           and "POSIX" (with any charset suffix) mean "no locale": report
+           English. */
+        const char* lang = getenv("LC_ALL");
+        if(!lang || !lang[0])
+                lang = getenv("LC_MESSAGES");
+        if(!lang || !lang[0])
+                lang = getenv("LANG");
+        if(!lang || !lang[0])
+                return "en_US";
+        if(!strcmp(lang, "C") || !strcmp(lang, "POSIX")
+           || !strncmp(lang, "C.", 2) || !strncmp(lang, "POSIX.", 6))
                 return "en_US";
         return lang;
 }

@@ -143,23 +143,36 @@ void cameracontroller_fps(float dt) {
 	players[local_player_id].alive = 1;
 
 	int cooldown = 0;
+	/* When a tool runs out (e.g. the 3rd grenade thrown, an empty gun), switch
+	   back to the tool the player actually held before, not the next one in
+	   the enum -- the old `held_item--` chain could walk GRENADE -> GUN ->
+	   BLOCK and land the player on the block tool, flashing the colour
+	   palette for no reason. */
 	if(players[local_player_id].held_item == TOOL_GRENADE && local_player_grenades == 0) {
-		local_player_lasttool = players[local_player_id].held_item--;
+		players[local_player_id].held_item = local_player_lasttool;
 		cooldown = 1;
 	}
 
 	if(players[local_player_id].held_item == TOOL_GUN && local_player_ammo + local_player_ammo_reserved == 0) {
-		local_player_lasttool = players[local_player_id].held_item--;
+		players[local_player_id].held_item = local_player_lasttool;
 		cooldown = 1;
 	}
 
 	if(players[local_player_id].held_item == TOOL_BLOCK && local_player_blocks == 0) {
-		local_player_lasttool = players[local_player_id].held_item--;
+		players[local_player_id].held_item = local_player_lasttool;
 		cooldown = 1;
 	}
 
 	if(cooldown) {
+		/* If the remembered tool is also empty, fall back to the spade. */
+		if((players[local_player_id].held_item == TOOL_GRENADE && local_player_grenades == 0)
+		   || (players[local_player_id].held_item == TOOL_GUN && local_player_ammo + local_player_ammo_reserved == 0)
+		   || (players[local_player_id].held_item == TOOL_BLOCK && local_player_blocks == 0))
+			players[local_player_id].held_item = TOOL_SPADE;
 		player_on_held_item_change(players + local_player_id);
+		/* This is an automatic fallback, not a deliberate selection: keep
+		   the tool-switch overlay (and any palette flash) off. */
+		players[local_player_id].items_show = 0;
 	}
 
 #ifdef USE_TOUCH
@@ -191,11 +204,15 @@ void cameracontroller_fps(float dt) {
 		}
 
 		if(settings.crouch_instant) {
-			/* Collision state changes instantly with the key -- identical to
-			   the server's set_crouch, which shifts the feet by 0.9
-			   unconditionally (even mid-air). Only the camera ease remains. */
+			/* Collision state changes instantly with the key.  Only shift the
+			   feet when GROUNDED: mid-air crouch must merely switch the
+			   collision box to the shorter height.  The old code moved the
+			   feet by 0.9 unconditionally, so spamming crouch/uncrouch in
+			   mid-air teleported the player downward -- usable to accelerate
+			   falls and reduce fall damage. */
 			if(window_key_down(WINDOW_KEY_CROUCH)
-			   && !players[local_player_id].input.keys.crouch) {
+			   && !players[local_player_id].input.keys.crouch
+			   && !players[local_player_id].physics.airborne) {
 				players[local_player_id].pos.y -= 0.9F;
 				players[local_player_id].physics.eye.y -= 0.9F;
 				last_cy -= 0.9F;

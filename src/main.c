@@ -242,6 +242,29 @@ void chat_showpopup(const char* msg, float duration, int color) {
         chat_popup_color = color;
 }
 
+/* Render-height for a dropped intel: the camera-y translate that makes the
+   model's bottom touch the top of the first solid block below the drop cell.
+   dx/dy are the horizontal map coords, dz the vertical (map) coord. */
+static float intel_drop_render_y(float dx, float dy, float dz) {
+        int ix = (int)floorf(dx);
+        int iz = (int)floorf(dy);   /* horizontal map coords */
+        int izm = (int)floorf(dz);  /* vertical map coord */
+        if(ix < 0 || ix >= map_size_x || iz < 0 || iz >= map_size_z)
+                return 63.0F;
+        if(izm < 0) izm = 0;
+        if(izm >= map_size_y) izm = map_size_y - 1;
+
+        int ground = izm;
+        while(ground > 0 && map_isair(ix, 63 - ground, iz))
+                ground--;
+
+        /* `ground` is the solid block under the flag; its top surface in
+           camera-y is 62 - ground.  kv6_render pivots the model around ypiv
+           (so the model's bottom sits at translate_y - ypiv*scale), hence
+           the +ypiv*scale to touch the surface exactly. */
+        return 62.0F - (float)ground + model_intel.ypiv * model_intel.scale;
+}
+
 void drawScene() {
         if(settings.ambient_occlusion) {
                 glShadeModel(GL_SMOOTH);
@@ -301,10 +324,16 @@ void drawScene() {
         bloodmarks_render();
         matrix_upload();
 
+        /* Rest the dropped intel on the floor: scan downward from the drop
+           cell for the first solid block and sit the model's bottom on its
+           top surface.  The old code rendered it a full block up in the air
+           (plus the model pivot offset), which is why it floated. */
         if(gamestate.gamemode_type == GAMEMODE_CTF) {
                 if(!gamestate.gamemode.ctf.team_1_intel) {
                         float x = gamestate.gamemode.ctf.team_1_intel_location.dropped.x;
-                        float y = 63.0F - gamestate.gamemode.ctf.team_1_intel_location.dropped.z + 1.0F;
+                        float y = intel_drop_render_y(gamestate.gamemode.ctf.team_1_intel_location.dropped.x,
+                                                      gamestate.gamemode.ctf.team_1_intel_location.dropped.y,
+                                                      gamestate.gamemode.ctf.team_1_intel_location.dropped.z);
                         float z = gamestate.gamemode.ctf.team_1_intel_location.dropped.y;
                         matrix_push(matrix_model);
                         matrix_translate(matrix_model, x, y, z);
@@ -315,7 +344,9 @@ void drawScene() {
                 }
                 if(!gamestate.gamemode.ctf.team_2_intel) {
                         float x = gamestate.gamemode.ctf.team_2_intel_location.dropped.x;
-                        float y = 63.0F - gamestate.gamemode.ctf.team_2_intel_location.dropped.z + 1.0F;
+                        float y = intel_drop_render_y(gamestate.gamemode.ctf.team_2_intel_location.dropped.x,
+                                                      gamestate.gamemode.ctf.team_2_intel_location.dropped.y,
+                                                      gamestate.gamemode.ctf.team_2_intel_location.dropped.z);
                         float z = gamestate.gamemode.ctf.team_2_intel_location.dropped.y;
                         matrix_push(matrix_model);
                         matrix_translate(matrix_model, x, y, z);
@@ -1136,9 +1167,11 @@ void display() {
                                 
                                 /* Check for pending block placement when landing */
                                 if(local_player_pending_block_active && !players[local_player_id].physics.airborne) {
-                                        int* pos = camera_terrain_pick(0);
+                                        float ex, ey, ez;
+                                        camera_local_eye(&ex, &ey, &ez);
+                                        int* pos = camera_terrain_pick_local(0);
                                         if(pos != NULL && pos[1] > 1
-                                           && chebyshev(pos[0] - camera_x, pos[1] - camera_y, pos[2] - camera_z) < 3.0F
+                                           && chebyshev(pos[0] - ex, pos[1] - ey, pos[2] - ez) < 3.0F
                                            && !overlaps_with_player(pos[0], pos[1], pos[2])) {
                                                 players[local_player_id].item_showup = window_time();
                                                 local_player_blocks = max(local_player_blocks - 1, 0);
@@ -1156,9 +1189,11 @@ void display() {
                                 
                                 if(players[local_player_id].input.buttons.lmb && players[local_player_id].held_item == TOOL_BLOCK
                                    && (window_time() - players[local_player_id].item_showup) >= 0.5F && local_player_blocks > 0) {
-                                        int* pos = camera_terrain_pick(0);
+                                        float ex, ey, ez;
+                                        camera_local_eye(&ex, &ey, &ez);
+                                        int* pos = camera_terrain_pick_local(0);
                                         if(pos != NULL && pos[1] > 1
-                                           && chebyshev(pos[0] - camera_x, pos[1] - camera_y, pos[2] - camera_z) < 3.0F
+                                           && chebyshev(pos[0] - ex, pos[1] - ey, pos[2] - ez) < 3.0F
                                            && !overlaps_with_player(pos[0], pos[1], pos[2])) {
                                                 players[local_player_id].item_showup = window_time();
                                                 local_player_blocks = max(local_player_blocks - 1, 0);
@@ -1172,7 +1207,7 @@ void display() {
                                                 network_send(PACKET_BLOCKACTION_ID, &blk, sizeof(blk));
                                                 // read_PacketBlockAction(&blk,sizeof(blk));
                                         } else if(pos != NULL && pos[1] > 1
-                                                  && chebyshev(pos[0] - camera_x, pos[1] - camera_y, pos[2] - camera_z) < 3.0F
+                                                  && chebyshev(pos[0] - ex, pos[1] - ey, pos[2] - ez) < 3.0F
                                                   && overlaps_with_player(pos[0], pos[1], pos[2])
                                                   && !local_player_pending_block_active) {
                                                 /* Queue block placement for when we land */
@@ -1199,12 +1234,14 @@ void display() {
 
                         local_player_drag_amount = 0;
                         int* pos = NULL;
+                        float pick_ox = camera_x, pick_oy = camera_y, pick_oz = camera_z;
                         switch(players[local_id].held_item) {
                                 case TOOL_BLOCK:
                                         if(!players[local_id].input.keys.sprint && render_fpv) {
-                                                if(is_local)
-                                                        pos = camera_terrain_pick(0);
-                                                else
+                                                if(is_local) {
+                                                        pos = camera_terrain_pick_local(0);
+                                                        camera_local_eye(&pick_ox, &pick_oy, &pick_oz);
+                                                } else
                                                         pos = camera_terrain_pickEx(
                                                                 0, camera_x, camera_y, camera_z, players[local_id].orientation_smooth.x,
                                                                 players[local_id].orientation_smooth.y, players[local_id].orientation_smooth.z);
@@ -1213,7 +1250,7 @@ void display() {
                                 default: pos = NULL;
                         }
                         if(pos != NULL && pos[1] > 1
-                           && chebyshev(pos[0] - camera_x, pos[1] - camera_y, pos[2] - camera_z) < 3.0F
+                           && chebyshev(pos[0] - pick_ox, pos[1] - pick_oy, pos[2] - pick_oz) < 3.0F
                            && !overlaps_with_player(pos[0], pos[1], pos[2])) {
                                 matrix_upload();
                                 glDisable(GL_DEPTH_TEST);
@@ -1334,8 +1371,14 @@ void display() {
                         map_collapsing_render();
                         matrix_upload();
 
-                        if(!map_isair(camera_x, camera_y, camera_z))
-                                glClear(GL_COLOR_BUFFER_BIT);
+                        /* Camera inside (or poking into) a solid voxel:
+                           black out the view instead of showing the fog
+                           color or seeing through the block.  The old code
+                           glClear()ed here, but the clear color is the fog
+                           color -- so it showed fog, and it only triggered
+                           for the center voxel, never for partial
+                           penetration. */
+                        camera_inside_block_render();
 
                         glx_disable_sphericalfog();
                         if(settings.smooth_fog)
@@ -2164,7 +2207,7 @@ int main(int argc, char** argv) {
         settings.shadow_entities = 0;
         settings.ambient_occlusion = 1;
         settings.ao_multiplier = 1.0F;
-        settings.shadow_quality = 0;
+        settings.shadow_quality = 1; /* realistic directional shadows from blocks */
         settings.shadow_intensity = 0.40F;
         settings.sky_gradient = 0;
         settings.sky_gradient_intensity = 0.5F;
@@ -2221,10 +2264,9 @@ int main(int argc, char** argv) {
         settings.skin_player = 0;
         settings.skin_intel = 0;
         settings.skin_tent = 0;
-        /* BetterSpades' smoothness comes from keeping the default render path
-           simple.  Color grading/filmic/vignette are still available in the
-           settings menu, but they must be opt-in: any non-zero value forces a
-           full-screen FBO + shader pass every frame. */
+        /* Color grading / vignette stay off by default; filmic tone mapping
+           and chromatic aberration are on (they are part of the intended
+           look).  All of them run through a full-screen FBO + shader pass. */
         settings.exposure = 0.0F;
         settings.contrast = 0.0F;
         settings.vignette = 0.0F;
@@ -2235,8 +2277,10 @@ int main(int argc, char** argv) {
         /* ── New post-proc shaders ───────────────────────────────────────────
            These are available as opt-in visual effects, but default off so the
            client keeps the original BetterSpades fast render path. */
-        settings.chromatic_aberration = 0;
+        settings.chromatic_aberration = 1; /* edge chromatic fringe, on by default */
         settings.chromatic_aberration_strength = 1.5F;
+        /* Post-processing features on by default: filmic tone mapping and
+           chromatic aberration are part of the intended look. */
         settings.filmic_tonemapping = 1;
         settings.chat_mention_r = 255;
         settings.chat_mention_g = 255;
@@ -2254,6 +2298,7 @@ int main(int argc, char** argv) {
         settings.land_dip = 1;
         settings.camera_shake = 1;
         strcpy(settings.name, "DEV_CLIENT");
+        strcpy(settings.ui_language, "en_US");
 
 #if defined(__ANDROID__)
         /* The process CWD on Android is "/" (read-only). Switch to the app's
@@ -2306,12 +2351,19 @@ int main(int argc, char** argv) {
 
         time_t t = time(NULL);
         char buf[32];
-        strftime(buf, 32, "logs/%m-%d-%Y.log", localtime(&t));
-        log_set_fp(fopen(buf, "a"));
+        strftime(buf, 32, "logs/%Y-%m-%d.log", localtime(&t));
+        FILE* logfp = fopen(buf, "a");
+        if(logfp) {
+                /* Match the log content's ISO-8601 date and keep the file
+                   line-buffered so messages survive a crash / hard quit. */
+                setvbuf(logfp, NULL, _IOLBF, 0);
+                log_set_fp(logfp);
+        }
 
         srand(t);
 
         log_info("Game started!");
+        log_info("KyroSpades %s %s", KYROSPADES_VERSION, BS_VER_INFO);
 
         settings.iron_sight = 1;
         settings.replay_enabled = -1;

@@ -113,6 +113,17 @@ static const char* window_internal_keyname(int internal) {
 		case WINDOW_KEY_UP:              return "Up Arrow";
 		case WINDOW_KEY_CURSOR_DOWN:
 		case WINDOW_KEY_DOWN:            return "Down Arrow";
+		case WINDOW_KEY_SPACE:           return "Space";
+		case WINDOW_KEY_SPRINT:
+		case WINDOW_KEY_SHIFT:           return "Left Shift";
+		case WINDOW_KEY_CROUCH:          return "Left Ctrl";
+		case WINDOW_KEY_TAB:             return "Tab";
+		case WINDOW_KEY_ESCAPE:          return "Esc";
+		case WINDOW_KEY_ENTER:           return "Enter";
+		case WINDOW_KEY_BACKSPACE:       return "Backspace";
+		case WINDOW_KEY_HOME:            return "Home";
+		case WINDOW_KEY_END:             return "End";
+		case WINDOW_KEY_DELETE:          return "Delete";
 		case WINDOW_KEY_F1:              return "F1";
 		case WINDOW_KEY_F2:              return "F2";
 		case WINDOW_KEY_F3:              return "F3";
@@ -365,6 +376,22 @@ void window_init() {
 	if(!glfwInit()) {
 		log_fatal("GLFW3 init failed");
 		exit(1);
+	}
+
+	/* GLFW key tokens are positional: on AZERTY and other layouts the
+	   physical key that prints '/' is NOT GLFW_KEY_SLASH, so the command
+	   binding would only react to the QWERTY position.  Find the key that
+	   actually types '/' and register it as an alias for the command key.
+	   config_reload() already ran (before window_init), so we append here;
+	   the extra binding has no display name, so it stays invisible in the
+	   Controls list. */
+	for(int k = GLFW_KEY_SPACE; k <= GLFW_KEY_LAST; k++) {
+		const char* nm = glfwGetKeyName(k, 0);
+		if(nm && nm[0] == '/' && nm[1] == '\0' && k != GLFW_KEY_SLASH) {
+			config_register_key(WINDOW_KEY_COMMAND, k, NULL, 0, NULL, NULL);
+			log_info("Bound chat command to the layout's '/' key (GLFW key %i)", k);
+			break;
+		}
 	}
 
 	if(settings.multisamples > 0) {
@@ -1193,10 +1220,10 @@ int window_closed() {
 void window_title(char* suffix) {
 	if(suffix) {
 		char title[128];
-		snprintf(title, sizeof(title) - 1, "KyroSpades %s - %s", KYROSPADES_VERSION, suffix);
+		snprintf(title, sizeof(title) - 1, "KyroSpades %s - %s", GIT_COMMIT_HASH, suffix);
 		SDL_SetWindowTitle(hud_window->impl, title);
 	} else {
-		SDL_SetWindowTitle(hud_window->impl, "KyroSpades " KYROSPADES_VERSION);
+		SDL_SetWindowTitle(hud_window->impl, "KyroSpades " GIT_COMMIT_HASH);
 	}
 }
 

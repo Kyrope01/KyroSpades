@@ -69,6 +69,16 @@ unsigned char camera_PointInFrustum(float x, float y, float z);
 int camera_CubeInFrustum(float x, float y, float z, float size, float size_y);
 int* camera_terrain_pick(unsigned char mode);
 int* camera_terrain_pickEx(unsigned char mode, float x, float y, float z, float ray_x, float ray_y, float ray_z);
+/* Same as camera_terrain_pick but the ray originates from the local player's
+   physics eye (not the rendered camera, which carries view-only bob/lag/dip
+   offsets).  Use this for anything gameplay-relevant: block placement, drag,
+   color picking, distance readouts. */
+int* camera_terrain_pick_local(unsigned char mode);
+void camera_local_eye(float* x, float* y, float* z);
+/* OpenSpades-style "head inside a block": renders black inside-out cubes for
+   solid voxels the camera point is inside of (or within a hair of), so the
+   view goes black instead of showing fog or seeing through geometry. */
+void camera_inside_block_render(void);
 void camera_vector_from_angles(float yaw, float pitch, float* x, float* y, float* z);
 void camera_freeaim_reset(void);
 void camera_freeaim_update_muzzle(float dt);

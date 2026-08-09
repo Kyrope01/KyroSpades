@@ -387,6 +387,7 @@ void config_save() {
         config_seti("client", "replay_duration", settings.replay_duration);
         config_seti("client", "replay_save_hotkey", settings.replay_save_hotkey);
         config_sets("client", "audio_monitor_source", settings.audio_monitor_source);
+        config_sets("client", "ui_language", settings.ui_language);
 
         config_sets("meta", "backend", CONFIG_BACKEND);
 
@@ -562,6 +563,7 @@ IMPORT_SETTING(settings.camera_movement, camera_movement, atoi(value));
                 IMPORT_SETTING(settings.replay_duration, replay_duration, atoi(value));
                 IMPORT_SETTING(settings.replay_save_hotkey, replay_save_hotkey, atoi(value));
                 IMPORT_SETTING_STR(settings.audio_monitor_source, audio_monitor_source);
+                IMPORT_SETTING_STR(settings.ui_language, ui_language);
         }
         if(!strcmp(section, "meta")) {
                 if(!strcmp(name, "backend")) {
@@ -621,6 +623,7 @@ void config_register_key(int internal, int def, const char* name, int toggle, co
         key.def = def;
         key.original = def;
         key.toggle = toggle;
+        key.order = list_size(&config_keys);
         if(display)
                 strncpy(key.display, display, sizeof(key.display) - 1);
         else
@@ -679,8 +682,12 @@ static int config_key_cmp(const void* a, const void* b) {
         const struct config_key_pair* A = (const struct config_key_pair*)a;
         const struct config_key_pair* B = (const struct config_key_pair*)b;
 
+        /* Sort by category first, then by the order the bindings were
+           registered in, so movement keys appear as Forward, Backward,
+           Left, Right (i.e. how they sit on the keyboard) instead of in
+           alphabetical order. */
         int cmp = strcmp(A->category, B->category);
-        return cmp ? cmp : strcmp(A->display, B->display);
+        return cmp ? cmp : (A->order - B->order);
 }
 
 static void config_label_pixels(char* buffer, size_t length, int value, size_t index) {
@@ -750,7 +757,8 @@ void config_reload() {
         config_register_key(WINDOW_KEY_TAB, SDLK_TAB, "view_score", 0, "Score", "Information");
         config_register_key(WINDOW_KEY_ESCAPE, SDLK_ESCAPE, "quit_game", 0, "Quit", "Game");
         config_register_key(WINDOW_KEY_ESCAPE, SDLK_AC_BACK, NULL, 0, NULL, NULL);
-        config_register_key(WINDOW_KEY_MAP, SDLK_m, "view_map", 1, "Map", "Information");
+        config_register_key(WINDOW_KEY_MAP, SDLK_b, "view_map", 1, "Map", "Information");
+        config_register_key(WINDOW_KEY_MAP, SDLK_m, NULL, 0, NULL, NULL); /* classic M still works */
         config_register_key(WINDOW_KEY_MAP_ZOOM, SDLK_x, "map_zoom", 0, "Map zoom", "Information");
         config_register_key(WINDOW_KEY_CROUCH, SDLK_LCTRL, "crouch", 0, "Crouch", "Movement");
         config_register_key(WINDOW_KEY_SNEAK, SDLK_v, "sneak", 0, "Sneak", "Movement");
@@ -823,7 +831,8 @@ void config_reload() {
         config_register_key(WINDOW_KEY_TOOL4, GLFW_KEY_4, "tool_grenade", 0, "Select grenade", "Tools & Weapons");
         config_register_key(WINDOW_KEY_TAB, GLFW_KEY_TAB, "view_score", 0, "Score", "Information");
         config_register_key(WINDOW_KEY_ESCAPE, GLFW_KEY_ESCAPE, "quit_game", 0, "Quit", "Game");
-        config_register_key(WINDOW_KEY_MAP, GLFW_KEY_M, "view_map", 1, "Map", "Information");
+        config_register_key(WINDOW_KEY_MAP, GLFW_KEY_B, "view_map", 1, "Map", "Information");
+        config_register_key(WINDOW_KEY_MAP, GLFW_KEY_M, NULL, 0, NULL, NULL); /* classic M still works */
         config_register_key(WINDOW_KEY_MAP_ZOOM, GLFW_KEY_X, "map_zoom", 0, "Map zoom", "Information");
         config_register_key(WINDOW_KEY_CROUCH, GLFW_KEY_LEFT_CONTROL, "crouch", 0, "Crouch", "Movement");
         config_register_key(WINDOW_KEY_SNEAK, GLFW_KEY_V, "sneak", 0, "Sneak", "Movement");
@@ -1305,6 +1314,15 @@ void config_reload() {
                                  .max = 1,
                                  .name = "Show fps",
                                  .help = "Show current fps and ping ingame",
+                         });
+        list_add(&config_settings,
+                         &(struct config_setting) {
+                                 .value = settings_tmp.ui_language,
+                                 .type = CONFIG_TYPE_STRING,
+                                 .max = sizeof(settings.ui_language) - 1,
+                                 .name = "UI Language",
+                                 .help = "Locale reported to servers (e.g. en_US, de_DE)",
+                                 .category = "HUD/UI Settings",
                          });
         list_add(&config_settings,
                          &(struct config_setting) {
