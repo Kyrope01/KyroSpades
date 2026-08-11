@@ -473,15 +473,48 @@ static float spec_vel_x = 0.0F, spec_vel_y = 0.0F, spec_vel_z = 0.0F;
 // Spectator camera roll angle
 static float camera_roll = 0.0F;
 
+/* Rotation inertia (mouse look + roll). Mouse look arrives as one-shot
+   angle deltas between frames, so deltas are pooled into a per-frame
+   "demand" angular velocity; the actual angular velocity is then eased
+   toward the demand with the same rate limit as position velocity. A flick
+   swings in smoothly and the camera glides to a stop instead of freezing
+   instantly — the same FPV-drone feel movement already has. */
+static float spec_rot_pending_x = 0.0F, spec_rot_pending_y = 0.0F;
+static float spec_rot_vel_x = 0.0F, spec_rot_vel_y = 0.0F;
+static float spec_roll_vel = 0.0F;
+
+void cameracontroller_spectator_rotate(float rot_x_delta, float rot_y_delta) {
+	spec_rot_pending_x += rot_x_delta;
+	spec_rot_pending_y += rot_y_delta;
+}
+
 void cameracontroller_reset_spectator_velocity_impl() {
 	spec_vel_x = 0.0F;
 	spec_vel_y = 0.0F;
 	spec_vel_z = 0.0F;
 	camera_roll = 0.0F;
+	spec_rot_pending_x = 0.0F;
+	spec_rot_pending_y = 0.0F;
+	spec_rot_vel_x = 0.0F;
+	spec_rot_vel_y = 0.0F;
+	spec_roll_vel = 0.0F;
 }
 
 float cameracontroller_get_roll(void) {
 	return camera_roll;
+}
+
+/* Rate-limit angular *vel toward the demanded angular velocity (separate
+   rates for spooling up vs winding down, like position movement), then
+   integrate *angle by the eased velocity. */
+static void spec_ease_rotation(float* angle, float* vel, float demand, float accel, float decel, float dt) {
+	float dv = demand - *vel;
+	float rate = (demand != 0.0F) ? accel : decel;
+	float step = rate * dt;
+	if(fabsf(dv) > step)
+		dv = (dv > 0.0F) ? step : -step;
+	*vel += dv;
+	*angle += *vel * dt;
 }
 
 void cameracontroller_spectator(float dt) {
@@ -494,6 +527,7 @@ void cameracontroller_spectator(float dt) {
 	aabb_set_center(&camera, camera_x, camera_y - camera_eye_height, camera_z);
 
 	float input_x = 0.0F, input_y = 0.0F, input_z = 0.0F;
+	float roll_demand = 0.0F; // rad/s the roll keys ask for this frame
 
 	if(chat_input_mode == CHAT_NO_INPUT) {
 		// Calculate forward direction vector from yaw and pitch
@@ -575,15 +609,30 @@ void cameracontroller_spectator(float dt) {
 			}
 		}
 
-		// Handle camera roll input
+		// Handle camera roll input (target speed only — applied with inertia below)
 		float roll_speed = 2.0F; // radians per second
 		if(window_key_down(WINDOW_KEY_ROLL_CW)) {
-			camera_roll -= roll_speed * dt;
+			roll_demand -= roll_speed;
 		}
 		if(window_key_down(WINDOW_KEY_ROLL_CCW)) {
-			camera_roll += roll_speed * dt;
+			roll_demand += roll_speed;
 		}
 	}
+
+	/* Rotation inertia: ease yaw/pitch/roll angular velocities toward what
+	   the input demanded this frame, then integrate the angles by them.
+	   Mouse motion arrives as pooled one-shot deltas (see
+	   cameracontroller_spectator_rotate), so its demand is that rotation
+	   spread over the frame delta. Skipped on (near-)zero-length frames so
+	   the demand estimate can't explode. */
+	if(dt > 0.0001F) {
+		spec_ease_rotation(&camera_rot_x, &spec_rot_vel_x, spec_rot_pending_x / dt, spec_accel, spec_decel, dt);
+		spec_ease_rotation(&camera_rot_y, &spec_rot_vel_y, spec_rot_pending_y / dt, spec_accel, spec_decel, dt);
+		spec_ease_rotation(&camera_roll, &spec_roll_vel, roll_demand, spec_accel, spec_decel, dt);
+		camera_overflow_adjust(); // clamp pitch / wrap yaw after the eased step
+	}
+	spec_rot_pending_x = 0.0F;
+	spec_rot_pending_y = 0.0F;
 
 	// Normalize input direction
 	float input_len = sqrt(input_x * input_x + input_y * input_y + input_z * input_z);

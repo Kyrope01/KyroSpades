@@ -28,6 +28,9 @@ extern float cameracontroller_bodyview_zoom;
 extern float cameracontroller_gunlag_y; // last_cy minus rendered camera base (viewmodel anchor)
 
 void cameracontroller_reset_spectator_velocity(void);
+/* Pool one-shot spectator look deltas for the inertia pipeline (mouse look
+   in spectator mode goes through this instead of rotating instantly). */
+void cameracontroller_spectator_rotate(float rot_x_delta, float rot_y_delta);
 
 // Get current spectator camera roll angle
 float cameracontroller_get_roll(void);
