@@ -245,11 +245,29 @@ static bool falling_blocks_pivot(void* key, void* value, void* user) {
 
 static const int DIRECTION_MASK[][3] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
 
+/* Locked probes for the falling-blocks worker thread: its collapse flood
+   fill runs concurrently with the main thread's map_set, so it must still
+   serialize against writers (the main thread's own probes deliberately
+   don't — see map_isair below). */
+static bool map_isair_locked(int x, int y, int z) {
+        pthread_rwlock_rdlock(&map_lock);
+        bool result = map_isair_nolock(x, y, z);
+        pthread_rwlock_unlock(&map_lock);
+        return result;
+}
+
+static unsigned int map_get_locked(int x, int y, int z) {
+        pthread_rwlock_rdlock(&map_lock);
+        unsigned int result = map_get_nolock(x, y, z);
+        pthread_rwlock_unlock(&map_lock);
+        return result;
+}
+
 static bool map_update_physics_sub(struct map_collapsing* collapsing, int x, int y, int z) {
         if(y <= 1)
                 return false;
 
-        if(map_isair(x, y, z))
+        if(map_isair_locked(x, y, z))
                 return false;
 
         struct minheap openlist;
@@ -264,7 +282,7 @@ static bool map_update_physics_sub(struct map_collapsing* collapsing, int x, int
                 .pos = pos_key(x, y, z),
         };
 
-        uint32_t start_color = map_get(x, y, z);
+        uint32_t start_color = map_get_locked(x, y, z);
 
         minheap_put(&openlist, &start);
         ht_insert(&closedlist, &start.pos, &start_color);
@@ -291,9 +309,9 @@ static bool map_update_physics_sub(struct map_collapsing* collapsing, int x, int
 
                         if(dir_block[0] >= 0 && dir_block[1] >= 0 && dir_block[2] >= 0 && dir_block[0] < map_size_x
                            && dir_block[1] < map_size_y && dir_block[2] < map_size_z && !ht_contains(&closedlist, &block.pos)
-                           && !map_isair(dir_block[0], dir_block[1], dir_block[2])) {
+                           && !map_isair_locked(dir_block[0], dir_block[1], dir_block[2])) {
                                 minheap_put(&openlist, &block);
-                                uint32_t color = map_get(dir_block[0], dir_block[1], dir_block[2]);
+                                uint32_t color = map_get_locked(dir_block[0], dir_block[1], dir_block[2]);
                                 ht_insert(&closedlist, &block.pos, &color);
                         }
                 }
@@ -522,25 +540,32 @@ void map_init() {
 
 int map_height_at(int x, int z) {
         int result[2];
-        pthread_rwlock_rdlock(&map_lock);
         libvxl_map_gettop(&map, x, z, result);
-        pthread_rwlock_unlock(&map_lock);
         return map_size_y - 1 - result[1];
 }
 
-bool map_isair(int x, int y, int z) {
-        pthread_rwlock_rdlock(&map_lock);
-        bool result = !libvxl_map_issolid(&map, x, z, map_size_y - 1 - y);
-        pthread_rwlock_unlock(&map_lock);
+/* map_isair / map_get are the engine's hottest map probes — player physics,
+   particle collisions, bullet raycasts, camera clipping and the HUD call
+   them thousands of times per frame, and combat multiplies that (particle
+   bursts from breaking blocks, tracer steps from automatic fire). They used
+   to take a full pthread rwlock round-trip per call. That is nearly free
+   with glibc's futex-based rwlock on Linux, but winpthreads implements
+   rwlocks on top of a mutex + condition variables, so on Windows every
+   single probe cost several lock object operations — enough to collapse the
+   frame rate exactly when shooting at or breaking blocks.
 
-        return result;
+   All call sites of these two functions run on the MAIN thread, and writes
+   on the main thread can't race each other. The only off-main-thread writer
+   is the falling-blocks worker; a read racing its map_set just observes a
+   one-frame-stale block, which is benign for collision and shading. So the
+   main-thread probes take no lock at all, while the collapse worker keeps
+   its own serialized variants below. */
+bool map_isair(int x, int y, int z) {
+        return map_isair_nolock(x, y, z);
 }
 
 unsigned int map_get(int x, int y, int z) {
-        pthread_rwlock_rdlock(&map_lock);
-        unsigned int result = libvxl_map_get(&map, x, z, map_size_y - 1 - y);
-        pthread_rwlock_unlock(&map_lock);
-        return rgb2bgr(result);
+        return map_get_nolock(x, y, z);
 }
 
 void map_read_lock(void) {

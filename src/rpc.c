@@ -231,8 +231,17 @@ void rpc_update() {
                 return;
         }
 
-        if(!DISCORD_APP_ID[0])
-                return; /* built without an application id — stay silent */
+        if(!DISCORD_APP_ID[0]) {
+                /* Built without an application id — presence can never work,
+                   so say so once instead of failing silently every frame. */
+                static int warned_no_appid = 0;
+                if(!warned_no_appid) {
+                        warned_no_appid = 1;
+                        log_warn("Discord RPC: this build has no Discord application ID "
+                                 "(DISCORD_APP_ID), presence is unavailable");
+                }
+                return;
+        }
 
         if(!rpc_state.running) {
                 discord_ipc_start(DISCORD_APP_ID);

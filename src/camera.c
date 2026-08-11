@@ -168,6 +168,16 @@ void camera_look_delta(float yaw_delta, float pitch_delta) {
 		return;
 	}
 
+	if(camera_mode == CAMERAMODE_SPECTATOR) {
+		/* Spectator look goes through the inertia pipeline: deltas are
+		   pooled here and cameracontroller_spectator() eases the angular
+		   velocity toward them, so the view swings in and glides to a stop
+		   like the movement inertia. Sign convention mirrors the direct
+		   apply below. */
+		cameracontroller_spectator_rotate(-yaw_delta, pitch_delta);
+		return;
+	}
+
 	camera_rot_x -= yaw_delta;
 	camera_rot_y += pitch_delta;
 	camera_overflow_adjust();

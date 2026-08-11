@@ -90,6 +90,13 @@ static char ipc_client_id[32];
 static time_t ipc_next_attempt = 0;
 static uint32_t ipc_nonce = 0;
 
+/* Diagnostics for "presence just doesn't show up" reports: every connect
+   sweep records how it failed so the log file in logs/ explains why
+   presence is silent instead of leaving the user guessing. */
+static int ipc_fail_streak = 0;       /* consecutive failed connect sweeps */
+static int ipc_fail_access_denied = 0; /* last sweep saw EACCES/ERROR_ACCESS_DENIED */
+static int ipc_warned_denied = 0;      /* elevation-mismatch hint already logged */
+
 static struct ipc_frame* ipc_tx_head = NULL;
 static struct ipc_frame* ipc_tx_tail = NULL;
 static int ipc_tx_count = 0;
@@ -224,6 +231,14 @@ static void ipc_dispatch(uint32_t op, const unsigned char* payload, uint32_t len
         if(op != IPC_OP_FRAME)
                 return;
 
+        if(ipc_state == IPC_READY) {
+                /* Replies to our commands (nonce answers, and evt:"ERROR"
+                   rejections — e.g. unknown art-asset keys). Relying on the
+                   payload being NUL-terminated by ipc_rx_feed. */
+                log_trace("Discord RPC: reply: %.*s", (int)length, (const char*)payload);
+                return;
+        }
+
         if(ipc_state == IPC_HANDSHAKE_SENT) {
                 /* The expected answer to our handshake is a FRAME whose JSON
                    body contains "evt":"READY". Substring matching is used
@@ -323,14 +338,36 @@ static void ipc_disconnect(void) {
 /* Attempts one connect. Returns 0 when a transport handle was acquired and
    the handshake was queued. Silently fails when Discord isn't running. */
 static int ipc_try_connect(void) {
+        ipc_fail_access_denied = 0;
 #ifdef _WIN32
+        DWORD last_err = 0;
         for(int k = 0; k < IPC_PIPE_COUNT; k++) {
                 char pipe_name[64];
                 snprintf(pipe_name, sizeof(pipe_name), "\\\\.\\pipe\\discord-ipc-%d", k);
                 HANDLE h = CreateFileA(pipe_name, GENERIC_READ | GENERIC_WRITE, 0, NULL,
                                        OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
-                if(h == INVALID_HANDLE_VALUE)
-                        continue;
+                if(h == INVALID_HANDLE_VALUE) {
+                        last_err = GetLastError();
+                        /* Discord can have every pipe instance momentarily
+                           taken (e.g. right at its startup); give it a short
+                           grace window instead of writing the index off. */
+                        if(last_err == ERROR_PIPE_BUSY && WaitNamedPipeA(pipe_name, 200)) {
+                                h = CreateFileA(pipe_name, GENERIC_READ | GENERIC_WRITE, 0, NULL,
+                                                OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
+                                if(h != INVALID_HANDLE_VALUE)
+                                        last_err = 0;
+                        }
+                        if(h == INVALID_HANDLE_VALUE) {
+                                /* ERROR_ACCESS_DENIED means the pipe exists
+                                   but refuses us — the classic cause is an
+                                   elevation mismatch (game or Discord
+                                   running as administrator, but not both). */
+                                ipc_fail_access_denied |= (last_err == ERROR_ACCESS_DENIED);
+                                log_trace("Discord RPC: pipe %d rejected us (error %lu)", k,
+                                          (unsigned long)last_err);
+                                continue;
+                        }
+                }
 
                 ZeroMemory(&ipc_read_ovl, sizeof(ipc_read_ovl));
                 ZeroMemory(&ipc_write_ovl, sizeof(ipc_write_ovl));
@@ -349,8 +386,11 @@ static int ipc_try_connect(void) {
                 ipc_handle = h;
                 ipc_read_pending = 0;
                 ipc_write_pending = 0;
+                log_info("Discord RPC: connected via %s", pipe_name);
                 return 0;
         }
+        log_trace("Discord RPC: no pipe accepted a connection (last error %lu)",
+                  (unsigned long)last_err);
         return -1;
 #else
         /* Candidate base directories, in priority order. The flatpak and snap
@@ -400,10 +440,14 @@ static int ipc_try_connect(void) {
 
                         if(connect(fd, (struct sockaddr*)&addr, addr_len) == 0 || errno == EINPROGRESS) {
                                 ipc_socket = fd;
+                                log_info("Discord RPC: connected via %s", path);
                                 return 0;
                         }
                         /* ENOENT (Discord not running under this index/dir) or
-                           ECONNREFUSED (stale socket file): keep looking. */
+                           ECONNREFUSED (stale socket file): keep looking.
+                           EACCES means we found Discord but aren't allowed
+                           in (sandboxing / different user) — worth a hint. */
+                        ipc_fail_access_denied |= (errno == EACCES);
                         close(fd);
                 }
         }
@@ -414,12 +458,17 @@ static int ipc_try_connect(void) {
 /* ── public API ────────────────────────────────────────────────────────────*/
 
 void discord_ipc_start(const char* client_id) {
-        if(!client_id || !*client_id)
+        if(!client_id || !*client_id) {
+                /* rpc.c normally guards this, but say it out loud once: a
+                   silenced presence with no log line is undebuggable. */
+                log_warn("Discord RPC: no application ID compiled into this build, presence disabled");
                 return;
+        }
         if(ipc_client_id[0])
                 return; /* already running */
         snprintf(ipc_client_id, sizeof(ipc_client_id), "%s", client_id);
         ipc_next_attempt = 0; /* connect ASAP */
+        log_info("Discord RPC: enabled, looking for the Discord desktop app");
 }
 
 int discord_ipc_ready(void) {
@@ -437,8 +486,24 @@ void discord_ipc_process(void) {
                 if(now < ipc_next_attempt)
                         return;
                 ipc_next_attempt = now + IPC_RECONNECT_DELAY;
-                if(ipc_try_connect() != 0)
+                if(ipc_try_connect() != 0) {
+                        /* Diagnosable silence: report the first failure and
+                           then about once a minute, with a specific hint for
+                           the classic elevation-mismatch case (Windows). */
+                        ipc_fail_streak++;
+                        if(ipc_fail_access_denied && !ipc_warned_denied) {
+                                ipc_warned_denied = 1;
+                                log_warn("Discord RPC: Discord's IPC socket refused access. If the game "
+                                         "or Discord is running as administrator (or as a different user), "
+                                         "run both the same way and presence will connect.");
+                        } else if(ipc_fail_streak == 1 || ipc_fail_streak % 15 == 0) {
+                                log_warn("Discord RPC: can't reach Discord (desktop app running?). "
+                                         "Retrying every %d s — turn on debug log for details.",
+                                         IPC_RECONNECT_DELAY);
+                        }
                         return;
+                }
+                ipc_fail_streak = 0;
                 ipc_rx_reset();
                 ipc_state = IPC_HANDSHAKE_SENT;
                 char handshake[96];
