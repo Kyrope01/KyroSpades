@@ -153,6 +153,7 @@ extern struct RENDER_OPTIONS {
         int raw_aim;                  /* 1:1 view orientation (no artificial low-pass filter) */
         int crouch_instant;           /* instant crouch physics, camera eases separately */
         int view_bob;                 /* subtle first-person view bob while walking */
+        float view_bob_intensity;       /* multiplier for view bob strength, 0.0 to 10.0 */
         int land_dip;                 /* small camera dip when landing from a fall */
         int camera_shake;             /* camera shake from gunfire and explosions (view-only) */
         char audio_monitor_source[64];

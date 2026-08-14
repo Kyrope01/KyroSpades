@@ -369,6 +369,7 @@ void config_save() {
         config_seti("client", "raw_aim", settings.raw_aim);
         config_seti("client", "crouch_instant", settings.crouch_instant);
         config_seti("client", "view_bob", settings.view_bob);
+        config_setf("client", "view_bob_intensity", settings.view_bob_intensity);
         config_seti("client", "land_dip", settings.land_dip);
         config_seti("client", "camera_shake", settings.camera_shake);
         config_seti("client", "textured_blocks", settings.textured_blocks);
@@ -544,10 +545,10 @@ IMPORT_SETTING(settings.camera_movement, camera_movement, atoi(value));
                 IMPORT_SETTING(settings.precise_pacing, precise_pacing, atoi(value));
                 IMPORT_SETTING(settings.raw_aim, raw_aim, atoi(value));
                 IMPORT_SETTING(settings.crouch_instant, crouch_instant, atoi(value));
-				/* view_bob / land_dip / camera_shake deliberately have no
-				   IMPORT_SETTING: they must stay always-on. config_seti still
-				   writes them (as 1), self-healing any stale 0 saved by an
-				   older build. */
+				IMPORT_SETTING(settings.view_bob, view_bob, atoi(value));
+                IMPORT_SETTING(settings.view_bob_intensity, view_bob_intensity, fmaxf(0.0F, fminf(10.0F, atof(value))));
+                IMPORT_SETTING(settings.land_dip, land_dip, atoi(value));
+                IMPORT_SETTING(settings.camera_shake, camera_shake, atoi(value));
                 IMPORT_SETTING(settings.textured_blocks, textured_blocks, atoi(value));
                 IMPORT_SETTING(settings.skin_spade, skin_spade, max(0, atoi(value)));
                 IMPORT_SETTING(settings.skin_grenade, skin_grenade, max(0, atoi(value)));

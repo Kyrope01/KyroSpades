@@ -35,6 +35,8 @@
 #include "list.h"
 #include "matrix.h"
 #include "texture.h"
+#include "player.h"
+extern float tactical_sprint_amount;
 #include "hud.h"
 #include "recorder.h"
 #include "http.h"
@@ -1155,6 +1157,7 @@ static void hud_healthbar_render(int health) {
 }
 
 static void hud_ammo_crosshair_render(float scalef) {
+        if(tactical_sprint_amount > 0.4f && players[local_player_id].input.keys.sprint) return;
         if(!settings.ammo_crosshair || camera_mode != CAMERAMODE_FPS
            || local_player_id < 0 || local_player_id >= PLAYERS_MAX
            || !players[local_player_id].alive

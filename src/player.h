@@ -103,6 +103,7 @@ struct player_intersection {
 bool player_intersection_exists(struct player_intersection* s);
 int player_intersection_choose(struct player_intersection* s, float* distance);
 
+extern float tactical_sprint_amount;
 extern struct Player {
 	char name[17];
 	struct Position {

@@ -435,12 +435,13 @@ void cameracontroller_fps_render() {
 	float rx = camera_rot_x, ry = camera_rot_y;
 
 	if(settings.view_bob && cam_bob_strength > 0.001F) {
-		/* Single-frequency quadrature ellipse (lat = cos, up = sin): one
-		   smooth circular sway at walking cadence. The previous version
-		   ran the vertical axis at 2x the phase frequency, which turns
-		   into visible high-frequency vibration at high frame rates. */
-		float lat = cosf(cam_bob_phase) * 0.045F * cam_bob_strength;
-		float up = sinf(cam_bob_phase) * 0.032F * cam_bob_strength;
+		/* TACTICAL BOB: doubled base magnitude (0.09 / 0.064) + intensity multiplier up to 10x */
+		float intensity = settings.view_bob_intensity / 100.0F; // 0-1000 -> 0.0x to 10.0x, default 200 = 2.0x
+		if(intensity < 0.001F) intensity = 0.0F;
+		float base_lat = 0.045F * 2.0F; // 2x original as requested
+		float base_up = 0.032F * 2.0F;
+		float lat = cosf(cam_bob_phase) * base_lat * cam_bob_strength * intensity;
+		float up = sinf(cam_bob_phase) * base_up * cam_bob_strength * intensity;
 		/* yaw-right vector: derivative of (sin rx, cos rx) is (cos rx, -sin rx) */
 		ex += cosf(rx) * lat;
 		ez -= sinf(rx) * lat;

@@ -2296,6 +2296,7 @@ int main(int argc, char** argv) {
         settings.raw_aim = 1;
         settings.crouch_instant = 1;
         settings.view_bob = 1;
+        settings.view_bob_intensity = 2.0F;
         settings.land_dip = 1;
         settings.camera_shake = 1;
         strcpy(settings.name, "DEV_CLIENT");

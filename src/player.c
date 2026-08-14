@@ -44,6 +44,7 @@
 #include <math.h>
 #include "cameracontroller.h"
 static float os_sprint_state=0, os_sprint_smooth=0, os_raise_state=1, os_last_time=0, os_aim_state=0, os_aim_smooth=0;
+float tactical_sprint_amount = 0.0f; // exposed for HUD crosshair hide
 /* First-person look sway state. Keeping this across render frames lets mouse
    deltas be filtered instead of snapping the arms once per input event. */
 static float os_sway_x=0, os_sway_y=0, os_last_rot_x=0, os_last_rot_y=0;
@@ -1491,8 +1492,8 @@ void player_render(struct Player* p, int id) {
 		if(mv < 0.02f) sprintTarget = 0;
 		os_sprint_state = sprintTarget;
 		float ss = os_sprint_state * os_sprint_state;
-		if(ss > os_sprint_smooth) os_sprint_smooth = os_lerp_smooth(os_sprint_smooth, ss, dt, 0.00005f);
-		else os_sprint_smooth = os_lerp_smooth(os_sprint_smooth, ss, dt, 0.0008f);
+		if(ss > os_sprint_smooth) os_sprint_smooth = os_lerp_smooth(os_sprint_smooth, ss, dt, 0.00025f); // faster enter for tactical
+		else os_sprint_smooth = os_lerp_smooth(os_sprint_smooth, ss, dt, 0.0006f); // slightly faster exit
 		float raiseTarget = 1.0f;
 		if(curTime - p->item_showup < 0.15f) { raiseTarget = (curTime - p->item_showup) / 0.15f; if(raiseTarget < 0) raiseTarget = 0; if(raiseTarget > 1) raiseTarget = 1; }
 		os_raise_state = os_lerp_smooth(os_raise_state, raiseTarget, dt, 0.0005f);
@@ -1540,10 +1541,36 @@ void player_render(struct Player* p, int id) {
 			swayY = os_sway_y;
 		}
 		float s = os_sprint_smooth;
-		if(p->held_item == TOOL_GUN) { matrix_rotate(matrix_model, s * -3.5f, 0.0f, 1.0f, 0.0f); matrix_rotate(matrix_model, s * 10.0f, 1.0f, 0.0f, 0.0f); matrix_rotate(matrix_model, s * -15.0f, 0.0f, 0.0f, 1.0f); matrix_translate(matrix_model, s * 0.08f, s * -0.028f, s * 0.06f); matrix_translate(matrix_model, sinf(curTime*14.0f)*0.007f*s, fabsf(sinf(curTime*14.0f))*-0.006f*s, 0); }
-		else if(p->held_item == TOOL_SPADE) { matrix_rotate(matrix_model, s * 32.0f, 0.0f, 1.0f, 0.0f); matrix_translate(matrix_model, s * 0.10f, s * -0.14f, s * -0.03f); }
-		else if(p->held_item == TOOL_BLOCK) { matrix_rotate(matrix_model, s * -9.0f, 0.0f, 0.0f, 1.0f); matrix_translate(matrix_model, s * 0.05f, s * -0.12f, s * -0.02f); }
-		else { matrix_rotate(matrix_model, s * -9.0f, 0.0f, 0.0f, 1.0f); matrix_translate(matrix_model, s * 0.05f, s * -0.08f, s * -0.02f); }
+		// expose to HUD for tactical sprint crosshair hide
+		if(p == &players[local_player_id]) tactical_sprint_amount = s;
+		// --- TACTICAL SPRINT (Option 2) ---
+		// Instead of tiny nudge, we lower weapon completely out of view to bottom-right
+		if(p->held_item == TOOL_GUN) {
+			// Point gun down and to the side, like carrying at hip
+			matrix_rotate(matrix_model, s * -22.0f, 0.0f, 1.0f, 0.0f);
+			matrix_rotate(matrix_model, s * 68.0f, 1.0f, 0.0f, 0.0f);
+			matrix_rotate(matrix_model, s * -18.0f, 0.0f, 0.0f, 1.0f);
+			matrix_translate(matrix_model, s * 0.38f, s * -0.42f, s * -0.18f);
+			// heavy bob while sprinting - feels like running
+			matrix_translate(matrix_model, sinf(curTime*9.5f)*0.018f*s, fabsf(sinf(curTime*9.5f*0.7f))*-0.015f*s + cosf(curTime*9.5f)*0.008f*s, sinf(curTime*9.5f*0.5f)*0.012f*s);
+			matrix_rotate(matrix_model, sinf(curTime*9.5f)*2.0f*s, 0.0f, 0.0f, 1.0f);
+		}
+		else if(p->held_item == TOOL_SPADE) {
+			matrix_rotate(matrix_model, s * 75.0f, 1.0f, 0.0f, 0.0f);
+			matrix_rotate(matrix_model, s * 15.0f, 0.0f, 1.0f, 0.0f);
+			matrix_translate(matrix_model, s * 0.22f, s * -0.38f, s * -0.12f);
+			matrix_translate(matrix_model, sinf(curTime*10.0f)*0.015f*s, 0, 0);
+		}
+		else if(p->held_item == TOOL_BLOCK) {
+			matrix_rotate(matrix_model, s * 55.0f, 1.0f, 0.0f, 0.0f);
+			matrix_rotate(matrix_model, s * -20.0f, 0.0f, 0.0f, 1.0f);
+			matrix_translate(matrix_model, s * 0.25f, s * -0.32f, s * -0.08f);
+			matrix_translate(matrix_model, sinf(curTime*10.0f)*0.012f*s, cosf(curTime*10.0f)*0.008f*s, 0);
+		}
+		else {
+			matrix_rotate(matrix_model, s * 55.0f, 1.0f, 0.0f, 0.0f);
+			matrix_translate(matrix_model, s * 0.20f, s * -0.28f, s * -0.08f);
+		}
 		float putdown = 1.0f - os_raise_state;
 		if(putdown > 0.001f) { matrix_rotate(matrix_model, putdown * -35.0f, 0.0f, 0.0f, 1.0f); matrix_translate(matrix_model, putdown * 0.05f, putdown * -0.12f, putdown * 0.04f); }
 		if(os_aim_smooth > 0.001f && p->held_item == TOOL_GUN) { float ads = os_aim_smooth; matrix_translate(matrix_model, -0.045f*ads, 0.013f*ads, 0.045f*ads); }
