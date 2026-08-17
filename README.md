@@ -225,30 +225,8 @@ To add custom wallpapers, drop any `.png` images you like into the `png/bg/`
 directory of your client, and the client will cycle through them randomly each
 time the game is started.
 
-## Discord Rich Presence (build setup)
-Discord Rich Presence is compiled in by default on desktop builds
-(`-DENABLE_RPC=ON`; forced off on Android/iOS since the Discord mobile app
-has no local presence socket). It is implemented in plain C over Discord's
-local IPC (`src/discord_ipc.c`) — no external SDK or library required — and
-is a silent no-op when Discord isn't running.
-
-For it to actually show up, builds need a Discord application ID:
-
-1. Create an application (e.g. named `KyroSpades` — this name is what Discord
-   displays as the activity) at
-   [discord.com/developers/applications](https://discord.com/developers/applications).
-2. Copy its **Application ID** (a number, not a secret) and configure the
-   build with `-DDISCORD_APP_ID=<id>` — or set it as the default of the
-   `DISCORD_APP_ID` cache variable in the top-level `CMakeLists.txt`.
-3. Under the app's **Rich Presence → Art Assets**, upload the images the
-   client references: a large artwork named `pic03` and a small icon named
-   `logo` (the activity works without them, just without pictures).
-
-Without an application ID the client builds fine and simply stays silent.
-
-<p align=center>
-The essential features are complete and have been fully implemented, but active
-development is ongoing, and more features are currently in the works.
+## TExtures:
+There is a folder, png/textures; in that folder you can put many square images, when there are images in that folder and textured blocks are enabled textures from the ones you added are used based on average colour.
 <br>
 Enjoy the enhanced Ace of Spades experience!
 <br>
