@@ -22,6 +22,7 @@
 #include <dirent.h>
 #include <time.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 
@@ -581,6 +582,18 @@ static int texture_next_pow2(int v) {
         return p;
 }
 
+/* Delete a rejected custom texture from png/textures/. Only attempted where the
+   filesystem is actually writable (desktop builds); on Android the textures
+   live inside the read-only APK assets, so deletion is a no-op there. */
+#if !defined(USE_ANDROID_FILE)
+static void texture_custom_remove(const char* path) {
+        if(remove(path) != 0)
+                log_debug("Custom block texture: could not delete %s (read-only / in use)", path);
+}
+#else
+static void texture_custom_remove(const char* path) { (void)path; }
+#endif
+
 void texture_load_custom_blocks(void) {
         /* Make sure the folder exists so users have somewhere to drop files. */
         file_dir_create("png/textures");
@@ -620,9 +633,29 @@ void texture_load_custom_blocks(void) {
                         continue;
                 }
                 if(w != h) {
-                        log_warn("Custom block texture: %s is %ux%u, not square -- skipped (textures must be square)",
+                        log_warn("Custom block texture: %s is %ux%u, not square -- removed (textures must be square)",
                                  path, w, h);
                         free(px);
+                        texture_custom_remove(path);
+                        free(names.names[k]);
+                        continue;
+                }
+
+                /* Reject images that contain any fully-transparent pixel; blocks
+                   are opaque, so a transparent texel would punch a hole in a
+                   block face. Such files are deleted automatically. */
+                int has_transparent = 0;
+                unsigned int ncheck = w * h;
+                for(unsigned int p = 0; p < ncheck; p++) {
+                        if(px[p * 4 + 3] == 0) {
+                                has_transparent = 1;
+                                break;
+                        }
+                }
+                if(has_transparent) {
+                        log_warn("Custom block texture: %s has fully-transparent pixels -- removed", path);
+                        free(px);
+                        texture_custom_remove(path);
                         free(names.names[k]);
                         continue;
                 }

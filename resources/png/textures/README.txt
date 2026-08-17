@@ -7,8 +7,11 @@ every block with the PNG whose overall average colour is closest to that
 block's colour, instead of the built-in block atlas.
 
 Requirements / notes:
-  - Each PNG must be SQUARE (width == height). Non-square files are skipped
-    (a warning is logged) and have no effect.
+  - Each PNG must be SQUARE (width == height). Non-square files are
+    automatically DELETED from this folder at startup (a warning is logged).
+  - PNGs that contain ANY fully-transparent pixel (alpha == 0) are also
+    automatically DELETED, because block faces are opaque and a transparent
+    texel would punch a hole through the block.
   - You can put as many PNGs here as you like; they are automatically packed
     into one atlas at load time.
   - The matching is by the AVERAGE COLOUR of the whole image, so give each
