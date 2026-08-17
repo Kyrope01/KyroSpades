@@ -225,8 +225,9 @@ To add custom wallpapers, drop any `.png` images you like into the `png/bg/`
 directory of your client, and the client will cycle through them randomly each
 time the game is started.
 
-## TExtures:
+## Textures:
 There is a folder, png/textures; in that folder you can put many square images, when there are images in that folder and textured blocks are enabled textures from the ones you added are used based on average colour.
+
 <br>
 Enjoy the enhanced Ace of Spades experience!
 <br>
