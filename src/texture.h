@@ -36,6 +36,25 @@ extern struct texture texture_dummy;
 extern struct texture texture_health;
 extern struct texture texture_block;
 extern struct texture texture_blocks;
+
+/* Custom block textures loaded from png/textures/ (Textured Blocks feature).
+   When PNGs are present there, textured blocks use those images instead of the
+   built-in atlas, choosing for each block the texture whose overall average
+   colour is closest to the block's colour. All custom textures are packed into
+   a single square atlas of CUSTOM_BLOCK_TILE x CUSTOM_BLOCK_TILE pixels tiles. */
+#define CUSTOM_BLOCK_TILE 16
+extern struct texture texture_blocks_custom;
+extern int texture_blocks_custom_loaded;
+
+void texture_load_custom_blocks(void);
+/* Returns the atlas texture that should be bound for textured blocks:
+   the custom one when available, otherwise the built-in default. */
+struct texture* texture_blocks_atlas(void);
+/* Maps a block's base colour to the tile index in the custom atlas.
+   Only meaningful when texture_blocks_custom_loaded is set. */
+int texture_blocks_custom_tile(uint32_t color);
+/* Tiles per row/column in the custom atlas (square grid). */
+int texture_blocks_custom_grid(void);
 extern struct texture texture_grenade;
 extern struct texture texture_ammo_semi;
 extern struct texture texture_ammo_smg;

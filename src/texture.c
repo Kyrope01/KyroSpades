@@ -22,6 +22,7 @@
 #include <dirent.h>
 #include <time.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 
@@ -44,6 +45,18 @@ struct texture texture_dummy;
 struct texture texture_health;
 struct texture texture_block;
 struct texture texture_blocks;
+struct texture texture_blocks_custom;
+int texture_blocks_custom_loaded = 0;
+
+/* Colour lookup table granularity for custom block textures. Each axis of the
+   8-bit RGB colour space is quantised into CUSTOM_LUT_DIM steps; the table maps
+   every quantised colour to the nearest custom tile. 32 keeps the table small
+   (32^3 = 32768 ints) while staying accurate enough for average-colour matching. */
+#define CUSTOM_LUT_DIM 32
+static int* g_custom_lut = NULL;       /* dim^3 tile indices */
+static int g_custom_lut_dim = CUSTOM_LUT_DIM;
+static int g_custom_tile_count = 0;    /* number of valid textures packed */
+static int g_custom_grid = 0;          /* atlas is grid x grid tiles */
 struct texture texture_grenade;
 struct texture texture_ammo_semi;
 struct texture texture_ammo_smg;
@@ -526,6 +539,272 @@ static char* texture_get_random_bg() {
         return bg_path;
 }
 
+/* ── Custom block textures (png/textures/) ────────────────────────────────
+   Textured Blocks feature: when png/textures/ contains PNGs, every block is
+   textured with the PNG whose average colour is closest to the block colour.
+   All PNGs are packed into one square atlas (CUSTOM_BLOCK_TILE px tiles) and a
+   lookup table maps a quantised block colour straight to the matching tile. */
+
+struct custom_tex_name {
+        char** names;
+        int count, cap;
+};
+
+static void texture_custom_collect(const char* name, void* user) {
+        struct custom_tex_name* l = (struct custom_tex_name*)user;
+        size_t len = strlen(name);
+        if(len <= 4)
+                return;
+        /* case-insensitive .png check */
+        const char* ext = name + len - 4;
+        if(strcmp(ext, ".png") != 0 && strcmp(ext, ".PNG") != 0)
+                return;
+        if(l->count == l->cap) {
+                l->cap = l->cap ? l->cap * 2 : 16;
+                l->names = realloc(l->names, l->cap * sizeof(char*));
+                CHECK_ALLOCATION_ERROR(l->names)
+        }
+        l->names[l->count] = malloc(len + 1);
+        CHECK_ALLOCATION_ERROR(l->names[l->count])
+        memcpy(l->names[l->count++], name, len + 1);
+}
+
+struct custom_tex {
+        unsigned char* pixels; /* decoded RGBA, w x h */
+        int w, h;
+        int ar, ag, ab;        /* average colour (0..255) */
+};
+
+static int texture_next_pow2(int v) {
+        int p = 1;
+        while(p < v)
+                p <<= 1;
+        return p;
+}
+
+/* Delete a rejected custom texture from png/textures/. Only attempted where the
+   filesystem is actually writable (desktop builds); on Android the textures
+   live inside the read-only APK assets, so deletion is a no-op there. */
+#if !defined(USE_ANDROID_FILE)
+static void texture_custom_remove(const char* path) {
+        if(remove(path) != 0)
+                log_debug("Custom block texture: could not delete %s (read-only / in use)", path);
+}
+#else
+static void texture_custom_remove(const char* path) { (void)path; }
+#endif
+
+void texture_load_custom_blocks(void) {
+        /* Make sure the folder exists so users have somewhere to drop files. */
+        file_dir_create("png/textures");
+
+        struct custom_tex_name names = {0};
+        if(file_dir_list("png/textures", texture_custom_collect, &names) <= 0 || names.count == 0) {
+                for(int k = 0; k < names.count; k++)
+                        free(names.names[k]);
+                free(names.names);
+                log_info("Custom block textures: no PNGs in png/textures/, using default atlas");
+                return;
+        }
+
+        /* Decode every PNG, keep only square ones, and compute average colour. */
+        struct custom_tex* texs = calloc((size_t)names.count, sizeof(struct custom_tex));
+        CHECK_ALLOCATION_ERROR(texs)
+        int valid = 0;
+
+        for(int k = 0; k < names.count; k++) {
+                char path[1024];
+                snprintf(path, sizeof(path), "png/textures/%s", names.names[k]);
+
+                unsigned char* data = file_load(path);
+                if(!data) {
+                        log_warn("Custom block texture: could not read %s", path);
+                        free(names.names[k]);
+                        continue;
+                }
+                unsigned char* px;
+                unsigned int w, h;
+                unsigned int sz = file_size(path);
+                unsigned int err = lodepng_decode32(&px, &w, &h, data, sz);
+                free(data);
+                if(err) {
+                        log_warn("Custom block texture: failed to decode %s (%u: %s)", path, err, lodepng_error_text(err));
+                        free(names.names[k]);
+                        continue;
+                }
+                if(w != h) {
+                        log_warn("Custom block texture: %s is %ux%u, not square -- removed (textures must be square)",
+                                 path, w, h);
+                        free(px);
+                        texture_custom_remove(path);
+                        free(names.names[k]);
+                        continue;
+                }
+
+                /* Reject images that contain any fully-transparent pixel; blocks
+                   are opaque, so a transparent texel would punch a hole in a
+                   block face. Such files are deleted automatically. */
+                int has_transparent = 0;
+                unsigned int ncheck = w * h;
+                for(unsigned int p = 0; p < ncheck; p++) {
+                        if(px[p * 4 + 3] == 0) {
+                                has_transparent = 1;
+                                break;
+                        }
+                }
+                if(has_transparent) {
+                        log_warn("Custom block texture: %s has fully-transparent pixels -- removed", path);
+                        free(px);
+                        texture_custom_remove(path);
+                        free(names.names[k]);
+                        continue;
+                }
+
+                /* Average colour over the whole image (all pixels, RGB only). */
+                unsigned long long sr = 0, sg = 0, sb = 0;
+                unsigned int n = w * h;
+                for(unsigned int p = 0; p < n; p++) {
+                        sr += px[p * 4 + 0];
+                        sg += px[p * 4 + 1];
+                        sb += px[p * 4 + 2];
+                }
+                int idx = valid++;
+                texs[idx].pixels = px;
+                texs[idx].w = (int)w;
+                texs[idx].h = (int)h;
+                texs[idx].ar = (int)(sr / n);
+                texs[idx].ag = (int)(sg / n);
+                texs[idx].ab = (int)(sb / n);
+
+                free(names.names[k]);
+        }
+        free(names.names);
+
+        if(valid == 0) {
+                free(texs);
+                log_info("Custom block textures: no usable square PNGs in png/textures/, using default atlas");
+                return;
+        }
+
+        /* Build a square atlas: grid x grid tiles, each CUSTOM_BLOCK_TILE px.
+           grid is rounded up to a power of two so the whole atlas stays a
+           power-of-two texture (safe on every GL backend, no resampling). */
+        int grid = texture_next_pow2((int)ceil(sqrt((double)valid)));
+        int atlas_w = grid * CUSTOM_BLOCK_TILE;
+        int atlas_h = grid * CUSTOM_BLOCK_TILE;
+        unsigned char* atlas = calloc((size_t)atlas_w * (size_t)atlas_h, 4);
+        CHECK_ALLOCATION_ERROR(atlas)
+
+        /* Keep the average colours around for the lookup table (texs' decoded
+           pixel buffers are freed as we pack the atlas). */
+        int* texs_avg = malloc((size_t)valid * 3 * sizeof(int));
+        CHECK_ALLOCATION_ERROR(texs_avg)
+        for(int i = 0; i < valid; i++) {
+                texs_avg[i * 3 + 0] = texs[i].ar;
+                texs_avg[i * 3 + 1] = texs[i].ag;
+                texs_avg[i * 3 + 2] = texs[i].ab;
+        }
+
+        for(int i = 0; i < valid; i++) {
+                int col = i % grid;
+                int row = i / grid;
+                int ox = col * CUSTOM_BLOCK_TILE;
+                int oy = row * CUSTOM_BLOCK_TILE;
+                struct custom_tex* t = texs + i;
+                int sw = t->w, sh = t->h;
+                /* Nearest-neighbour resample (up or down) into the 16x16 slot.
+                   Alpha is forced to 255: blocks are opaque. */
+                for(int y = 0; y < CUSTOM_BLOCK_TILE; y++) {
+                        int sy = (int)((double)y / CUSTOM_BLOCK_TILE * sh);
+                        if(sy >= sh) sy = sh - 1;
+                        for(int x = 0; x < CUSTOM_BLOCK_TILE; x++) {
+                                int sx = (int)((double)x / CUSTOM_BLOCK_TILE * sw);
+                                if(sx >= sw) sx = sw - 1;
+                                unsigned char* src = t->pixels + (size_t)(sy * sw + sx) * 4;
+                                unsigned char* dst = atlas + (size_t)((oy + y) * atlas_w + (ox + x)) * 4;
+                                dst[0] = src[0];
+                                dst[1] = src[1];
+                                dst[2] = src[2];
+                                dst[3] = 255;
+                        }
+                }
+                free(t->pixels);
+        }
+        free(texs);
+
+        /* Upload the atlas directly (no power-of-two resample, which would
+           bleed neighbouring tiles together). Match the default atlas' filtering. */
+        texture_blocks_custom.width = atlas_w;
+        texture_blocks_custom.height = atlas_h;
+        texture_blocks_custom.pixels = atlas;
+        glGenTextures(1, &texture_blocks_custom.texture_id);
+        glBindTexture(GL_TEXTURE_2D, texture_blocks_custom.texture_id);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, atlas_w, atlas_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, atlas);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindTexture(GL_TEXTURE_2D, 0);
+
+        g_custom_grid = grid;
+        g_custom_tile_count = valid;
+
+        /* Build the colour -> tile lookup table once, so per-block selection
+           during chunk meshing is O(1). Each entry holds the tile whose average
+           colour is closest (Euclidean RGB distance) to that quantised colour. */
+        int dim = CUSTOM_LUT_DIM;
+        int step = 256 / dim;
+        size_t lut_size = (size_t)dim * dim * dim;
+        int* lut = malloc(lut_size * sizeof(int));
+        CHECK_ALLOCATION_ERROR(lut)
+        for(int bi = 0; bi < dim; bi++) {
+                for(int gi = 0; gi < dim; gi++) {
+                        for(int ri = 0; ri < dim; ri++) {
+                                int cr = ri * step, cg = gi * step, cb = bi * step;
+                                int best = 0;
+                                int best_d = 0x7FFFFFFF;
+                                for(int t = 0; t < valid; t++) {
+                                        int dr = cr - texs_avg[t * 3 + 0];
+                                        int dg = cg - texs_avg[t * 3 + 1];
+                                        int db = cb - texs_avg[t * 3 + 2];
+                                        int d = dr * dr + dg * dg + db * db;
+                                        if(d < best_d) {
+                                                best_d = d;
+                                                best = t;
+                                        }
+                                }
+                                lut[(size_t)((bi * dim + gi) * dim + ri)] = best;
+                        }
+                }
+        }
+        free(texs_avg);
+        g_custom_lut = lut;
+        g_custom_lut_dim = dim;
+
+        texture_blocks_custom_loaded = 1;
+        log_info("Custom block textures: loaded %i PNG(s) into a %ix%i atlas (%ix%i tiles)",
+                 valid, atlas_w, atlas_h, grid, grid);
+}
+
+struct texture* texture_blocks_atlas(void) {
+        return texture_blocks_custom_loaded ? &texture_blocks_custom : &texture_blocks;
+}
+
+int texture_blocks_custom_grid(void) {
+        return g_custom_grid;
+}
+
+int texture_blocks_custom_tile(uint32_t color) {
+        if(!texture_blocks_custom_loaded || !g_custom_lut)
+                return 0;
+        int dim = g_custom_lut_dim;
+        int step = 256 / dim;
+        int ri = min(red(color) / step, dim - 1);
+        int gi = min(green(color) / step, dim - 1);
+        int bi = min(blue(color) / step, dim - 1);
+        return g_custom_lut[(size_t)((bi * dim + gi) * dim + ri)];
+}
+
 void texture_init() {
         texture_create(&texture_splash, "png/splash.png");
         texture_create(&texture_splash_icon, "png/splash_icon.png");
@@ -612,4 +891,8 @@ void texture_init() {
         texture_filter(&texture_gradient, TEXTURE_FILTER_LINEAR);
 
         texture_create_buffer(&texture_dummy, 1, 1, (unsigned char[]) {0, 0, 0, 0}, 1);
+
+        /* Textured Blocks: load any user PNGs from png/textures/ into a custom
+           atlas. When present they replace the built-in block atlas. */
+        texture_load_custom_blocks();
 }

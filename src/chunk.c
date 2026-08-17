@@ -131,7 +131,7 @@ void chunk_render(struct chunk_render_call* c) {
 #if !defined(OPENGL_ES)
                         glEnable(GL_TEXTURE_2D);
 #endif
-                        glBindTexture(GL_TEXTURE_2D, texture_blocks.texture_id);
+                        glBindTexture(GL_TEXTURE_2D, texture_blocks_atlas()->texture_id);
                 }
 
                 glx_displaylist_draw(&c->chunk->display_list, GLX_DISPLAYLIST_NORMAL);
@@ -883,23 +883,75 @@ void chunk_generate_textured(struct libvxl_chunk_copy* blocks, struct tesselator
                         continue;
 
                 uint32_t col = blk->color;
-                int r = blue(col);
-                int g = green(col);
-                int b = red(col);
+                int br = blue(col);
+                int bg = green(col);
+                int bb = red(col);
 
+                float shade;
                 {
-                        float shade = solid_sunblock(blocks, x, y, z);
+                        shade = solid_sunblock(blocks, x, y, z);
                         if(settings.shadow_quality) {
                                 float dir_shade = map_sun_shadow(x, y, z, 32);
                                 float sf = (1.0F - settings.shadow_intensity) + settings.shadow_intensity * dir_shade;
                                 shade *= sf;
                         }
-                        r = (int)(r * shade);
-                        g = (int)(g * shade);
-                        b = (int)(b * shade);
                 }
 
-                {
+                if(texture_blocks_custom_loaded) {
+                        /* Custom textures: choose the tile whose average colour is
+                           closest to the block's colour, then shade it with a
+                           grayscale brightness so the texture's own colours show
+                           (lit faces bright, shadowed faces dark). */
+                        int tile = texture_blocks_custom_tile(col);
+                        int grid = texture_blocks_custom_grid();
+                        float inv = 1.0F / (float)(grid * CUSTOM_BLOCK_TILE);
+                        int ct = tile % grid;
+                        int rt = tile / grid;
+                        float u0 = (float)(ct * CUSTOM_BLOCK_TILE) * inv;
+                        float v0 = (float)(rt * CUSTOM_BLOCK_TILE) * inv;
+                        float u1 = (float)(ct * CUSTOM_BLOCK_TILE + CUSTOM_BLOCK_TILE) * inv;
+                        float v1 = (float)(rt * CUSTOM_BLOCK_TILE + CUSTOM_BLOCK_TILE) * inv;
+
+                        if(solid_array_isair(blocks, x, y, z - 1)) {
+                                int lum = (int)(255.0F * shade * 0.875F);
+                                tesselator_set_color(tess, rgba(lum, lum, lum, 255));
+                                emit_textured_face(tess, CUBE_FACE_Z_N, x, y, z, u0, v0, u1, v1);
+                        }
+
+                        if(solid_array_isair(blocks, x, y, z + 1)) {
+                                int lum = (int)(255.0F * shade * 0.625F);
+                                tesselator_set_color(tess, rgba(lum, lum, lum, 255));
+                                emit_textured_face(tess, CUBE_FACE_Z_P, x, y, z, u0, v0, u1, v1);
+                        }
+
+                        if(solid_array_isair(blocks, x - 1, y, z)) {
+                                int lum = (int)(255.0F * shade * 0.75F);
+                                tesselator_set_color(tess, rgba(lum, lum, lum, 255));
+                                emit_textured_face(tess, CUBE_FACE_X_N, x, y, z, u0, v0, u1, v1);
+                        }
+
+                        if(solid_array_isair(blocks, x + 1, y, z)) {
+                                int lum = (int)(255.0F * shade * 0.75F);
+                                tesselator_set_color(tess, rgba(lum, lum, lum, 255));
+                                emit_textured_face(tess, CUBE_FACE_X_P, x, y, z, u0, v0, u1, v1);
+                        }
+
+                        if(y == map_size_y - 1 || solid_array_isair(blocks, x, y + 1, z)) {
+                                int lum = (int)(255.0F * shade * 1.0F);
+                                tesselator_set_color(tess, rgba(lum, lum, lum, 255));
+                                emit_textured_face(tess, CUBE_FACE_Y_P, x, y, z, u0, v0, u1, v1);
+                        }
+
+                        if(y > 0 && solid_array_isair(blocks, x, y - 1, z)) {
+                                int lum = (int)(255.0F * shade * 0.5F);
+                                tesselator_set_color(tess, rgba(lum, lum, lum, 255));
+                                emit_textured_face(tess, CUBE_FACE_Y_N, x, y, z, u0, v0, u1, v1);
+                        }
+                } else {
+                        int r = (int)(br * shade);
+                        int g = (int)(bg * shade);
+                        int b = (int)(bb * shade);
+
                         int tile_x = (r / 64) + ((b / 64 == 1 || b / 64 == 3) ? 4 : 0);
                         int tile_y = (g / 64) + ((b / 64 == 2 || b / 64 == 3) ? 4 : 0);
                         tile_x = min(tile_x, 7);
