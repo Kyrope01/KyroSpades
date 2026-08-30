@@ -905,7 +905,9 @@ void config_reload() {
         strcpy(config_file_backend, "glfw");
         memset(config_key_named, 0, sizeof(config_key_named));
 
-        char* s = file_load("config.ini");
+	/* file_load() exits when the file is missing; a fresh install has no
+	   config.ini yet, so probe with file_size() first (defaults branch). */
+	char* s = (file_size("config.ini") > 0) ? file_load("config.ini") : NULL;
         if(s) {
                 log_debug("Loading config.ini (%zu bytes)", strlen(s));
                 ini_parse_string(s, config_read_key, NULL);

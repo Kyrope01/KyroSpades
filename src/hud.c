@@ -4923,6 +4923,20 @@ static void hud_editor_frame_begin(float scalex, float scalef) {
         /* Keep the OS cursor visible even if something else toggled it. */
         window_mousemode(WINDOW_CURSOR_ENABLED);
 
+        /* Keep the panel reachable after a window resize while editing. */
+        {
+                float W = (float)settings.window_width;
+                float H = (float)settings.window_height;
+                if(hud_edit_panel_x > W - 40.F)
+                        hud_edit_panel_x = max(0.F, W - 40.F);
+                if(hud_edit_panel_y > H - 20.F)
+                        hud_edit_panel_y = max(0.F, H - 20.F);
+                if(hud_edit_panel_x < 0.F)
+                        hud_edit_panel_x = 0.F;
+                if(hud_edit_panel_y < 0.F)
+                        hud_edit_panel_y = 0.F;
+        }
+
         /* Refresh sample message timers so preview chat/killfeed never expires
            (disconnected sessions only — live data rules when connected). */
         if(!network_connected) {
@@ -4985,8 +4999,13 @@ static void hud_editor_frame_begin(float scalex, float scalef) {
 static int ed_textbox(mu_Context* ctx, char* buf, int bufsz) {
         mu_Id id = mu_get_id(ctx, &buf, sizeof(buf));
         int res = mu_textbox(ctx, buf, bufsz);
-        if(ctx->focus == id)
+        if(ctx->focus == id) {
                 hud_edit_text_focus = 1;
+                /* Route through the shared IME hook so touch devices pop the
+                   soft keyboard for the X/Y fraction fields (hud_ime_update
+                   is called by the 2D pass right after mu_end). */
+                hud_ime_focus_frame = 1;
+        }
         return res;
 }
 
@@ -5005,8 +5024,13 @@ static void hud_editor_panel(mu_Context* ctx) {
         int row3col[3] = {w3, w3, w3};
         int anchor_col[3] = {22, 22, 22};
 
-        if(!mu_begin_window(ctx, "HUD Editor", mu_rect((int)hud_edit_panel_x, (int)hud_edit_panel_y,
-                                                       hud_edit_panel_w, hud_edit_panel_h)))
+        /* MU_OPT_NOCLOSE: the default close (X) button would hide the panel
+           for the rest of the session — the editor is exited via ESC / the
+           buttons, never by dismissing its own panel. */
+        if(!mu_begin_window_ex(ctx, "HUD Editor",
+                               mu_rect((int)hud_edit_panel_x, (int)hud_edit_panel_y,
+                                       hud_edit_panel_w, hud_edit_panel_h),
+                               MU_OPT_NOCLOSE))
                 return;
 
         mu_Container* cnt = mu_get_current_container(ctx);
@@ -5192,8 +5216,9 @@ static void hud_editor_panel(mu_Context* ctx) {
               recently focused window on top) --------------------------------- */
         if(hud_edit_popup) {
                 float pw = (float)settings.window_width, ph = (float)settings.window_height;
-                if(mu_begin_window(ctx, "Save changes?",
-                                   mu_rect((int)(pw / 2.F - 120.F), (int)(ph / 3.F), 240, 118))) {
+                if(mu_begin_window_ex(ctx, "Save changes?",
+                                      mu_rect((int)(pw / 2.F - 120.F), (int)(ph / 3.F), 240, 118),
+                                      MU_OPT_NOCLOSE)) {
                         mu_layout_row(ctx, 1, (int[]) {-1}, 0);
                         mu_label(ctx, hud_layout_is_dirty() ? "The layout has unsaved changes."
                                                             : "No unsaved changes.");

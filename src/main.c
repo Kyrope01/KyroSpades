@@ -2059,7 +2059,8 @@ void keys(struct window_instance* window, int key, int scancode, int action, int
                 sound_create(SOUND_LOCAL, &sound_screenshot, 0.0F, 0.0F, 0.0F);
         }
 
-        if(key == WINDOW_KEY_SAVE_MAP && action == WINDOW_PRESS) {
+	if(key == WINDOW_KEY_SAVE_MAP && action == WINDOW_PRESS
+	   && !(hud_editing_active() && !network_connected)) { /* no world to save in editor preview */
                 time_t save_time;
                 time(&save_time);
                 char save_name[128];

@@ -368,7 +368,13 @@ void hud_layout_init(void) {
 	memset(LV, 0, sizeof(LV));
 	memcpy(LS_saved, LS, sizeof(LS));   /* baseline for dirty tracking */
 
-	char* text = (char*)file_load(LAYOUT_FILE);
+	/* NOTE: file_load() hard-exits when a file is missing (it is meant for
+	   assets that MUST exist). Optional files go through file_size() first
+	   (same idiom as pinned_servers.txt / sounds): missing or empty file =>
+	   natural defaults, never a crash on first run. */
+	char* text = NULL;
+	if(file_size(LAYOUT_FILE) > 0)
+		text = (char*)file_load(LAYOUT_FILE);
 	if(!text) {
 		log_info("hud_layout: no %s, defaults in use", LAYOUT_FILE);
 		layout_ready = 1;
