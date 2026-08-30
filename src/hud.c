@@ -1999,8 +1999,9 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                 int is_local = (camera_mode == CAMERAMODE_FPS) || (cameracontroller_bodyview_player == local_player_id);
                 int local_id = (camera_mode == CAMERAMODE_FPS) ? local_player_id : cameracontroller_bodyview_player;
 
-                if(camera_mode == CAMERAMODE_BODYVIEW
-                   || (camera_mode == CAMERAMODE_SPECTATOR && cameracontroller_bodyview_mode)) {
+                if((camera_mode == CAMERAMODE_BODYVIEW
+                    || (camera_mode == CAMERAMODE_SPECTATOR && cameracontroller_bodyview_mode))
+                   && hud_layout_visible(HUD_EL_SPECTATE)) {
                         /* HUD EDITOR: spectator-label group base (name site top). */
                         float sp_x = settings.window_width / 2.0F, sp_y = 26.F;
                         hud_layout_origin(HUD_EL_SPECTATE, &sp_x, &sp_y);
@@ -2056,7 +2057,8 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                 if(camera_mode == CAMERAMODE_SPECTATOR && !cameracontroller_bodyview_mode
                    && player_intersection_type >= 0 && player_intersection_player >= 0
                    && player_intersection_player < PLAYERS_MAX
-                   && players[player_intersection_player].team != TEAM_SPECTATOR) {
+                   && players[player_intersection_player].team != TEAM_SPECTATOR
+                   && hud_layout_visible(HUD_EL_SPECTATE)) {
                         float hv_sp_x = settings.window_width / 2.0F, hv_sp_y = 26.F;
                         hud_layout_origin(HUD_EL_SPECTATE, &hv_sp_x, &hv_sp_y);
                         float hv_dx = hv_sp_x - settings.window_width / 2.0F, hv_dy = hv_sp_y - 26.F;
@@ -2611,7 +2613,8 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
 
                 if(gamestate.gamemode_type == GAMEMODE_TC && gamestate.progressbar.tent < gamestate.gamemode.tc.territory_count
                    && gamestate.gamemode.tc.territory[gamestate.progressbar.tent].team
-                           != gamestate.progressbar.team_capturing) {
+                           != gamestate.progressbar.team_capturing
+                   && hud_layout_visible(HUD_EL_TCBAR)) {
                         float p = max(min(gamestate.progressbar.progress
                                                                   + 0.05F * gamestate.progressbar.rate * (window_time() - gamestate.progressbar.update),
                                                           1.0F),
@@ -4647,6 +4650,9 @@ static void hud_editor_force_close(void) {
 }
 
 int hud_editing_mu_panel_hit(void) {
+        /* Menus have no editor, so microui owns every click there. */
+        if(!hud_edit_active)
+                return 1;
         return hud_edit_mouse_for_panel;
 }
 
@@ -5714,7 +5720,7 @@ void hud_common_sidebar(mu_Context* ctx, float scalex, float scaley) {
         hud_nav_button(ctx, &hud_settings, "Settings");
         hud_nav_button(ctx, &hud_controls, "Controls");
         hud_nav_button(ctx, &hud_skins, "Skins");
-        if(mu_button_ex(ctx, hud_edit_active ? "HUD Editor \xe2\x97\x8f" : "HUD Editor", 0, 0))
+        if(mu_button_ex(ctx, hud_edit_active ? "HUD Editor \xe2\x97\x8f" : "HUD Editor", 0, MU_OPT_ALIGNCENTER))
                 hud_editor_open();
         hud_nav_button(ctx, &hud_macros, "Macros");
         hud_nav_button(ctx, &hud_recording, "Video Recording");
@@ -5843,7 +5849,7 @@ static void hud_common_nav(mu_Context* ctx, mu_Rect* frame, float scalex, float 
         hud_nav_button(ctx, &hud_settings, "Settings");
         hud_nav_button(ctx, &hud_controls, "Controls");
         hud_nav_button(ctx, &hud_skins, "Skins");
-        if(mu_button_ex(ctx, hud_edit_active ? "HUD Editor \xe2\x97\x8f" : "HUD Editor", 0, 0))
+        if(mu_button_ex(ctx, hud_edit_active ? "HUD Editor \xe2\x97\x8f" : "HUD Editor", 0, MU_OPT_ALIGNCENTER))
                 hud_editor_open();
         if(!network_connected)
                 hud_nav_button(ctx, &hud_demolist, "Demos");

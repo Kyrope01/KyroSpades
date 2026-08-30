@@ -1897,7 +1897,9 @@ static int mu_key_translate(int key) {
 void text_input(struct window_instance* window, const char* utf8) {
         if(!utf8 || !utf8[0]) return;
 
-        if(hud_active->ctx)
+        /* In-game context is live only while the editor is active; during
+           gameplay chat the keystrokes would pile up unread. */
+        if(hud_active->ctx && (hud_editing_active() || hud_active != &hud_ingame))
                 mu_input_text(hud_active->ctx, utf8);
 
         /* Chatlog search has its own per-frame text buffer; route to it
@@ -1952,7 +1954,11 @@ void text_input(struct window_instance* window, const char* utf8) {
 }
 
 void keys(struct window_instance* window, int key, int scancode, int action, int mods) {
-        if(hud_active->ctx && hud_editing_active()) {
+        /* Microui input is forwarded whenever the active hud owns a live
+           context: menu screens always, and the in-game HUD only while the
+           HUD editor is active (its context otherwise lies dormant so the
+           gameplay path accumulates no stale mu state). */
+        if(hud_active->ctx && (hud_editing_active() || hud_active != &hud_ingame)) {
                 if(mu_key_translate(key)) {
                         switch(action) {
                                 case WINDOW_RELEASE: mu_input_keyup(hud_active->ctx, mu_key_translate(key)); break;
@@ -2086,9 +2092,10 @@ void mouse_click(struct window_instance* window, int button, int action, int mod
            use (menu screens, or the in-game HUD editor). Feeding it during
            normal play would accumulate stale mouse/key state in the in-game
            context that would resurface on the next editor session. */
-        /* Panel presses are pre-sorted by the editor's click handler: only
-           clicks that started inside the microui window reach it here. */
-        if(hud_active->ctx && hud_editing_active() && hud_editing_mu_panel_hit()) {
+        /* In the editor, presses are pre-sorted by the editor's click
+           handler: only clicks that started inside the microui window reach
+           it here (hud_editing_mu_panel_hit is 1 for every other screen). */
+        if(hud_active->ctx && (hud_editing_active() || hud_active != &hud_ingame) && hud_editing_mu_panel_hit()) {
                 double x, y;
                 window_mouseloc(&x, &y);
                 switch(action) {
@@ -2101,14 +2108,14 @@ void mouse_click(struct window_instance* window, int button, int action, int mod
 void mouse(struct window_instance* window, double x, double y) {
         if(hud_active->input_mouselocation)
                 hud_active->input_mouselocation(x, y);
-        if(hud_active->ctx && hud_editing_active())
+        if(hud_active->ctx && (hud_editing_active() || hud_active != &hud_ingame))
                 mu_input_mousemove(hud_active->ctx, x, y);
 }
 
 void mouse_scroll(struct window_instance* window, double xoffset, double yoffset) {
         if(hud_active->input_mousescroll)
                 hud_active->input_mousescroll(yoffset);
-        if(hud_active->ctx && hud_editing_active())
+        if(hud_active->ctx && (hud_editing_active() || hud_active != &hud_ingame))
                 mu_input_scroll(hud_active->ctx, -xoffset * 50, -yoffset * 50);
 }
 
