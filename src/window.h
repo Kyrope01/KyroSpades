@@ -110,6 +110,7 @@ enum window_keys {
 	WINDOW_KEY_MAP_ZOOM,
 	WINDOW_KEY_RECORDING,
 	WINDOW_KEY_REPLAY_SAVE,
+	WINDOW_KEY_HUD_EDITOR,
 	/* Editing-only keys used by microui text fields. They are registered
 	   without user-facing bindings so every backend routes them through the
 	   same input path. */
@@ -162,6 +163,7 @@ extern int window_gl_default_framebuffer;
 #define WINDOW_NOMOUSELOC -1
 
 void window_textinput(int allow);
+void window_touch_reset(void);   /* drop all tracked fingers (HUD editor open) */
 /* Whether the on-screen/software keyboard text input is currently active.
    Used by the iOS chat UI to label its Hide/Show keyboard toggle. Returns 0
    on platforms without a soft keyboard. */

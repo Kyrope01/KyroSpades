@@ -820,6 +820,7 @@ void config_reload() {
         config_register_key(WINDOW_KEY_DEMO_SPEED_UP,   SDLK_EQUALS, "demo_speed_up",   0, "Double playback speed",   "Watch Demo");
         config_register_key(WINDOW_KEY_ROLL_CCW, SDLK_q, "roll_ccw", 0, "Roll counter-clockwise", "Spectator");
                                  config_register_key(WINDOW_KEY_RECORDING, SDLK_F7, "recording", 0, "Start/Stop recording", "Game");
+        config_register_key(WINDOW_KEY_HUD_EDITOR, SDLK_F10, "hud_editor", 0, "HUD editor", "Game");
                                  config_register_key(WINDOW_KEY_REPLAY_SAVE, SDLK_F8, "replay_save", 0, "Save Replay", "Game");
 
 #endif
@@ -894,6 +895,7 @@ void config_reload() {
         config_register_key(WINDOW_KEY_DEMO_SPEED_UP,   GLFW_KEY_EQUAL, "demo_speed_up",   0, "Double playback speed",   "Watch Demo");
         config_register_key(WINDOW_KEY_ROLL_CCW, GLFW_KEY_Q, "roll_ccw", 0, "Roll counter-clockwise", "Spectator");
                                  config_register_key(WINDOW_KEY_RECORDING, GLFW_KEY_F7, "recording", 0, "Start/Stop recording", "Game");
+        config_register_key(WINDOW_KEY_HUD_EDITOR, GLFW_KEY_F10, "hud_editor", 0, "HUD editor", "Game");
                                  config_register_key(WINDOW_KEY_REPLAY_SAVE, GLFW_KEY_F8, "replay_save", 0, "Save Replay", "Game");
 
 #endif

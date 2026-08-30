@@ -56,6 +56,14 @@ struct serverlist_entry {
 extern int screen_current;
 extern int show_exit;
 
+/* True while the in-game HUD editor overlay is active (hud.c). Menus and
+   window.c route input menu-style while this is set. */
+int hud_editing_active(void);
+
+/* While the editor is active: 1 when the current mouse press started inside
+   the editor panel (microui should receive the click), 0 for the play area. */
+int hud_editing_mu_panel_hit(void);
+
 extern struct hud hud_ingame;
 extern struct hud hud_mapload;
 extern struct hud hud_serverlist;

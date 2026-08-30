@@ -116,6 +116,22 @@ void hud_layout_anchor_point(int anchor, float* x, float* y) {
 	}
 }
 
+/* Nominal hitbox size in on-screen GL pixels: table value (at the 800x600
+   reference size) scaled to the window and by the element scale. Used by the
+   editor as the fallback selection box for elements that drew nothing this
+   frame (hidden or not shown). */
+void hud_layout_nominal_bounds(int el, float* w, float* h) {
+	if(w) *w = 40.0F;
+	if(h) *h = 16.0F;
+	if(el < 0 || el >= HUD_EL_COUNT)
+		return;
+	float sx = (float)settings.window_width / 800.0F;
+	float sy = (float)settings.window_height / 600.0F;
+	float s = hud_layout_scale(el);
+	if(w) *w = EL_META[el].nominal[2] * sx * s;
+	if(h) *h = EL_META[el].nominal[3] * sy * s;
+}
+
 /* ── Read side (used by rendering every frame) ─────────────────────────── */
 
 bool hud_layout_visible(int el) {
@@ -220,6 +236,14 @@ void hud_layout_set_px(int el, float x, float y) {
 	hud_layout_anchor_point(e->anchor, &ax, &ay);
 	e->ox = clampf((x - ax) / W, -LAYOUT_OFFSET_LIMIT, LAYOUT_OFFSET_LIMIT);
 	e->oy = clampf((y - ay) / H, -LAYOUT_OFFSET_LIMIT, LAYOUT_OFFSET_LIMIT);
+}
+
+int hud_layout_get_anchor(int el) {
+	struct layout_el* e = el_ok(el);
+	if(!e)
+		return HUD_ANCHOR_MC;
+	/* In natural mode the effective anchor is the element's default. */
+	return e->mode == MODE_CUSTOM ? (int)e->anchor : (int)EL_META[el].default_anchor;
 }
 
 void hud_layout_set_anchor(int el, int anchor) {
@@ -503,6 +527,9 @@ void hud_layout_palette_cell_clamp(float sx, float sy, int* gx, int* gy) {
 }
 
 bool hud_layout_palette_contains(float sx, float sy) {
+	/* A hidden palette must not leave an aim dead-zone behind. */
+	if(!hud_layout_visible(HUD_EL_PALETTE))
+		return false;
 	float gl_y = settings.window_height - sy;
 	float left = hud_layout_palette_left();
 	float top = hud_layout_palette_top();

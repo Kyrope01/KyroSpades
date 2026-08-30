@@ -25,6 +25,8 @@
 #include "common.h"
 #include "main.h"
 #include "window.h"
+#include "hud_layout.h"
+#include "hud.h"
 
 /* SDL's real default framebuffer object, captured once in window_init(). 0 on
    desktop/Android, but a non-zero EAGL FBO on iOS. See window_init() + main.c. */
@@ -180,6 +182,8 @@ static void window_impl_joystick(int jid, int event) {
 }
 
 void window_textinput(int allow) { }
+
+void window_touch_reset(void) { }
 
 void window_setmouseloc(double x, double y) { }
 
@@ -725,6 +729,14 @@ void window_swapping(int value) {
 }
 
 static struct window_finger fingers[8];
+static struct window_finger* aim_finger = NULL;
+static struct window_finger* aim_finger2 = NULL;
+
+void window_touch_reset(void) {
+	memset(fingers, 0, sizeof(fingers));
+	aim_finger = NULL;
+	aim_finger2 = NULL;
+}
 
 static void window_dispatch_key(int sym, int action, int mod) {
 	int count = config_key_translate(sym, 0, NULL);
@@ -896,9 +908,6 @@ retry_context:
 	memset(fingers, 0, sizeof(fingers));
 }
 
-static struct window_finger* aim_finger = NULL;
-static struct window_finger* aim_finger2 = NULL;
-
 static int window_aim_zone(float x, float y) {
 	/* Exclude the right-side action buttons — but only the ROWS they actually
 	   occupy, not the whole right column. The old full-height strip meant you
@@ -930,13 +939,9 @@ static int window_aim_zone(float x, float y) {
 	   tool is held in FPS. Fractions mirror hud.c's palette helpers. x,y are
 	   screen coordinates (y DOWN), so convert the GL-space vertical bounds. */
 	if(camera_mode == CAMERAMODE_FPS && players[local_player_id].held_item == TOOL_BLOCK) {
-		float psize = settings.window_height * 0.024F * 8.0F;
-		float pleft = (settings.window_width - psize) * 0.5F;
-		float pright = pleft + psize;
-		float pbottom_gl = settings.window_height * 0.045F;
-		float ptop_sc = settings.window_height - (pbottom_gl + psize);
-		float pbot_sc = settings.window_height - pbottom_gl;
-		if(x >= pleft && x <= pright && y >= ptop_sc && y <= pbot_sc)
+		/* Single source of truth with the renderer (hud_layout.c), so a
+		   relocated palette keeps its tap exclusion zone in sync. */
+		if(hud_layout_palette_contains(x, y))
 			return 0;
 	}
 	return 1;
@@ -1081,7 +1086,7 @@ void window_update() {
 				   screen belongs to the overlay's tap targets: capturing the
 				   finger for camera aim here would swallow the TOUCH_UP and make
 				   most of the overlay unclickable. */
-				if(hud_active == &hud_ingame && screen_current == SCREEN_NONE && window_aim_zone(fx, fy)) {
+				if(hud_active == &hud_ingame && !hud_editing_active() && screen_current == SCREEN_NONE && window_aim_zone(fx, fy)) {
 					if(!aim_finger) {
 						aim_finger = f;
 						break;
@@ -1138,11 +1143,11 @@ void window_update() {
 					break;
 				}
 
-				if(hud_active == &hud_ingame) {
+				if(hud_active == &hud_ingame && !hud_editing_active()) {
 					if(hud_active->input_touch)
 						hud_active->input_touch(f, TOUCH_UP, fx, fy,
-												event.tfinger.dx * settings.window_width,
-												event.tfinger.dy * settings.window_height);
+											event.tfinger.dx * settings.window_width,
+											event.tfinger.dy * settings.window_height);
 					break;
 				}
 
@@ -1175,7 +1180,7 @@ void window_update() {
 					}
 				}
 
-				if(hud_active == &hud_ingame && f == aim_finger) {
+				if(hud_active == &hud_ingame && !hud_editing_active() && f == aim_finger) {
 					/* Mirror the desktop mouse-look formula from hud.c so the
 					   "Mouse sensitivity" setting (and invert Y / ADS slowdown)
 					   actually affects touch aiming, instead of the previous
@@ -1190,10 +1195,10 @@ void window_update() {
 					camera_look_delta(fdx * sens * s, fdy * sens * s);
 					break;
 				}
-				if(hud_active == &hud_ingame && f == aim_finger2)
+				if(hud_active == &hud_ingame && !hud_editing_active() && f == aim_finger2)
 					break;
 
-				if(hud_active == &hud_ingame) {
+				if(hud_active == &hud_ingame && !hud_editing_active()) {
 					if(hud_active->input_touch)
 						hud_active->input_touch(f, TOUCH_MOVE, fx, fy, fdx, fdy);
 					break;

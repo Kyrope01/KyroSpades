@@ -47,6 +47,9 @@ struct tracer_minimap_info {
 	float minimap_x;
 	float minimap_y;
 	float viewport;
+	float box_x;          /* small map: map-box top-left, GL px (HUD editor) */
+	float box_top;
+	float content_scale;  /* small map: scalef * element scale */
 };
 
 static bool tracer_minimap_single(void* obj, void* user) {
@@ -63,15 +66,19 @@ static bool tracer_minimap_single(void* obj, void* user) {
 		if(tracer_x >= 0.0F && tracer_x <= info->viewport && tracer_y >= 0.0F && tracer_y <= info->viewport) {
 			float map_scale = 128.0F / info->viewport;
 			float ang = -atan2(t->r.direction.z, t->r.direction.x) - HALFPI;
-			texture_draw_rotated(&texture_tracer, settings.window_width - 143 * info->scalef + tracer_x * map_scale * info->scalef,
-								 (585 - tracer_y * map_scale) * info->scalef, 15 * info->scalef, 15 * info->scalef, ang);
+			/* box_x/box_top: relocated map box (hud_layout); natural position
+			   reproduces the old hardcoded window_width-143 / 585 expression. */
+			texture_draw_rotated(&texture_tracer, info->box_x + tracer_x * map_scale * info->content_scale,
+								 info->box_top - tracer_y * map_scale * info->content_scale,
+								 15 * info->content_scale, 15 * info->content_scale, ang);
 		}
 	}
 
 	return false;
 }
 
-void tracer_minimap(int large, float scalef, float minimap_x, float minimap_y, float viewport) {
+void tracer_minimap(int large, float scalef, float minimap_x, float minimap_y, float viewport,
+					float box_x, float box_top, float content_scale) {
 	entitysys_iterate(&tracers,
 					  &(struct tracer_minimap_info) {
 						  .large = large,
@@ -79,6 +86,9 @@ void tracer_minimap(int large, float scalef, float minimap_x, float minimap_y, f
 						  .minimap_x = minimap_x,
 						  .minimap_y = minimap_y,
 						  .viewport = viewport,
+						  .box_x = box_x,
+						  .box_top = box_top,
+						  .content_scale = content_scale,
 					  },
 					  tracer_minimap_single);
 }

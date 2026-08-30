@@ -38,6 +38,7 @@
 #include "player.h"
 extern float tactical_sprint_amount;
 #include "hud.h"
+#include "hud_layout.h"
 #include "recorder.h"
 #include "http.h"
 #include "parson.h"
@@ -101,38 +102,135 @@ static int is_inside(double mx, double my, int x, int y, int w, int h) {
 
 /* -- Block-colour palette geometry --------------------------------------
    The 8x8 swatch grid is 75% of its former size and centered along the bottom,
-   keeping it clear of the ammo display on the right. These helpers drive the
-   renderer, touch hit-test and aim-zone exclusion from the same geometry.
-   Coordinates are HUD/GL space: origin bottom-left, y UP. Grid row gy=0 is the
-   TOP row, matching texture_block_color(). NOTE: window.c mirrors these
-   fractions -- keep both in sync. */
+   keeping it clear of the ammo display on the right. Geometry lives in
+   hud_layout.c (single source of truth shared with window.c's aim-zone and
+   the HUD editor's palette moving). Coordinates are HUD/GL space: origin
+   bottom-left, y UP. Grid row gy=0 is the TOP row, matching
+   texture_block_color(). */
 #define PALETTE_CELLS 8
-static inline float palette_cell(void)   { return settings.window_height * 0.024F; }
-static inline float palette_size(void)   { return palette_cell() * PALETTE_CELLS; }
-static inline float palette_left(void)   { return (settings.window_width - palette_size()) * 0.5F; }
-static inline float palette_bottom(void) { return settings.window_height * 0.045F; }   /* GL y, clears home indicator */
-static inline float palette_top(void)    { return palette_bottom() + palette_size(); } /* GL y of grid top */
+static inline float palette_cell(void)   { return hud_layout_palette_cell(); }
+static inline float palette_size(void)   { return hud_layout_palette_size(); }
+static inline float palette_left(void)   { return hud_layout_palette_left(); }
+static inline float palette_top(void)    { return hud_layout_palette_top(); }
 
 /* Map a touch point (screen coords, y DOWN) to a grid cell, clamping to
    [0,7] so a drag that strays slightly off-grid still scrubs the edge row. */
 static void palette_cell_clamp(float sx, float sy, int* gx, int* gy) {
-        float gl_y = settings.window_height - sy;
-        int cx = (int)((sx - palette_left()) / palette_cell());
-        int cy = (int)((palette_top() - gl_y) / palette_cell()); /* gy=0 at top */
-        if(cx < 0) cx = 0;
-        if(cx > 7) cx = 7;
-        if(cy < 0) cy = 0;
-        if(cy > 7) cy = 7;
-        *gx = cx;
-        *gy = cy;
+	hud_layout_palette_cell_clamp(sx, sy, gx, gy);
 }
 
 /* Strict membership test (no clamp): did a touch START inside the palette? */
 static int palette_contains(float sx, float sy) {
-        float gl_y = settings.window_height - sy;
-        return sx >= palette_left() && sx < palette_left() + palette_size()
-                && gl_y >= palette_bottom() && gl_y < palette_top();
+	return hud_layout_palette_contains(sx, sy) ? 1 : 0;
 }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   HUD EDITOR — state
+   The editor is an overlay on the live in-game HUD (plan: docs/
+   HUD_EDITOR_PLAN.md). Rendering keeps its natural coordinates and calls
+   hud_layout_origin(), which is a no-op until an element is moved.
+
+   Coordinate spaces (READ THIS BEFORE TOUCHING MATH):
+     - mouse / microui: origin TOP-LEFT, y DOWN  (called "screen coords")
+     - GL HUD drawing:  origin BOTTOM-LEFT, y UP ("GL coords")
+     - texture_draw(x, y, w, h) and font_render(x, y, h, ...) both treat y
+       as the TOP edge of the box (the box spans [y-h, y] in GL coords).
+   ═══════════════════════════════════════════════════════════════════════ */
+
+int hud_edit_active = 0;
+static int hud_edit_selected = -1;          /* enum hud_element or -1 */
+static int hud_edit_hover = -1;
+static float hud_edit_mouse_x, hud_edit_mouse_y;   /* screen coords, y down */
+static int hud_edit_dragging = 0;
+static float hud_edit_grab_x, hud_edit_grab_y;     /* mouse - element base, GL */
+static int hud_edit_drag_moved = 0;
+static int hud_edit_popup = 0;              /* 0 none, 1 = save-changes dialog */
+static char hud_edit_status[96] = "";
+static double hud_edit_status_time = 0;
+static float hud_edit_panel_x = 0, hud_edit_panel_y = 0;    /* mu window rect (screen) */
+static int hud_edit_panel_w = 0, hud_edit_panel_h = 0;
+static int hud_edit_opened_connected = 0;
+static int hud_edit_mouse_for_panel = 0;    /* press went to the panel: fwd to mu */
+static int hud_edit_open_frame = 0;         /* frames since open (pick warm-up) */
+static int hud_edit_text_focus = 0;         /* panel textbox focused this frame */
+static char hud_edit_anchor_buf[2][16] = { "", "" };        /* X/Y fraction fields */
+static int hud_edit_anchor_buf_sel = -1;
+static float hud_edit_scale_tmp = 1.0F;
+
+/* Editor-local aids (not persisted). */
+static int hud_edit_snap = 8;               /* 0 = off, else px grid */
+static int hud_edit_grid = 0;
+static int hud_edit_guides = 1;
+static int hud_edit_safe = 0;
+static int hud_edit_dim = 0;
+static int hud_edit_guide_axis = -1;        /* 0 = vertical, 1 = horizontal, -1 none */
+static float hud_edit_guide_pos = 0.0F;
+
+/* Preview flags: force-show elements their normal guards hide. Not
+   persisted; reset on every editor open. */
+static int pv_weapons = 1, pv_palette = 1, pv_chat = 1, pv_killfeed = 1,
+           pv_scores = 1, pv_gmi = 1, pv_scoreboard = 0, pv_stats = 1,
+           pv_fpsbox = 1;
+static int pv_seed_lo[2], pv_seed_hi[2];    /* seeded index ranges per channel */
+
+/* Layout deltas for the shared chat/killfeed renderer (GL px). Recomputed
+   every frame in hud_ingame_render; zero with default layout, but the chat
+   click hit-test (chat_input_offset_at) reads them in ANY game state, so
+   they are plain file statics. */
+static float msg_dx[2], msg_dy[2];
+
+int hud_editing_active(void) {
+	return hud_edit_active;
+}
+
+/* Bounds union accumulator for multi-line elements (chat, killfeed,
+   scoreboard, spectator labels). */
+static float acc_min_x, acc_max_x, acc_min_y, acc_max_y;
+static int  acc_active;
+
+static void bounds_begin(void) {
+	acc_active = 1;
+	acc_min_x = acc_min_y = 1e9F;
+	acc_max_x = acc_max_y = -1e9F;
+}
+
+static void bounds_grow(float x, float y_top, float w, float h) {
+	if(!acc_active)
+		return;
+	if(x < acc_min_x) acc_min_x = x;
+	if(y_top - h < acc_min_y) acc_min_y = y_top - h;
+	if(x + w > acc_max_x) acc_max_x = x + w;
+	if(y_top > acc_max_y) acc_max_y = y_top;
+}
+
+static void bounds_flush(int el) {
+	if(acc_active && acc_max_x > acc_min_x && acc_max_y > acc_min_y)
+		hud_layout_report_bounds(el, acc_min_x, acc_min_y, acc_max_x - acc_min_x,
+								 acc_max_y - acc_min_y);
+	acc_active = 0;
+}
+
+static void hud_editor_set_status(const char* fmt, ...) {
+	va_list ap;
+	va_start(ap, fmt);
+	vsnprintf(hud_edit_status, sizeof(hud_edit_status) - 1, fmt, ap);
+	va_end(ap);
+	hud_edit_status_time = window_time();
+}
+
+/* forward decls (bodies live right before struct hud hud_ingame) */
+static void hud_editor_open(void);
+static void hud_editor_close(int save);
+static void hud_editor_force_close(void);
+static void hud_editor_keyboard(int key, int action, int mods, int internal);
+static void hud_editor_mouseclick(double x, double y, int button, int action, int mods);
+static void hud_editor_mouselocation(double x, double y);
+static void hud_editor_scroll(double yoffset);
+static void hud_editor_frame_begin(float scalex, float scalef);
+static void hud_editor_frame_end(mu_Context* ctx, float scalex, float scalef);
+static void hud_editor_seed_previews(void);
+int hud_editing_mu_panel_hit(void);
+int hud_editing_text_focus(void);
 
 /* Draw only an outline BEHIND the selected swatch. Each palette swatch uses
    6 of its source texture's 8 pixels, so its visible size is 75% of a cell and
@@ -182,6 +280,10 @@ void hud_init() {
         hud_macros.ctx = malloc(sizeof(mu_Context));
         hud_recording.ctx = malloc(sizeof(mu_Context));
         hud_replay.ctx = malloc(sizeof(mu_Context));
+        /* The in-game HUD runs microui only while the HUD editor is active;
+           main.c gates both mu_begin() and mu_input_* on hud_editing_active()
+           so the normal gameplay path behaves exactly as before. */
+        hud_ingame.ctx = malloc(sizeof(mu_Context));
 
         hud_change(&hud_serverlist);
 }
@@ -337,6 +439,12 @@ static void hud_refresh_accent_style(mu_Context* ctx) {
 }
 
 void hud_change(struct hud* new) {
+        /* Choke point: an editor session can never survive a screen switch.
+           The open() path goes the other way (menu -> hud_ingame), so this
+           only fires on disconnects / menu navigation / forced closes. */
+        if(hud_edit_active && new != &hud_ingame)
+                hud_editor_force_close();
+
         config_key_reset_togglestates();
         hud_active = new;
 
@@ -491,11 +599,13 @@ static void chat_cursor_to_rowcol(const int* row_starts, const int* row_lens, in
 }
 
 /* Map a screen-pixel mouse position (top-left origin) to a byte offset
-   in chat[0][0]. Returns -1 if outside the chat input area. */
+   in chat[0][0]. Returns -1 if outside the chat input area.
+   HUD EDITOR: hit-test mirrors the relocated input rows (msg_dx/msg_dy). */
 static int chat_input_offset_at(double sx_pixel, double sy_pixel) {
-        float sx = (float)sx_pixel;
-        float sy = (float)settings.window_height - (float)sy_pixel;
-        float avail_w = (float)settings.window_width - 11.0F - 16.0F;
+        float sx = (float)sx_pixel - msg_dx[0];
+        float sy = (float)settings.window_height - (float)sy_pixel - msg_dy[0];
+        float avail_w = (float)settings.window_width - 11.0F - 16.0F - msg_dx[0];
+        if(avail_w < 40.0F) avail_w = 40.0F;
         int row_starts[CHAT_INPUT_MAX_ROWS], row_lens[CHAT_INPUT_MAX_ROWS];
         int rows = chat_wrap(avail_w, row_starts, row_lens, CHAT_INPUT_MAX_ROWS);
 
@@ -1095,7 +1205,9 @@ static void hud_healthbar_color(float health, float* r, float* g, float* b) {
         *b = from[2] + (to[2] - from[2]) * t;
 }
 
-static void hud_healthbar_render(int health) {
+/* HUD EDITOR: (x, y) = layout-adjusted top-left of the bar row (natural
+   8, 22), s = element scale. Smoothing statics unchanged. */
+static void hud_healthbar_render(float bar_x, float bar_top, float bar_s, int health) {
         static float displayed_health = 100.0F;
         static double last_update = 0.0;
         static int initialized = 0;
@@ -1119,10 +1231,8 @@ static void hud_healthbar_render(int health) {
                         displayed_health = target;
         }
 
-        const float bar_x = 8.0F;
-        const float bar_top = 22.0F;
-        const float bar_w = 160.0F;
-        const float bar_h = 12.0F;
+        const float bar_w = 160.0F * bar_s;
+        const float bar_h = 12.0F * bar_s;
         float fill_w = bar_w * displayed_health / 100.0F;
         float r, g, b;
         hud_healthbar_color(displayed_health, &r, &g, &b);
@@ -1133,7 +1243,7 @@ static void hud_healthbar_render(int health) {
                 glColor3f(r, 0.02F, 0.02F);
         else
                 glColor3ub(12, 12, 12);
-        texture_draw_empty(bar_x - 2.0F, bar_top + 2.0F, bar_w + 4.0F, bar_h + 4.0F);
+        texture_draw_empty(bar_x - 2.0F * bar_s, bar_top + 2.0F * bar_s, bar_w + 4.0F * bar_s, bar_h + 4.0F * bar_s);
 
         glColor3ub(35, 35, 40);
         texture_draw_empty(bar_x, bar_top, bar_w, bar_h);
@@ -1143,7 +1253,7 @@ static void hud_healthbar_render(int health) {
                 texture_draw_empty(bar_x, bar_top, fill_w, bar_h);
                 /* A slim highlight gives the otherwise flat bar some depth. */
                 glColor3f(min(1.0F, r + 0.20F), min(1.0F, g + 0.20F), min(1.0F, b + 0.20F));
-                texture_draw_empty(bar_x, bar_top, fill_w, 2.0F);
+                texture_draw_empty(bar_x, bar_top, fill_w, 2.0F * bar_s);
         }
 
         /* Twenty 5-HP partitions retain a detailed segmented look while the
@@ -1151,7 +1261,7 @@ static void hud_healthbar_render(int health) {
         glColor3ub(10, 10, 12);
         for(int i = 1; i < 20; i++) {
                 float x = bar_x + bar_w * i / 20.0F;
-                texture_draw_empty(x, bar_top, 1.0F, bar_h);
+                texture_draw_empty(x, bar_top, 1.0F * bar_s, bar_h);
         }
         glColor3f(1.0F, 1.0F, 1.0F);
 }
@@ -1229,9 +1339,31 @@ static void hud_ammo_crosshair_render(float scalef) {
 static int chat_messages = 16;
 static int chat_scroll_offset = 0;
 
-static void hud_render_message(unsigned int channel, unsigned int k) {
+/* HUD EDITOR: per-channel message bounds accumulators (chat=0, killfeed=1).
+   Reset before the message loop, grown per message, flushed after. */
+static float msgb_min_x[2], msgb_max_x[2], msgb_min_y[2], msgb_max_y[2];
+static void msgb_reset(void) {
+        for(int i = 0; i < 2; i++) {
+                msgb_min_x[i] = msgb_min_y[i] = 1e9F;
+                msgb_max_x[i] = msgb_max_y[i] = -1e9F;
+        }
+}
+static void msgb_grow(int ch, float x, float y_top, float w, float h) {
+        if(x < msgb_min_x[ch]) msgb_min_x[ch] = x;
+        if(y_top - h < msgb_min_y[ch]) msgb_min_y[ch] = y_top - h;
+        if(x + w > msgb_max_x[ch]) msgb_max_x[ch] = x + w;
+        if(y_top > msgb_max_y[ch]) msgb_max_y[ch] = y_top;
+}
+static void msgb_flush(int el, int ch) {
+        if(msgb_max_x[ch] > msgb_min_x[ch] && msgb_max_y[ch] > msgb_min_y[ch])
+                hud_layout_report_bounds(el, msgb_min_x[ch], msgb_min_y[ch],
+                                         msgb_max_x[ch] - msgb_min_x[ch], msgb_max_y[ch] - msgb_min_y[ch]);
+}
+
+static float hud_render_message(unsigned int channel, unsigned int k) {
 char *c;
 float x, y;
+const float x0 = 16.F + (channel == 0 ? msg_dx[0] : msg_dx[1]);
 
 /* For the global chat channel, allow scrolling back through history
  * while the chat input is open. The offset is driven by the scroll
@@ -1242,8 +1374,10 @@ if(channel == 0)
 if(idx > 127)
         idx = 127;
 
+/* HUD EDITOR: msg_dx/msg_dy are the shared chat / killfeed layout deltas
+   (computed every frame in hud_ingame_render; natural layout leaves them 0). */
 if(channel == 0) {
-x = 16.F;
+x = 16.F + msg_dx[0];
 if(chat_input_mode != CHAT_NO_INPUT && settings.chat_flip_on_open) {
 y = 75.F + ((k + 2.F) * (16.F + settings.chat_spacing)) - settings.chat_spacing / 2.F;
 } else {
@@ -1252,9 +1386,10 @@ y = 75.F + ((chat_messages - k + 1.F) * (16.F + settings.chat_spacing)) - settin
 /* Lift messages so a multi-row input prompt doesn't paint over them. */
 if(chat_input_mode != CHAT_NO_INPUT && chat_input_rows > 1)
 y += (chat_input_rows - 1) * 16.0F;
+y += msg_dy[0];
 } else {
-x = 16.F;
-y = settings.window_height - 22.0F - 10.0F * k - k * 8.F;
+x = 16.F + msg_dx[1];
+y = settings.window_height - 22.0F - 10.0F * k - k * 8.F + msg_dy[1];
 }
 
 // Check if this message contains any mention word
@@ -1353,6 +1488,9 @@ case '\7': glColor3ub(120, 120, 120); break; // Gray
 x += len;
 i = 0;
 }
+/* HUD EDITOR: grow this channel's frame bounds with the rendered message. */
+msgb_grow(channel, x0, y, x - x0, 16.F);
+return x;
 }
 
 static void demo_playback_render_overlay(float scalef) {
@@ -1445,6 +1583,25 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
            Force the standard modulate mode for all HUD drawing. */
         glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
 
+        /* ═══ HUD EDITOR: frame begin (force-close checks, input
+           neutralization, preview timers, disconnected backdrop) ═══ */
+        hud_editor_frame_begin(scalex, scalef);
+
+        /* Layout deltas for the shared chat/killfeed message renderer.
+           Natural mode leaves the base values untouched => deltas are 0.
+           Computed unconditionally: chat_input_offset_at() (click-to-place
+           the chat cursor) reads them in every game state. */
+        {
+                float bx = 3.F, by = 76.F;                       /* chat natural base */
+                hud_layout_origin(HUD_EL_CHAT, &bx, &by);
+                msg_dx[0] = bx - 3.F;
+                msg_dy[0] = by - 76.F;
+                bx = 16.F; by = settings.window_height - 22.F;   /* killfeed natural base */
+                hud_layout_origin(HUD_EL_KILLFEED, &bx, &by);
+                msg_dx[1] = bx - 16.F;
+                msg_dy[1] = by - (settings.window_height - 22.F);
+        }
+
         hud_active->render_localplayer = players[local_player_id].team != TEAM_SPECTATOR
                 && (screen_current == SCREEN_NONE || camera_mode != CAMERAMODE_FPS);
 
@@ -1476,9 +1633,13 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                 }
         }
 
-        if(cameracontroller_yclamp) {
+        if(cameracontroller_yclamp && hud_layout_visible(HUD_EL_YCLAMP)) {
                 glColor3f(1.0F, 1.0F, 1.0F);
-                hud_font_render(8.F, settings.window_height / 2 - 4.F, 16.0F, "Y-Clamp enabled", .5f);
+                float yc_x = 8.F, yc_y = settings.window_height / 2 - 4.F;
+                hud_layout_origin(HUD_EL_YCLAMP, &yc_x, &yc_y);
+                hud_font_render(yc_x, yc_y, 16.0F, "Y-Clamp enabled", .5f);
+                hud_layout_report_bounds(HUD_EL_YCLAMP, yc_x, yc_y,
+                                         font_length(16.0F, "Y-Clamp enabled"), 16.0F);
         }
 
         if(window_key_down(WINDOW_KEY_NETWORKSTATS)) {
@@ -1576,8 +1737,8 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
 
                 font_select(FONT_FIXEDSYS);
         } else {
-                if(window_key_down(WINDOW_KEY_HIDEHUD))
-                        return;
+                if(window_key_down(WINDOW_KEY_HIDEHUD) && !hud_edit_active)
+                        return; /* F6 hide-HUD stays active in gameplay, never in the editor */
 
                 /* Floating damage numbers: drawn early in the 2D pass so chat/
                    scoreboard/other HUD elements still layer on top of them. */
@@ -1608,7 +1769,12 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                 // always-on in KyroSpades and cost a couple font/quad draws
                 // every single gameplay frame; keep the feature, but don't
                 // tax the BetterSpades-style fast HUD unless requested.
-                if(settings.show_live_player_count && network_connected && network_logged_in) {
+                if((settings.show_live_player_count && network_connected && network_logged_in
+                    || (hud_edit_active && pv_scores)) && hud_layout_visible(HUD_EL_SCORES_TOP)) {
+                        /* HUD EDITOR: layout base (team-1 box left edge, bar top) */
+                        float st_bx = settings.window_width / 2.F - 75.F, st_by = settings.window_height - 24.F;
+                        hud_layout_origin(HUD_EL_SCORES_TOP, &st_bx, &st_by);
+                        bounds_begin();
                         for(int i = 0; i < 2; i++) {
                                 struct Team team;
                                 float x_offset;
@@ -1616,8 +1782,8 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 float r, g, b;
 
                                 switch(i) {
-                                        case 0: team = gamestate.team_1; x_offset = settings.window_width / 2.F - 75.F; break;
-                                        case 1: team = gamestate.team_2; x_offset = settings.window_width / 2.F; break;
+                                        case 0: team = gamestate.team_1; x_offset = st_bx; break;
+                                        case 1: team = gamestate.team_2; x_offset = st_bx + 75.F; break;
                                 }
 
                                 r = team.red / 255.F;
@@ -1651,20 +1817,29 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 glEnable(GL_BLEND);
                                 glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
                                 glColor4f(r, g, b, 1.F);
-                                texture_draw_empty(x_offset, settings.window_height - 24.F, box_width, 24.F);
+                                texture_draw_empty(x_offset, st_by, box_width, 24.F);
                                 glDisable(GL_BLEND);
 
                                 glColor3ub(255, 255, 255);
-                                font_render(x_offset + 10.F, settings.window_height - 27.F, 16.0F, score_str);
+                                font_render(x_offset + 10.F, st_by - 3.F, 16.0F, score_str);
+                                bounds_grow(x_offset, st_by, box_width > 75.F ? box_width : 75.F, 24.F);
                         }
+                        bounds_flush(HUD_EL_SCORES_TOP);
                 }
 
-                if(chat_input_mode == CHAT_NO_INPUT && window_key_down(WINDOW_KEY_TAB) || camera_mode == CAMERAMODE_SELECTION) {
+                if((chat_input_mode == CHAT_NO_INPUT && window_key_down(WINDOW_KEY_TAB) || camera_mode == CAMERAMODE_SELECTION
+                    || (hud_edit_active && pv_scoreboard)) && hud_layout_visible(HUD_EL_SCOREBOARD)) {
+                        /* HUD EDITOR: scoreboard layout base (natural 0,0 — the
+                           only element whose natural base is the screen origin). */
+                        float sb_x = 0.F, sb_y = 0.F;
+                        hud_layout_origin(HUD_EL_SCOREBOARD, &sb_x, &sb_y);
+                        bounds_begin();
                         if(network_connected && network_logged_in) {
                                 char ping_str[16];
                                 sprintf(ping_str, "PING: %ims", network_ping());
                                 glColor3f(1.0F, 0.0F, 0.0F);
-                                font_centered(settings.window_width / 2.0F, settings.window_height - 4.F, 16.F, ping_str);
+                                font_centered(settings.window_width / 2.0F + sb_x, settings.window_height - 4.F + sb_y, 16.F, ping_str);
+                                bounds_grow(settings.window_width / 2.0F + sb_x - 40.F, settings.window_height - 4.F + sb_y, 80.F, 16.F);
                         }
 
 
@@ -1696,9 +1871,9 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 float r, g, b;
 
                                 switch(i) {
-                                        case 0: team = gamestate.team_1; x_offset = settings.window_width / 2.F - 300.F; break;
-                                        case 1: team = gamestate.team_2; x_offset = settings.window_width / 2.F; break;
-                                        case 2: x_offset = settings.window_width / 2.F - 150.F; y_offset = height + 32.F; break;
+                                        case 0: team = gamestate.team_1; x_offset = settings.window_width / 2.F - 300.F + sb_x; break;
+                                        case 1: team = gamestate.team_2; x_offset = settings.window_width / 2.F + sb_x; break;
+                                        case 2: x_offset = settings.window_width / 2.F - 150.F + sb_x; y_offset = height + 32.F; break;
                                 }
 
                                 if(i != 2) {
@@ -1737,19 +1912,21 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 glEnable(GL_BLEND);
                                 glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
                                 glColor4f(r, g, b, 1.F);
-                                texture_draw_empty(x_offset, 450 * scalef - y_offset, 300, 24.F);
+                                texture_draw_empty(x_offset, 450 * scalef - y_offset + sb_y, 300, 24.F);
                                 glColor4f(r * 0.75F, g * 0.75F, b * 0.75F, 0.75F);
-                                texture_draw_empty(x_offset, 450 * scalef - y_offset, 300, i == 2 ? (24.F * (count_spec + 1)): height);
+                                texture_draw_empty(x_offset, 450 * scalef - y_offset + sb_y, 300, i == 2 ? (24.F * (count_spec + 1)): height);
                                 glDisable(GL_BLEND);
 
+                                bounds_grow(x_offset, 450 * scalef - y_offset + sb_y, 300.F,
+                                            (i == 2 ? (24.F * (count_spec + 1)): height) + 24.F);
                                 glColor3ub(255, 255, 255);
                                 if(i != 2) {
-                                        font_render(x_offset + 300.F - font_length(16.F, score_str) - 8.F, 447 * scalef, 16.0F, score_str);
+                                        font_render(x_offset + 300.F - font_length(16.F, score_str) - 8.F, 447 * scalef + sb_y, 16.0F, score_str);
                                         font_render(x_offset + 8.F,
-                                                        450 * scalef - 6.F, 16.0F, team.name);
+                                                        450 * scalef - 6.F + sb_y, 16.0F, team.name);
                                 } else {
                                         font_centered(x_offset + 150.F,
-                                                        450 * scalef - y_offset - 4.F, 16.0F, "Spectator");
+                                                        450 * scalef - y_offset - 4.F + sb_y, 16.0F, "Spectator");
                                 }
                         }
 
@@ -1770,10 +1947,10 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 float y_offset = 0.F;
 
                                 switch(players[pt[k].id].team) {
-                                        case TEAM_1: mul = 1; x_offset = settings.window_width / 2.F - 300.F; break;
-                                        case TEAM_2: mul = 3; x_offset = settings.window_width / 2.F; break;
+                                        case TEAM_1: mul = 1; x_offset = settings.window_width / 2.F - 300.F + sb_x; break;
+                                        case TEAM_2: mul = 3; x_offset = settings.window_width / 2.F + sb_x; break;
                                         default:
-                                        case TEAM_SPECTATOR: mul = 2; x_offset = settings.window_width / 2.F - 150.F; y_offset = height + 32.F; break;
+                                        case TEAM_SPECTATOR: mul = 2; x_offset = settings.window_width / 2.F - 150.F + sb_x; y_offset = height + 32.F; break;
                                 }
                                 if(pt[k].id == local_player_id)
                                         glColor3f(1.0F, 1.0F, 0.0F);
@@ -1786,7 +1963,7 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 glEnable(GL_BLEND);
                                 glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
                                 glColor4f(1.F, 1.F, 1.F, 0.7F);
-                                font_render(x_offset + 8.F, 450 * scalef - 8.F - (24 * (cntt[mul - 1] + 1)) - y_offset,
+                                font_render(x_offset + 8.F, 450 * scalef - 8.F - (24 * (cntt[mul - 1] + 1)) - y_offset + sb_y,
                                                         16.0F, id_str);
 
                                 if(players[pt[k].id].alive) {
@@ -1796,12 +1973,13 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 }
 
                                 font_render(x_offset + 48.F,
-                                                        450 * scalef - 8.F - (24 * (cntt[mul - 1] + 1)) - y_offset, 16.0F, players[pt[k].id].name);
+                                                        450 * scalef - 8.F - (24 * (cntt[mul - 1] + 1)) - y_offset + sb_y, 16.0F, players[pt[k].id].name);
                                 glDisable(GL_BLEND);
+                                bounds_grow(x_offset, 450 * scalef - (24 * (cntt[mul - 1] + 1)) + sb_y, 300.F, 16.F);
                                 if(mul != 2) {
                                         sprintf(id_str, "%i", pt[k].score);
                                         font_render(x_offset + 300.F - font_length(16.F, id_str) - 8.F,
-                                                                450 * scalef - 8.F - (24 * (cntt[mul - 1] + 1)), 16, id_str);
+                                                                450 * scalef - 8.F - (24 * (cntt[mul - 1] + 1)) + sb_y, 16, id_str);
                                 }
                                 if(gamestate.gamemode_type == GAMEMODE_CTF
                                    && ((gamestate.gamemode.ctf.team_1_intel
@@ -1810,11 +1988,12 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                                    && gamestate.gamemode.ctf.team_2_intel_location.held.player_id == pt[k].id))) {
                                         texture_draw(&texture_intel,
                                                                  x_offset + 300.F - font_length(16.F, id_str) - 8.F - 24.F,
-                                                                 450 * scalef - 8.F - (24 * (cntt[mul - 1] + 1)),
+                                                                 450 * scalef - 8.F - (24 * (cntt[mul - 1] + 1)) + sb_y,
                                                                  18.0F, 18.0F);
                                 }
                                 cntt[mul - 1]++;
                         }
+                        bounds_flush(HUD_EL_SCOREBOARD);
                 }
 
                 int is_local = (camera_mode == CAMERAMODE_FPS) || (cameracontroller_bodyview_player == local_player_id);
@@ -1822,13 +2001,19 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
 
                 if(camera_mode == CAMERAMODE_BODYVIEW
                    || (camera_mode == CAMERAMODE_SPECTATOR && cameracontroller_bodyview_mode)) {
+                        /* HUD EDITOR: spectator-label group base (name site top). */
+                        float sp_x = settings.window_width / 2.0F, sp_y = 26.F;
+                        hud_layout_origin(HUD_EL_SPECTATE, &sp_x, &sp_y);
+                        float sp_dx = sp_x - settings.window_width / 2.0F, sp_dy = sp_y - 26.F;
+                        bounds_begin();
                         if(cameracontroller_bodyview_player != local_player_id) {
                                 font_select(FONT_FIXEDSYS);
                                 char bv_buf[64];
                                 snprintf(bv_buf, sizeof(bv_buf), "Spectating %s", players[cameracontroller_bodyview_player].name);
                                 float bv_nh = 22.F;
-                                float bv_nx = settings.window_width / 2.0F - font_length(bv_nh, bv_buf) / 2.0F;
-                                float bv_ny = 4.F + bv_nh;
+                                float bv_nx = settings.window_width / 2.0F - font_length(bv_nh, bv_buf) / 2.0F + sp_dx;
+                                float bv_ny = 4.F + bv_nh + sp_dy;
+                                bounds_grow(bv_nx - 1.F, bv_ny + 1.F, font_length(bv_nh, bv_buf) + 2.F, bv_nh + 2.F);
                                 unsigned char bv_r = 255, bv_g = 255, bv_b = 255;
                                 switch(players[cameracontroller_bodyview_player].team) {
                                         case TEAM_1: bv_r = gamestate.team_1.red; bv_g = gamestate.team_1.green; bv_b = gamestate.team_1.blue; break;
@@ -1845,15 +2030,18 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                         font_select(FONT_FIXEDSYS);
                         mu_Color color = mu_accent_color(1.F, 255);
                         glColor3ub(color.r, color.g, color.b);
-                        font_centered(settings.window_width / 2.0F, settings.window_height, 16.0F,
+                        font_centered(settings.window_width / 2.0F + sp_dx, settings.window_height + sp_dy, 16.0F,
                                                   "Click to switch players");
+                        bounds_grow(settings.window_width / 2.0F + sp_dx - 100.F, settings.window_height + sp_dy, 200.F, 16.F);
                         if(window_time() - local_player_death_time <= local_player_respawn_time) {
                                 glColor3f(1.0F, 0.0F, 0.0F);
                                 int cnt = local_player_respawn_time - (int)(window_time() - local_player_death_time);
                                 char coin[16];
                                 sprintf(coin, "INSERT COIN:%i", cnt);
-                                font_centered(settings.window_width / 2.0F,
-                                                          53.0F * scalef * (cameracontroller_bodyview_mode ? 2.0F : 1.0F), 53.0F * scalef, coin);
+                                font_centered(settings.window_width / 2.0F + sp_dx,
+                                                          53.0F * scalef * (cameracontroller_bodyview_mode ? 2.0F : 1.0F) + sp_dy, 53.0F * scalef, coin);
+                                bounds_grow(settings.window_width / 2.0F + sp_dx - 120.F,
+                                            53.0F * scalef * (cameracontroller_bodyview_mode ? 2.0F : 1.0F) + sp_dy, 240.F, 53.0F * scalef);
                                 if(local_player_respawn_cnt_last != cnt) {
                                         if(cnt < 4) {
                                                 sound_create(SOUND_LOCAL, (cnt == 1) ? &sound_beep1 : &sound_beep2, 0.0F, 0.0F, 0.0F);
@@ -1862,18 +2050,24 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 }
                         }
                         glColor3f(1.0F, 1.0F, 1.0F);
+                        bounds_flush(HUD_EL_SPECTATE);
                 }
 
                 if(camera_mode == CAMERAMODE_SPECTATOR && !cameracontroller_bodyview_mode
                    && player_intersection_type >= 0 && player_intersection_player >= 0
                    && player_intersection_player < PLAYERS_MAX
                    && players[player_intersection_player].team != TEAM_SPECTATOR) {
+                        float hv_sp_x = settings.window_width / 2.0F, hv_sp_y = 26.F;
+                        hud_layout_origin(HUD_EL_SPECTATE, &hv_sp_x, &hv_sp_y);
+                        float hv_dx = hv_sp_x - settings.window_width / 2.0F, hv_dy = hv_sp_y - 26.F;
                         font_select(FONT_FIXEDSYS);
                         char hv_buf[64];
                         snprintf(hv_buf, sizeof(hv_buf), "Spectating %s", players[player_intersection_player].name);
                         float hv_nh = 22.F;
-                        float hv_nx = settings.window_width / 2.0F - font_length(hv_nh, hv_buf) / 2.0F;
-                        float hv_ny = 4.F + hv_nh;
+                        float hv_nx = settings.window_width / 2.0F - font_length(hv_nh, hv_buf) / 2.0F + hv_dx;
+                        float hv_ny = 4.F + hv_nh + hv_dy;
+                        hud_layout_report_bounds(HUD_EL_SPECTATE, hv_nx - 1.F, hv_ny + 1.F,
+                                                 font_length(hv_nh, hv_buf) + 2.F, hv_nh + 2.F);
                         unsigned char hv_r = 255, hv_g = 255, hv_b = 255;
                         switch(players[player_intersection_player].team) {
                                 case TEAM_1: hv_r = gamestate.team_1.red; hv_g = gamestate.team_1.green; hv_b = gamestate.team_1.blue; break;
@@ -1890,7 +2084,8 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
 
                 if(camera_mode == CAMERAMODE_FPS
                    || ((camera_mode == CAMERAMODE_BODYVIEW || camera_mode == CAMERAMODE_SPECTATOR)
-                           && cameracontroller_bodyview_mode)) {
+                           && cameracontroller_bodyview_mode)
+                   || (hud_edit_active && pv_weapons)) {
                         glColor3f(1.0F, 1.0F, 1.0F);
 
                         if(settings.iron_sight && players[local_id].held_item == TOOL_GUN && players[local_id].input.buttons.rmb
@@ -1959,6 +2154,10 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
 
                         int health
                                 = is_local ? (players[local_id].alive ? local_player_health : 0) : (players[local_id].alive ? 100 : 0);
+                        /* HUD EDITOR: stable sample value when there is no live
+                           health to look at (disconnected preview). */
+                        if(hud_edit_active && pv_weapons && !network_connected)
+                                health = 74;
 
                         if(health <= 30)
                                 glColor3f(1, 0, 0);
@@ -1971,10 +2170,18 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                         char hp[4];
                         sprintf(hp, "%i", health);
                         float health_top = settings.healthbar ? 60.0F : 40.0F;
-                        hud_texture_draw(&texture_health, 8.F, health_top, 36.0F, 32.F);
-                        hud_font_render(48.F, health_top - 2.0F, 30.F, hp, 1.F);
-                        if(settings.healthbar)
-                                hud_healthbar_render(health);
+                        /* HUD EDITOR: health group (icon + number + bar). */
+                        float hs = hud_layout_visible(HUD_EL_HEALTH) ? hud_layout_scale(HUD_EL_HEALTH) : 0.0F;
+                        float hl_bx = 8.F, hl_by = health_top;
+                        hud_layout_origin(HUD_EL_HEALTH, &hl_bx, &hl_by);
+                        if(hs > 0.0F) {
+                                hud_texture_draw(&texture_health, hl_bx, hl_by, 36.0F * hs, 32.F * hs);
+                                hud_font_render(hl_bx + 40.F * hs, hl_by - 2.0F * hs, 30.F * hs, hp, 1.F);
+                                if(settings.healthbar)
+                                        hud_healthbar_render(hl_bx, hl_by - (health_top - 22.0F) * hs, hs, health);
+                                hud_layout_report_bounds(HUD_EL_HEALTH, hl_bx - 2.F * hs, hl_by,
+                                                         164.F * hs, 52.F * hs);
+                        }
 
                         char item_mini_str[32];
                         struct texture* item_mini;
@@ -2010,30 +2217,51 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 }
                         }
 
-                        hud_texture_draw(item_mini, settings.window_width - texture_health.width - 8.F, item_mini->height + 8.F, texture_health.width, texture_health.height);
-                        /* The block icon stays tinted with the held block's
-                           color, but the counter text must stay readable --
-                           e.g. when you copy the ground's (dark) color, a
-                           dark number would vanish against the HUD. */
-                        if(players[local_id].held_item == TOOL_BLOCK)
-                                glColor3f(1.0F, 1.0F, 1.0F);
-                        hud_font_render(settings.window_width - texture_health.width - 12.F - font_length(30.F, item_mini_str), 37.F, 30.F, item_mini_str, 1.F);
+                        /* HUD EDITOR: ammo group (icon + counter), right-pinned. */
+                        float am_s = hud_layout_visible(HUD_EL_AMMO) ? hud_layout_scale(HUD_EL_AMMO) : 0.0F;
+                        float am_bx = settings.window_width - texture_health.width - 8.F, am_by = item_mini->height + 8.F;
+                        hud_layout_origin(HUD_EL_AMMO, &am_bx, &am_by);
+                        if(am_s > 0.0F) {
+                                /* pin the right edge when scaled (top-right anchor) */
+                                am_bx -= (texture_health.width * (am_s - 1.0F));
+                                hud_texture_draw(item_mini, am_bx, am_by, texture_health.width * am_s, texture_health.height * am_s);
+                                /* The block icon stays tinted with the held block's
+                                   color, but the counter text must stay readable --
+                                   e.g. when you copy the ground's (dark) color, a
+                                   dark number would vanish against the HUD. */
+                                if(players[local_id].held_item == TOOL_BLOCK)
+                                        glColor3f(1.0F, 1.0F, 1.0F);
+                                hud_font_render(am_bx - 4.F * am_s - font_length(30.F * am_s, item_mini_str),
+                                                am_by - (item_mini->height - 29) * am_s, 30.F * am_s, item_mini_str, 1.F);
+                                hud_layout_report_bounds(HUD_EL_AMMO,
+                                                         am_bx - 4.F * am_s - font_length(30.F * am_s, item_mini_str),
+                                                         am_by, texture_health.width * am_s + 4.F * am_s,
+                                                         item_mini->height * am_s);
+                        }
                         font_select(FONT_FIXEDSYS);
                         glColor3f(1.0F, 1.0F, 1.0F);
 
                         float gmi_y = 54.F;
 
-                        if(players[local_id].held_item == TOOL_BLOCK) {
+                        if((players[local_id].held_item == TOOL_BLOCK
+                            || (hud_edit_active && pv_palette)) && hud_layout_visible(HUD_EL_PALETTE)) {
                                 /* Border first, palette second: transparent padding reveals
-                                   the outline while the actual color remains unobscured. */
-                                palette_draw_selection_border(players[local_id].block.packed);
+                                   the outline while the actual color remains unobscured.
+                                   Geometry (incl. HUD-editor position) comes from the
+                                   hud_layout palette helpers. */
+                                palette_draw_selection_border(hud_edit_active && pv_palette && !network_connected
+                                                              ? texture_block_color(3, 3)
+                                                              : players[local_id].block.packed);
                                 glColor3f(1.0F, 1.0F, 1.0F);
                                 texture_draw(&texture_color_selection, palette_left(), palette_top(),
                                                          palette_size(), palette_size());
                                 glColor3f(1.0F, 1.0F, 1.0F);
+                                hud_layout_report_bounds(HUD_EL_PALETTE, palette_left(), palette_top(),
+                                                         palette_size(), palette_size());
                         }
 
-                        if(settings.show_live_player_count) {
+                        if((settings.show_live_player_count || (hud_edit_active && pv_gmi))
+                           && hud_layout_visible(HUD_EL_GMI)) {
                                 unsigned int team1_alive = 0;
                                 unsigned int team2_alive = 0;
                                 for(int k = 0; k < PLAYERS_MAX; k++) {
@@ -2045,6 +2273,21 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                                 }
                                         }
                                 }
+                                /* HUD EDITOR: stable sample counts when there is no
+                                   live game (disconnected preview). */
+                                if(hud_edit_active && pv_gmi && !network_connected) {
+                                        team1_alive = 7;
+                                        team2_alive = 6;
+                                }
+
+                                /* HUD EDITOR: player-counter group base = team-1
+                                   figure TOP (helmet y is gmi_y+32 naturally). */
+                                float g_bx = settings.window_width - 8.F - 32.F, g_by = 86.F;
+                                hud_layout_origin(HUD_EL_GMI, &g_bx, &g_by);
+                                g_bx -= 32.F * (hud_layout_scale(HUD_EL_GMI) - 1.0F); /* pin right */
+                                float gs = hud_layout_scale(HUD_EL_GMI);
+                                float gmi_y = g_by - 32.F;  /* natural 54 */
+                                bounds_begin();
 
                                 char count[4];
                                 sprintf(count, "%i", team1_alive);
@@ -2052,43 +2295,47 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 font_select(FONT_FANTASY);
                                 glColor3ub(gamestate.team_1.red, gamestate.team_1.green, gamestate.team_1.blue);
                                 // helmet and text
-                                texture_draw_empty(settings.window_width - 8.F - 32.F, gmi_y + 32.F, 32.F, 16.F);
+                                texture_draw_empty(g_bx, gmi_y + 32.F * gs, 32.F * gs, 16.F * gs);
                                 glColor3ub(255, 255, 255);
-                                hud_font_render(settings.window_width - 8.F - 32.F - 30.F, gmi_y + 28.F, 30.F, count, .4F);
+                                hud_font_render(g_bx - 30.F * gs - font_length(30.F * gs, count), gmi_y + 28.F * gs, 30.F * gs, count, .4F);
 
                                 // skin
                                 glColor3ub(222, 200, 141);
-                                texture_draw_empty(settings.window_width - 8.F - 32.F, gmi_y + 16.F, 32.F, 16.F);
+                                texture_draw_empty(g_bx, gmi_y + 16.F * gs, 32.F * gs, 16.F * gs);
 
                                 // eyes
                                 glColor3ub(0, 0, 0);
-                                texture_draw_empty(settings.window_width - 8.F - 26.F, gmi_y + 16.F, 6.F, 6.F);
-                                texture_draw_empty(settings.window_width - 8.F - 11.F, gmi_y + 16.F, 6.F, 6.F);
+                                texture_draw_empty(g_bx + 6.F * gs, gmi_y + 16.F * gs, 6.F * gs, 6.F * gs);
+                                texture_draw_empty(g_bx + 21.F * gs, gmi_y + 16.F * gs, 6.F * gs, 6.F * gs);
                                 // shadow
-                                texture_draw_empty(settings.window_width - 8.F - 32.F, gmi_y, 32.F, 2.F);
+                                texture_draw_empty(g_bx, gmi_y, 32.F * gs, 2.F * gs);
+                                bounds_grow(g_bx - 30.F * gs - font_length(30.F * gs, count), g_by, 62.F * gs + font_length(30.F * gs, count), 48.F * gs);
 
                                 // team 2
-                                gmi_y += 40.F;
+                                gmi_y = g_by - 32.F * gs + 40.F * gs;   /* natural 94 */
 
                                 sprintf(count, "%i", team2_alive);
                                 font_select(FONT_FANTASY);
                                 glColor3ub(gamestate.team_2.red, gamestate.team_2.green, gamestate.team_2.blue);
                                 // helmet and text
-                                texture_draw_empty(settings.window_width - 8.F - 32.F, gmi_y + 32.F, 32.F, 16.F);
+                                texture_draw_empty(g_bx, gmi_y + 32.F * gs, 32.F * gs, 16.F * gs);
                                 glColor3ub(255, 255, 255);
-                                hud_font_render(settings.window_width - 8.F - 32.F - 30.F, gmi_y + 28.F, 30.F, count, .4F);
+                                hud_font_render(g_bx - 30.F * gs - font_length(30.F * gs, count), gmi_y + 28.F * gs, 30.F * gs, count, .4F);
 
                                 // skin
                                 glColor3ub(222, 200, 141);
-                                texture_draw_empty(settings.window_width - 8.F - 32.F, gmi_y + 16.F, 32.F, 16.F);
+                                texture_draw_empty(g_bx, gmi_y + 16.F * gs, 32.F * gs, 16.F * gs);
 
                                 // eyes
                                 glColor3ub(0, 0, 0);
-                                texture_draw_empty(settings.window_width - 8.F - 26.F, gmi_y + 16.F, 6.F, 6.F);
-                                texture_draw_empty(settings.window_width - 8.F - 11.F, gmi_y + 16.F, 6.F, 6.F);
+                                texture_draw_empty(g_bx + 6.F * gs, gmi_y + 16.F * gs, 6.F * gs, 6.F * gs);
+                                texture_draw_empty(g_bx + 21.F * gs, gmi_y + 16.F * gs, 6.F * gs, 6.F * gs);
                                 // shadow
-                                texture_draw_empty(settings.window_width - 8.F - 32.F, gmi_y, 32.F, 2.F);
+                                texture_draw_empty(g_bx, gmi_y, 32.F * gs, 2.F * gs);
+                                bounds_grow(g_bx - 30.F * gs - font_length(30.F * gs, count), gmi_y + 48.F * gs,
+                                            62.F * gs + font_length(30.F * gs, count), 48.F * gs);
                         }
+                        bounds_flush(HUD_EL_GMI);
                 }
 
                 if(camera_mode == CAMERAMODE_SPECTATOR && spec_color_palette_time > window_time()) {
@@ -2101,70 +2348,94 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                         glColor3f(1.0F, 1.0F, 1.0F);
                 }
 
-                if(settings.player_stats && network_connected && network_logged_in
-                   && players[local_player_id].team != TEAM_SPECTATOR) {
+                if((settings.player_stats && network_connected && network_logged_in
+                    && players[local_player_id].team != TEAM_SPECTATOR
+                    || (hud_edit_active && pv_stats)) && hud_layout_visible(HUD_EL_STATS)) {
                         font_select(FONT_FIXEDSYS);
-                        float x = 8.F;
-                        float y = settings.window_height / 2.F - 60.F;
-                        float h = 16.F;
+                        /* HUD EDITOR: stats stack base (first row) + scale. */
+                        float ps_s = hud_layout_scale(HUD_EL_STATS);
+                        float ps_x = 8.F, ps_y = settings.window_height / 2.F - 60.F;
+                        hud_layout_origin(HUD_EL_STATS, &ps_x, &ps_y);
+                        float h = 16.F * ps_s;
                         char line[64];
                         char num_buf[32];
 
                         glColor3ub(255, 255, 255);
+                        bounds_begin();
                         format_comma(num_buf, player_stats_blocks_placed);
                         sprintf(line, "Blocks Placed: %s", num_buf);
-                        hud_font_render_outlined(x, y, h, line, 1.F);
+                        hud_font_render_outlined(ps_x, ps_y, h, line, 1.F);
+                        bounds_grow(ps_x, ps_y, font_length(h, line), h);
 
                         format_comma(num_buf, player_stats_kills);
                         sprintf(line, "Kills: %s", num_buf);
-                        hud_font_render_outlined(x, y + h, h, line, 1.F);
+                        hud_font_render_outlined(ps_x, ps_y + h, h, line, 1.F);
+                        bounds_grow(ps_x, ps_y + h, font_length(h, line), h);
 
                         format_comma(num_buf, player_stats_headshots);
                         sprintf(line, "Headshot Kills: %s", num_buf);
-                        hud_font_render_outlined(x, y + h * 2, h, line, 1.F);
+                        hud_font_render_outlined(ps_x, ps_y + h * 2, h, line, 1.F);
+                        bounds_grow(ps_x, ps_y + h * 2, font_length(h, line), h);
 
                         format_comma(num_buf, player_stats_deaths);
                         sprintf(line, "Deaths: %s", num_buf);
-                        hud_font_render_outlined(x, y + h * 3, h, line, 1.F);
+                        hud_font_render_outlined(ps_x, ps_y + h * 3, h, line, 1.F);
+                        bounds_grow(ps_x, ps_y + h * 3, font_length(h, line), h);
 
                         format_comma(num_buf, (int)player_stats_distance);
                         sprintf(line, "Distance Traveled: %s blocks", num_buf);
-                        hud_font_render_outlined(x, y + h * 4, h, line, 1.F);
+                        hud_font_render_outlined(ps_x, ps_y + h * 4, h, line, 1.F);
+                        bounds_grow(ps_x, ps_y + h * 4, font_length(h, line), h);
 
                         format_comma(num_buf, player_stats_jumps);
                         sprintf(line, "Jumps: %s", num_buf);
-                        hud_font_render_outlined(x, y + h * 5, h, line, 1.F);
+                        hud_font_render_outlined(ps_x, ps_y + h * 5, h, line, 1.F);
+                        bounds_grow(ps_x, ps_y + h * 5, font_length(h, line), h);
+                        bounds_flush(HUD_EL_STATS);
 
                         font_select(FONT_FIXEDSYS);
                 }
 
-                if(settings.player_technical_stats && network_connected && network_logged_in
-                   && players[local_player_id].team != TEAM_SPECTATOR) {
+                if((settings.player_technical_stats && network_connected && network_logged_in
+                    && players[local_player_id].team != TEAM_SPECTATOR
+                    || (hud_edit_active && pv_stats)) && hud_layout_visible(HUD_EL_TECHSTATS)) {
                         font_select(FONT_FIXEDSYS);
+                        /* HUD EDITOR: base = right text edge of the first row. */
+                        float ts_s = hud_layout_scale(HUD_EL_TECHSTATS);
                         float right_edge = settings.window_width - 8.F;
                         float y = settings.window_height / 2.F - 44.F;
-                        float h = 16.F;
+                        hud_layout_origin(HUD_EL_TECHSTATS, &right_edge, &y);
+                        right_edge -= (232.F) * (ts_s - 1.0F);   /* pin right edge */
+                        float h = 16.F * ts_s;
                         char line[64];
                         char num_buf[32];
 
                         glColor3ub(255, 255, 255);
+                        bounds_begin();
                         format_comma(num_buf, particle_stats_count);
                         sprintf(line, "Particles: %s", num_buf);
                         hud_font_render_outlined(right_edge - font_length(h, line), y, h, line, 1.F);
+                        bounds_grow(right_edge - font_length(h, line), y, font_length(h, line), h);
 
                         format_comma(num_buf, (int)particle_stats_created_per_second);
                         sprintf(line, "New Parts/s: %s", num_buf);
                         hud_font_render_outlined(right_edge - font_length(h, line), y + h, h, line, 1.F);
+                        bounds_grow(right_edge - font_length(h, line), y + h, font_length(h, line), h);
 
                         format_comma(num_buf, particle_stats_vertices);
                         sprintf(line, "Vertices: %s", num_buf);
                         hud_font_render_outlined(right_edge - font_length(h, line), y + h * 2, h, line, 1.F);
+                        bounds_grow(right_edge - font_length(h, line), y + h * 2, font_length(h, line), h);
 
                         format_comma(num_buf, model_total_voxels() + map_total_blocks());
                         sprintf(line, "Voxels: %s", num_buf);
                         hud_font_render_outlined(right_edge - font_length(h, line), y + h * 3, h, line, 1.F);
+                        bounds_grow(right_edge - font_length(h, line), y + h * 3, font_length(h, line), h);
 
-                        int* pick_pos = camera_terrain_pick_local(1);
+                        /* HUD EDITOR: ray-picks need a loaded world — skip while
+                           previewing from the main menu (pick_pos NULL renders
+                           the established "Dist: --" fallback). */
+                        int* pick_pos = (hud_edit_active && !network_connected) ? NULL : camera_terrain_pick_local(1);
                         if(pick_pos) {
                                 float ex, ey, ez;
                                 camera_local_eye(&ex, &ey, &ez);
@@ -2177,6 +2448,8 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 sprintf(line, "Dist: --");
                         }
                         hud_font_render_outlined(right_edge - font_length(h, line), y + h * 4, h, line, 1.F);
+                        bounds_grow(right_edge - font_length(h, line), y + h * 4, font_length(h, line), h);
+                        bounds_flush(HUD_EL_TECHSTATS);
 
                         font_select(FONT_FIXEDSYS);
                 }
@@ -2210,8 +2483,11 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 }
 
                                 if(chat_height > 0) {
-                                        float x = 3.F,
-                                                  y = 76.F + ((chat_messages + 1.F) * (16.F + settings.chat_spacing)),
+                                        /* HUD EDITOR: the panel follows the chat layout;
+                                           the message backdrop disappears with a hidden
+                                           chat (the typing box below stays). */
+                                        float x = 3.F + msg_dx[0],
+                                                  y = 76.F + ((chat_messages + 1.F) * (16.F + settings.chat_spacing)) + msg_dy[0],
                                                   w = chat_width + 16.0F,
                                                   h = (16.F + settings.chat_spacing) * chat_height;
 
@@ -2220,14 +2496,15 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                         glEnable(GL_BLEND);
                                         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-                                        texture_draw_empty(x, y, w, h);
+                                        if(hud_layout_visible(HUD_EL_CHAT))
+                                                texture_draw_empty(x, y, w, h);
                                         if(chat_input_mode != CHAT_NO_INPUT) {
-                                                texture_draw_empty(3.0F, 90.F, chat_width + 16.0F, 42.F);
+                                                texture_draw_empty(3.0F + msg_dx[0], 90.F + msg_dy[0], chat_width + 16.0F, 42.F);
 
                                                 color = mu_accent_color(1.F, 255);
                                                 glColor4ub(color.r, color.g, color.b, color.a);
                                                 glLineWidth(3);
-                                                glx_draw_line_2d(3.0F, 90.F, chat_width + 19.F, 90.F);
+                                                glx_draw_line_2d(3.0F + msg_dx[0], 90.F + msg_dy[0], chat_width + 19.F + msg_dx[0], 90.F + msg_dy[0]);
                                         }
 
 
@@ -2239,7 +2516,8 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
 
                         if(chat_input_mode != CHAT_NO_INPUT) {
                                 chat_cursor_clamp();
-                                float avail_w = (float)settings.window_width - 11.0F - 16.0F;
+                                float avail_w = (float)settings.window_width - 11.0F - 16.0F - msg_dx[0];
+                                if(avail_w < 40.0F) avail_w = 40.0F;
                                 int row_starts[CHAT_INPUT_MAX_ROWS], row_lens[CHAT_INPUT_MAX_ROWS];
                                 int rows = chat_wrap(avail_w, row_starts, row_lens, CHAT_INPUT_MAX_ROWS);
                                 chat_input_rows = rows;
@@ -2247,21 +2525,24 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 chat_cursor_to_rowcol(row_starts, row_lens, rows, &cur_row, &cur_col);
                                 /* Render rows bottom-up so the cursor's row sits on the original
                                    baseline (y=69) and earlier wrapped rows stack above. The
-                                   prefix label rides on the topmost rendered row. */
-                                float top_y = 69.F + (rows - 1) * CHAT_INPUT_ROW_H;
+                                   prefix label rides on the topmost rendered row.
+                                   HUD EDITOR: rows follow the chat layout delta. */
+                                float top_y = 69.F + (rows - 1) * CHAT_INPUT_ROW_H + msg_dy[0];
+                                msgb_grow(0, 11.0F + msg_dx[0], top_y + 15.F, font_length(16.0F, chat[0][0]) + 4.0F,
+                                          (rows - 1) * CHAT_INPUT_ROW_H + 16.0F);
                                 switch(chat_input_mode) {
                                         case CHAT_ALL_INPUT:
-                                                font_render(11.0F, top_y + 15.F, 16.0F, "Global:");
+                                                font_render(11.0F + msg_dx[0], top_y + 15.F, 16.0F, "Global:");
                                                 break;
                                         case CHAT_TEAM_INPUT:
-                                                font_render(11.0F, top_y + 15.F, 16.0F, "Team:");
+                                                font_render(11.0F + msg_dx[0], top_y + 15.F, 16.0F, "Team:");
                                                 break;
                                 }
                                 char tmp[260];
                                 int sel_lo = -1, sel_hi = -1;
                                 if(chat_sel_active()) chat_sel_range(&sel_lo, &sel_hi);
                                 for(int r = 0; r < rows; r++) {
-                                        float y = 69.F + (rows - 1 - r) * CHAT_INPUT_ROW_H;
+                                        float y = 69.F + (rows - 1 - r) * CHAT_INPUT_ROW_H + msg_dy[0];
                                         int n = row_lens[r];
                                         if(n >= (int)sizeof(tmp)) n = (int)sizeof(tmp) - 1;
                                         int row_start = row_starts[r];
@@ -2276,8 +2557,8 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                                 pre[rl] = 0;
                                                 memcpy(mid, chat[0][0] + row_start + rl, rh - rl);
                                                 mid[rh - rl] = 0;
-                                                float x0 = 11.0F + font_length(16.0F, pre);
-                                                float x1 = 11.0F + font_length(16.0F, pre) + font_length(16.0F, mid);
+                                                float x0 = 11.0F + msg_dx[0] + font_length(16.0F, pre);
+                                                float x1 = 11.0F + msg_dx[0] + font_length(16.0F, pre) + font_length(16.0F, mid);
                                                 mu_Color sc = mu_color(80, 130, 220, 200);
                                                 glColor4ub(sc.r, sc.g, sc.b, sc.a);
                                                 glEnable(GL_BLEND);
@@ -2289,7 +2570,7 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
 
                                         memcpy(tmp, chat[0][0] + row_start, n);
                                         tmp[n] = 0;
-                                        font_render(11.0F, y, 16.0F, tmp);
+                                        font_render(11.0F + msg_dx[0], y, 16.0F, tmp);
                                         if(r == cur_row && !chat_sel_active()) {
                                                 int cc = chat_cursor - row_start;
                                                 if(cc < 0) cc = 0;
@@ -2297,25 +2578,32 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                                 char before[260];
                                                 memcpy(before, chat[0][0] + row_start, cc);
                                                 before[cc] = 0;
-                                                float cx = 11.0F + font_length(16.0F, before);
+                                                float cx = 11.0F + msg_dx[0] + font_length(16.0F, before);
                                                 font_render(cx, y, 16.0F, "_");
                                         }
                                 }
                         }
 
+                        /* HUD EDITOR: wrap the message loop in bounds tracking
+                           (chat and killfeed accumulate independently). */
+                        msgb_reset();
                         for(int k = 0; k < chat_messages; k++) {
                                 glColor3ub(255, 255, 255);
                                 int idx0 = k + 1 + chat_scroll_offset;
                                 if(idx0 > 127) idx0 = 127;
-                                if(window_time() - chat_timer[0][idx0] < 10.0F || chat_input_mode != CHAT_NO_INPUT) {
+                                if((window_time() - chat_timer[0][idx0] < 10.0F || chat_input_mode != CHAT_NO_INPUT)
+                                   && hud_layout_visible(HUD_EL_CHAT)) {
                                         hud_render_message(0, k);
                                 }
 
                                 // Hide killfeed when chat is open
-                                if(chat_input_mode == CHAT_NO_INPUT && window_time() - chat_timer[1][k + 1] < 10.0F) {
+                                if(chat_input_mode == CHAT_NO_INPUT && window_time() - chat_timer[1][k + 1] < 10.0F
+                                   && (hud_edit_active ? pv_killfeed : 1) && hud_layout_visible(HUD_EL_KILLFEED)) {
                                         hud_render_message(1, k);
                                 }
                         }
+                        msgb_flush(HUD_EL_CHAT, 0);
+                        msgb_flush(HUD_EL_KILLFEED, 1);
 
                         font_select(FONT_FIXEDSYS);
                         glColor3ub(255, 255, 255);
@@ -2334,20 +2622,24 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                         float pbz = gamestate.gamemode.tc.territory[gamestate.progressbar.tent].y - players[local_player_id].pos.z;
                         float l = pbx * pbx + pby * pby + pbz * pbz;
                         if(p < 1.0F && l < 20.0F * 20.0F) {
+                                /* HUD EDITOR: TC bar layout base (bar left edge / top),
+                                   computed once for BOTH halves of the bar. */
+                                float tc_x = (settings.window_width - 440.0F * scalef) / 2.0F, tc_y = settings.window_height * 0.25F;
+                                hud_layout_origin(HUD_EL_TCBAR, &tc_x, &tc_y);
                                 switch(gamestate.gamemode.tc.territory[gamestate.progressbar.tent].team) {
                                         case TEAM_1: glColor3ub(gamestate.team_1.red, gamestate.team_1.green, gamestate.team_1.blue); break;
                                         case TEAM_2: glColor3ub(gamestate.team_2.red, gamestate.team_2.green, gamestate.team_2.blue); break;
                                         default: glColor3ub(0, 0, 0);
                                 }
-                                texture_draw(&texture_white, (settings.window_width - 440.0F * scalef) / 2.0F + 440.0F * scalef * p,
-                                                         settings.window_height * 0.25F, 440.0F * scalef * (1.0F - p), 20.0F * scalef);
+                                texture_draw(&texture_white, tc_x + 440.0F * scalef * p,
+                                                         tc_y, 440.0F * scalef * (1.0F - p), 20.0F * scalef);
                                 switch(gamestate.progressbar.team_capturing) {
                                         case TEAM_1: glColor3ub(gamestate.team_1.red, gamestate.team_1.green, gamestate.team_1.blue); break;
                                         case TEAM_2: glColor3ub(gamestate.team_2.red, gamestate.team_2.green, gamestate.team_2.blue); break;
                                         default: glColor3ub(0, 0, 0);
                                 }
-                                texture_draw(&texture_white, (settings.window_width - 440.0F * scalef) / 2.0F,
-                                                         settings.window_height * 0.25F, 440.0F * scalef * p, 20.0F * scalef);
+                                texture_draw(&texture_white, tc_x, tc_y, 440.0F * scalef * p, 20.0F * scalef);
+                                hud_layout_report_bounds(HUD_EL_TCBAR, tc_x, tc_y, 440.0F * scalef, 20.0F * scalef);
                         }
                 }
 
@@ -2374,7 +2666,7 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 }
                                 font_select(FONT_FIXEDSYS);
 
-                                tracer_minimap(1, scalef, minimap_x, minimap_y, 512.0F);
+                                tracer_minimap(1, scalef, minimap_x, minimap_y, 512.0F, 0.0F, 0.0F, 0.0F);
 
                                 if(gamestate.gamemode_type == GAMEMODE_CTF) {
                                         if(!gamestate.gamemode.ctf.team_1_intel) {
@@ -2459,7 +2751,7 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 texture_draw_rotated(&texture_player, minimap_x + camera_x * scalef, minimap_y - camera_z * scalef,
                                                                          12 * scalef, 12 * scalef, camera_rot_x + PI);
                                 glColor3f(1.0F, 1.0F, 1.0F);
-                        } else {
+                        } else if(hud_layout_visible(HUD_EL_MINIMAP)) {
                                 // minimized, top right
                                 float zoom_sizes[] = {32.0F, 64.0F, 128.0F, 256.0F, 512.0F};
                                 int zoom_idx = max(0, min(4, settings.minimap_zoom - 1));
@@ -2469,6 +2761,21 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 float view_z = camera_z - half_vp;
                                 float map_scale = 128.0F / viewport;
                                 char sector_str[3] = {(int)(camera_x / 64.0F) + 'A', (int)(camera_z / 64.0F) + '1', 0};
+
+                                /* HUD EDITOR: minimap base = map-box top-left
+                                   (natural W-143*sf, 585*sf), right-pinned scale. */
+                                float mm_s = hud_layout_scale(HUD_EL_MINIMAP);
+                                float mm_x = settings.window_width - 143 * scalef, mm_top = 585 * scalef;
+                                hud_layout_origin(HUD_EL_MINIMAP, &mm_x, &mm_top);
+                                mm_x -= 128 * scalef * (mm_s - 1.0F);   /* pin right edge */
+                                float mm_cs = map_scale * scalef * mm_s; /* world->px factor */
+                                float mm_box = 128 * scalef * mm_s;
+
+                                /* HUD EDITOR: without a loaded world there is no
+                                   map texture/icons — still draw the frame so the
+                                   element stays pickable and movable. */
+                                int mm_live = (texture_minimap.width > 0 && texture_minimap.height > 0);
+
                                 glColor4f(0.F, 0.F, 0.F, 0.7F);
 
                                 switch(players[local_player_id].team) {
@@ -2478,11 +2785,11 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                         default: glColor3ub(150, 150, 150);
                                 }
                                 font_select(FONT_FANTASY);
-                                hud_font_render_centered(settings.window_width - 77 * scalef, 454 * scalef, 30.F, sector_str, 1.F);
+                                hud_font_render_centered(mm_x + 66 * scalef, mm_top - 131 * scalef, 30.F * mm_s, sector_str, 1.F);
                                 font_select(FONT_FIXEDSYS);
 
                                 glColor3ub(0, 0, 0);
-                                texture_draw_empty(settings.window_width - 144 * scalef, 586 * scalef, 130 * scalef, 130 * scalef);
+                                texture_draw_empty(mm_x - 1 * scalef, mm_top + 1 * scalef, 130 * scalef * mm_s, 130 * scalef * mm_s);
                                 glColor3f(1.0F, 1.0F, 1.0F);
 
                                 {
@@ -2501,11 +2808,12 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                            which is core GLES 1.1. Output is pixel-identical,
                                            except map edges now show the black backdrop instead of
                                            CLAMP_TO_EDGE smear, which arguably looks better. */
-                                        float box_x = settings.window_width - 143 * scalef;
-                                        float box_top = 585 * scalef;
-                                        float box_size = 128 * scalef;
+                                        float box_x = mm_x;
+                                        float box_top = mm_top;
+                                        float box_size = mm_box;
 
                                         glColor4f(1.0F, 1.0F, 1.0F, 1.0F);
+                                        if(mm_live) {
                                         glEnable(GL_SCISSOR_TEST);
                                         glScissor((int)box_x, (int)(box_top - box_size), (int)ceil(box_size), (int)ceil(box_size));
                                         /* Scale the map texture by map_scale so the visible
@@ -2515,19 +2823,21 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                            matched viewport=128 (map_scale=1) and caused icons
                                            to drift relative to the map at any other zoom. */
                                         texture_draw(&texture_minimap,
-                                                                 box_x - (camera_x - half_vp) * map_scale * scalef,
-                                                                 box_top + (camera_z - half_vp) * map_scale * scalef,
-                                                                 512 * map_scale * scalef, 512 * map_scale * scalef);
+                                                                 box_x - (camera_x - half_vp) * mm_cs,
+                                                                 box_top + (camera_z - half_vp) * mm_cs,
+                                                                 512 * mm_cs, 512 * mm_cs);
                                         glDisable(GL_SCISSOR_TEST);
+                                        }
 
                                         int gl_err = glGetError();
                                         if(gl_err != 0)
                                                 log_warn("minimap draw: glGetError() = 0x%04X", gl_err);
                                 }
 
-                                tracer_minimap(0, scalef, view_x, view_z, viewport);
+                                if(mm_live)
+                                tracer_minimap(0, scalef, view_x, view_z, viewport, mm_x, mm_top, mm_cs);
 
-                                if(gamestate.gamemode_type == GAMEMODE_CTF) {
+                                if(mm_live && gamestate.gamemode_type == GAMEMODE_CTF) {
                                         float tent1_x = min(max(gamestate.gamemode.ctf.team_1_base.x, view_x), view_x + viewport) - view_x;
                                         float tent1_y = min(max(gamestate.gamemode.ctf.team_1_base.y, view_z), view_z + viewport) - view_z;
 
@@ -2538,11 +2848,10 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                                                                   gamestate.gamemode.ctf.team_1_base.y)) {
                                                 glColor3ub(gamestate.team_1.red * 0.94F, gamestate.team_1.green * 0.94F,
                                                                    gamestate.team_1.blue * 0.94F);
-texture_draw_empty_rotated(settings.window_width - 143 * scalef + tent1_x * map_scale * scalef,
-                           (585 - tent1_y * map_scale) * scalef, 12 * scalef, 12 * scalef, 0.0F);
+texture_draw_empty_rotated(mm_x + tent1_x * mm_cs, mm_top - tent1_y * mm_cs, 12 * scalef * mm_s, 12 * scalef * mm_s, 0.0F);
                                                 glColor3f(1.0F, 1.0F, 1.0F);
-                                                texture_draw_rotated(&texture_medical, settings.window_width - 143 * scalef + tent1_x * map_scale * scalef,
-                                                                                         (585 - tent1_y * map_scale) * scalef, 12 * scalef, 12 * scalef, 0.0F);
+                                                texture_draw_rotated(&texture_medical, mm_x + tent1_x * mm_cs,
+                                                                                         mm_top - tent1_y * mm_cs, 12 * scalef * mm_s, 12 * scalef * mm_s, 0.0F);
                                         }
                                         if(!gamestate.gamemode.ctf.team_1_intel) {
                                                 float intel_x
@@ -2552,19 +2861,18 @@ texture_draw_empty_rotated(settings.window_width - 143 * scalef + tent1_x * map_
                                                         = min(max(gamestate.gamemode.ctf.team_1_intel_location.dropped.y, view_z), view_z + viewport)
                                                         - view_z;
                                                 glColor3ub(gamestate.team_1.red, gamestate.team_1.green, gamestate.team_1.blue);
-                                                texture_draw_rotated(&texture_intel, settings.window_width - 143 * scalef + intel_x * map_scale * scalef,
-                                                                                         (585 - intel_y * map_scale) * scalef, 12 * scalef, 12 * scalef, 0.0F);
+                                                texture_draw_rotated(&texture_intel, mm_x + intel_x * mm_cs,
+                                                                                         mm_top - intel_y * mm_cs, 12 * scalef * mm_s, 12 * scalef * mm_s, 0.0F);
                                         }
 
                                         if(map_object_visible(gamestate.gamemode.ctf.team_2_base.x, 0.0F,
                                                                                   gamestate.gamemode.ctf.team_2_base.y)) {
                                                 glColor3ub(gamestate.team_2.red * 0.94F, gamestate.team_2.green * 0.94F,
                                                                    gamestate.team_2.blue * 0.94F);
-texture_draw_empty_rotated(settings.window_width - 143 * scalef + tent2_x * map_scale * scalef,
-                           (585 - tent2_y * map_scale) * scalef, 12 * scalef, 12 * scalef, 0.0F);
+texture_draw_empty_rotated(mm_x + tent2_x * mm_cs, mm_top - tent2_y * mm_cs, 12 * scalef * mm_s, 12 * scalef * mm_s, 0.0F);
                                                 glColor3f(1.0F, 1.0F, 1.0F);
-                                                texture_draw_rotated(&texture_medical, settings.window_width - 143 * scalef + tent2_x * map_scale * scalef,
-                                                                                         (585 - tent2_y * map_scale) * scalef, 12 * scalef, 12 * scalef, 0.0F);
+                                                texture_draw_rotated(&texture_medical, mm_x + tent2_x * mm_cs,
+                                                                                         mm_top - tent2_y * mm_cs, 12 * scalef * mm_s, 12 * scalef * mm_s, 0.0F);
                                         }
                                         if(!gamestate.gamemode.ctf.team_2_intel) {
                                                 float intel_x
@@ -2574,8 +2882,8 @@ texture_draw_empty_rotated(settings.window_width - 143 * scalef + tent2_x * map_
                                                         = min(max(gamestate.gamemode.ctf.team_2_intel_location.dropped.y, view_z), view_z + viewport)
                                                         - view_z;
                                                 glColor3ub(gamestate.team_2.red, gamestate.team_2.green, gamestate.team_2.blue);
-                                                texture_draw_rotated(&texture_intel, settings.window_width - 143 * scalef + intel_x * map_scale * scalef,
-                                                                                         (585 - intel_y * map_scale) * scalef, 12 * scalef, 12 * scalef, 0.0F);
+                                                texture_draw_rotated(&texture_intel, mm_x + intel_x * mm_cs,
+                                                                                         mm_top - intel_y * mm_cs, 12 * scalef * mm_s, 12 * scalef * mm_s, 0.0F);
                                         }
                                 }
                                 if(gamestate.gamemode_type == GAMEMODE_TC) {
@@ -2594,11 +2902,13 @@ texture_draw_empty_rotated(settings.window_width - 143 * scalef + tent2_x * map_
                                                 }
                                                 float t_x = min(max(gamestate.gamemode.tc.territory[k].x, view_x), view_x + viewport) - view_x;
                                                 float t_y = min(max(gamestate.gamemode.tc.territory[k].y, view_z), view_z + viewport) - view_z;
-                                                texture_draw_rotated(&texture_command, settings.window_width - 143 * scalef + t_x * map_scale * scalef,
-                                                                                         (585 - t_y * map_scale) * scalef, 12 * scalef, 12 * scalef, 0.0F);
+                                                texture_draw_rotated(&texture_command, mm_x + t_x * mm_cs,
+                                                                                         mm_top - t_y * mm_cs, 12 * scalef * mm_s, 12 * scalef * mm_s, 0.0F);
                                         }
                                 }
 
+                                /* HUD EDITOR: player dots need a live world too. */
+                                if(mm_live)
                                 for(int k = 0; k < PLAYERS_MAX; k++) {
                                         if(players[k].connected && players[k].alive
                                            && (players[k].team == players[local_player_id].team
@@ -2623,19 +2933,26 @@ texture_draw_empty_rotated(settings.window_width - 143 * scalef + tent2_x * map_
                                                                 camera_rot_x + PI :
                                                                 -atan2(players[k].orientation.z, players[k].orientation.x) - HALFPI;
                                                         texture_draw_rotated(&texture_player,
-                                                                                                 settings.window_width - 143 * scalef + player_x * map_scale * scalef,
-                                                                                                 (585 - player_y * map_scale) * scalef, 12 * scalef, 12 * scalef, ang);
+                                                                                                 mm_x + player_x * mm_cs,
+                                                                                                 mm_top - player_y * mm_cs, 12 * scalef * mm_s, 12 * scalef * mm_s, ang);
                                                 }
                                         }
                                 }
                                 glColor3f(1.0F, 1.0F, 1.0F);
+                                hud_layout_report_bounds(HUD_EL_MINIMAP, mm_x - 1 * scalef, mm_top + 1 * scalef,
+                                                         130 * scalef * mm_s, 148 * scalef * mm_s);
                         }
                 }
 
+                /* HUD EDITOR: the ray-pick needs a loaded world; while
+                   previewing from the main menu there is none. */
                 struct Camera_HitType hit;
-                camera_hit_fromplayer(&hit, local_player_id, 128.0F);
+                memset(&hit, 0, sizeof(hit));
+                if(!hud_edit_active || network_connected)
+                        camera_hit_fromplayer(&hit, local_player_id, 128.0F);
 
-                if(hit.type == CAMERA_HITTYPE_PLAYER
+                if((!hud_edit_active || network_connected)
+                   && hit.type == CAMERA_HITTYPE_PLAYER
                    && player_intersection_type >= 0
                    && (players[local_player_id].team == TEAM_SPECTATOR
                            || players[player_intersection_player].team == players[local_player_id].team)) {
@@ -2648,21 +2965,31 @@ texture_draw_empty_rotated(settings.window_width - 143 * scalef + tent2_x * map_
                                 default: glColor3f(1.0F, 1.0F, 1.0F);
                         }
                         sprintf(str, "%s's %s", players[player_intersection_player].name, th[player_intersection_type]);
-                        font_centered(settings.window_width / 2.0F, settings.window_height * 0.2F, 16.0F, str);
+                        float ti_x = settings.window_width / 2.0F, ti_y = settings.window_height * 0.2F;
+                        hud_layout_origin(HUD_EL_TARGETINFO, &ti_x, &ti_y);
+                        font_centered(ti_x, ti_y, 16.0F, str);
+                        hud_layout_report_bounds(HUD_EL_TARGETINFO, ti_x - font_length(16.0F, str) / 2.0F, ti_y,
+                                                 font_length(16.0F, str), 16.0F);
                 }
 
-                if(window_time() - chat_popup_timer < chat_popup_duration) {
+                if(window_time() - chat_popup_timer < chat_popup_duration && hud_layout_visible(HUD_EL_CENTERMSG)) {
                         glColor3ub(red(chat_popup_color), green(chat_popup_color), blue(chat_popup_color));
-                        font_centered(settings.window_width / 2.F, settings.window_height / 2.0F, 32.F, chat_popup);
+                        float cm_x = settings.window_width / 2.F, cm_y = settings.window_height / 2.0F;
+                        hud_layout_origin(HUD_EL_CENTERMSG, &cm_x, &cm_y);
+                        font_centered(cm_x, cm_y, 32.F, chat_popup);
+                        hud_layout_report_bounds(HUD_EL_CENTERMSG, cm_x - font_length(32.F, chat_popup) / 2.F, cm_y,
+                                                 font_length(32.F, chat_popup), 32.F);
                 }
                 glColor3f(1.0F, 1.0F, 1.0F);
 
-                if(local_player_drag_active && local_player_drag_amount > 0) {
+                if(local_player_drag_active && local_player_drag_amount > 0 && hud_layout_visible(HUD_EL_CENTERMSG)) {
                         char drag_str[16];
                         font_select(FONT_FIXEDSYS);
                         sprintf(drag_str, "%i", local_player_drag_amount);
-                        float cx = settings.window_width / 2.0F;
-                        float cy = 50.F;
+                        float dc_x = settings.window_width / 2.0F, dc_y = settings.window_height / 2.0F;
+                        hud_layout_origin(HUD_EL_CENTERMSG, &dc_x, &dc_y);
+                        float cx = dc_x;
+                        float cy = 50.F + (dc_y - settings.window_height / 2.0F);
                         float tw = font_length(32.F, drag_str);
                         float sx = cx - tw / 2.0F;
                         glColor4f(0.F, 0.F, 0.F, 1.F);
@@ -2677,20 +3004,29 @@ texture_draw_empty_rotated(settings.window_width - 143 * scalef + tent2_x * map_
                 }
         }
 
-        if(settings.show_fps) {
+        if(settings.show_fps || (hud_edit_active && pv_fpsbox)) {
+            if(hud_layout_visible(HUD_EL_FPSBOX)) {
+                /* HUD EDITOR: fps box layout base (backdrop top-left), scale,
+                   right-pinned. Editor shows it even with the setting off so
+                   it can be positioned. */
+                float fps_bx = settings.window_width - 105.F, fps_by = settings.window_height / 2.F - 18.F + 84.F;
+                hud_layout_origin(HUD_EL_FPSBOX, &fps_bx, &fps_by);
+                float fs = hud_layout_scale(HUD_EL_FPSBOX);
+                fps_bx -= 100.F * (fs - 1.0F);   /* pin right edge */
+
                 mu_Color color = mu_accent_color(0.3F, settings.chat_shadow * 255);
                 glColor4ub(color.r, color.g, color.b, color.a);
 
                 glEnable(GL_BLEND);
                 glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-                texture_draw_empty(settings.window_width - 105.F, settings.window_height / 2.F - 18.F + 84.F, 100.F, 36.F);
+                texture_draw_empty(fps_bx, fps_by, 100.F * fs, 36.F * fs);
 
                 color = mu_accent_color(1.F, 255);
                 glColor3ub(color.r, color.g, color.b);
                 glLineWidth(3);
-                glx_draw_line_2d(settings.window_width - 5.F, floor(settings.window_height / 2.F - 18.F + 84.F),
-                                  settings.window_width - 5.F, floor(settings.window_height / 2.F - 18.F + 48.F));
+                glx_draw_line_2d(fps_bx + 100.F * fs, floor(fps_by),
+                                  fps_bx + 100.F * fs, floor(fps_by - 36.F * fs));
                 glLineWidth(1);
                 glColor3ub(255, 255, 255);
                 glDisable(GL_BLEND);
@@ -2699,9 +3035,11 @@ texture_draw_empty_rotated(settings.window_width - 143 * scalef + tent2_x * map_
                 font_select(FONT_FIXEDSYS);
                 glColor3f(1.0F, 1.0F, 1.0F);
                 sprintf(debug_str, "%ims", network_ping());
-                font_render(settings.window_width - 17.0F - font_length(16.F, debug_str), settings.window_height / 2.F - 18.F + 82.F, 16.0F, debug_str);
+                font_render(fps_bx + 100.F * fs - 17.0F * fs - font_length(16.F * fs, debug_str), fps_by - 2.F * fs, 16.0F * fs, debug_str);
                 sprintf(debug_str, "%i fps", (int)fps);
-                font_render(settings.window_width - 17.0F - font_length(16.F, debug_str), settings.window_height / 2.F - 18.F + 66.F, 16.0F, debug_str);
+                font_render(fps_bx + 100.F * fs - 17.0F * fs - font_length(16.F * fs, debug_str), fps_by - 18.F * fs, 16.0F * fs, debug_str);
+                hud_layout_report_bounds(HUD_EL_FPSBOX, fps_bx, fps_by, 100.F * fs, 40.F * fs);
+            }
         }
 
 #ifdef USE_TOUCH
@@ -2781,9 +3119,17 @@ texture_draw_empty_rotated(settings.window_width - 143 * scalef + tent2_x * map_
         }
 #endif
         demo_playback_render_overlay(scalef);
+
+        /* ═══ HUD EDITOR: chrome + panel (after every element) ═══ */
+        hud_editor_frame_end(ctx, scalex, scalef);
 }
 
 static void hud_ingame_scroll(double yoffset) {
+        /* HUD EDITOR: the wheel belongs to the panel while editing (main.c
+           forwards it to microui; the game-side actions below must not fire). */
+        if(hud_edit_active)
+                return;
+
         /* While the chat input is open, the scroll wheel pages through the
          * chat history instead of switching weapons. yoffset > 0 scrolls
          * toward older messages; yoffset < 0 scrolls back toward the newest. */
@@ -2824,6 +3170,11 @@ static void hud_ingame_scroll(double yoffset) {
 
 static double last_x, last_y;
 static void hud_ingame_mouselocation(double x, double y) {
+        /* HUD EDITOR: drives picking/dragging; skips all game-side handling. */
+        if(hud_edit_active) {
+                hud_editor_mouselocation(x, y);
+                return;
+        }
         if(chat_input_mode != CHAT_NO_INPUT) {
                 if(chat_drag_active) {
                         int off = chat_input_offset_at(x, y);
@@ -2893,6 +3244,11 @@ static void hud_switch_next_player() {
 }
 
 void hud_ingame_mouseclick(double x, double y, int button, int action, int mods) {
+        /* HUD EDITOR: owns every click while active (selection/drag/panel). */
+        if(hud_edit_active) {
+                hud_editor_mouseclick(x, y, button, action, mods);
+                return;
+        }
         if(chat_input_mode != CHAT_NO_INPUT) {
                 if(button == WINDOW_MOUSE_LMB) {
                         if(action == WINDOW_PRESS) {
@@ -3139,6 +3495,13 @@ static const char* hud_ingame_completeword(const char* s) {
 }
 
 static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
+        /* HUD EDITOR: all game keys are swallowed while editing; the editor
+           handles its own hotkeys (F10/ESC/Tab/arrows/Del) above. */
+        if(hud_edit_active) {
+                hud_editor_keyboard(key, action, mods, internal);
+                return;
+        }
+
         /* Key repeat: GLFW delivers GLFW_REPEAT events that the handler used
            to drop, so holding a key did nothing and actions felt like they
            landed on release.  Normalize repeat to press for the keys that
@@ -3524,6 +3887,13 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
                                         screen_current = SCREEN_NONE;
                                         return;
                                 }
+                        }
+
+                        /* HUD EDITOR entry point (F10). Not reachable while the
+                           ESC menu is up — that screen has its own sidebar button. */
+                        if(key == WINDOW_KEY_HUD_EDITOR) {
+                                hud_editor_open();
+                                return;
                         }
 
                         if(key == WINDOW_KEY_ESCAPE) {
@@ -4101,6 +4471,850 @@ static void hud_ingame_touch(void* finger, int action, float x, float y, float d
         }
 }
 
+/* ═══════════════════════════════════════════════════════════════════════
+   HUD EDITOR — implementation
+   State lives at the top of this file (right after the palette helpers);
+   rendering integrations are spread through hud_ingame_render.
+   Coordinate spaces: microui/mouse = screen (origin top-left, y DOWN);
+   GL HUD drawing = origin bottom-left, y UP; texture_draw/font_render take
+   the TOP edge of their box as y in GL space.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* ---- preview helpers ---------------------------------------------------- */
+
+static unsigned int pv_rng_state = 0x1234ABCDu;
+
+static unsigned int pv_rand_u32(void) {
+        /* xorshift32: stable sample data, no libc rand() state pollution */
+        unsigned int x = pv_rng_state;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        pv_rng_state = x;
+        return x;
+}
+
+static void hud_editor_seed_previews(void) {
+        /* Preview switches reset on every editor open. */
+        pv_weapons = 1;
+        pv_palette = 1;
+        pv_chat = 1;
+        pv_killfeed = 1;
+        pv_scores = 1;
+        pv_gmi = 1;
+        pv_scoreboard = 0;
+        pv_stats = 1;
+        pv_fpsbox = 1;
+
+        chat_scroll_offset = 0;
+        chat_input_mode = CHAT_NO_INPUT;
+
+        if(network_connected)
+                return;   /* live data rules; never touch real chat buffers */
+
+        pv_rng_state = (unsigned int)(window_time() * 1000.0) ^ 0x9E3779B9u;
+        if(pv_rng_state == 0)
+                pv_rng_state = 1;
+        (void)pv_rand_u32;
+
+        /* Channel 0 = chat, channel 1 = killfeed (indices >= 1). Slots are
+           refreshed every frame while editing, so the samples never expire. */
+        for(int i = 1; i <= 4; i++) {
+                chat[0][i][0] = '\0';
+                chat_timer[0][i] = 0.0F;
+        }
+        for(int i = 1; i <= 2; i++) {
+                chat[1][i][0] = '\0';
+                chat_timer[1][i] = 0.0F;
+        }
+
+        snprintf(chat[0][1], sizeof(chat[0][1]), "%cWelcome! This chat is a sample.", '\6');
+        snprintf(chat[0][2], sizeof(chat[0][2]), "%cPlayerBlue%c: defending the intel", '\1', '\6');
+        snprintf(chat[0][3], sizeof(chat[0][3]), "%cPlayerRed%c: rushing middle", '\2', '\6');
+        snprintf(chat[0][4], sizeof(chat[0][4]), "%cA very long message to preview wrapping behavior", '\7');
+
+        /* Same format network.c uses for real killfeed entries. */
+        snprintf(chat[1][1], sizeof(chat[1][1]), "%c%s%c killed %c%s%c (%s)", '\1', "PlayerRed", '\4',
+                 '\2', "PlayerBlue", '\4', "Headshot");
+        snprintf(chat[1][2], sizeof(chat[1][2]), "%c%s%c fell to their death", '\3', "SpectatorGuy", '\4');
+}
+
+/* ---- open / close -------------------------------------------------------- */
+
+static struct hud* hud_edit_return_hud = NULL;
+static int hud_edit_saved_camera = CAMERAMODE_FPS;
+
+/* Enter the editor. Valid from gameplay (F10) and from any pause/main-menu
+   screen (sidebar / nav button). Idempotent. */
+static void hud_editor_open(void) {
+        if(hud_edit_active)
+                return;                          /* hotkey/button spam guard */
+        if(screen_current != SCREEN_NONE)
+                return;                          /* never from a game screen */
+
+        hud_edit_return_hud = (hud_active != &hud_ingame) ? hud_active : NULL;
+        hud_edit_saved_camera = camera_mode;
+        hud_edit_opened_connected = network_connected;
+
+        /* Route through hud_change(&hud_ingame) even when already in game:
+           it re-inits the microui context (fresh widget state), resets chat
+           input, and runs hud_ingame_init's cursor/textinput defaults. */
+        hud_change(&hud_ingame);
+
+        hud_editor_seed_previews();
+        hud_edit_selected = -1;
+        hud_edit_hover = -1;
+        hud_edit_dragging = 0;
+        hud_edit_popup = 0;
+        hud_edit_status[0] = '\0';
+        hud_edit_anchor_buf_sel = -1;
+        hud_edit_guide_axis = -1;
+        hud_edit_mouse_for_panel = 0;
+        hud_edit_panel_x = 16;
+        hud_edit_panel_y = 40;
+        hud_edit_panel_w = 280;
+        hud_edit_panel_h = 420;
+        hud_edit_open_frame = 0;
+        hud_edit_scale_tmp = 1.0F;
+
+        if(!network_connected) {
+                /* Stale camera modes (e.g. body-view of a cleared player list)
+                   would hide the gameplay elements the user wants to edit. */
+                camera_mode = CAMERAMODE_FPS;
+        }
+
+        show_exit = 0;
+        window_touch_reset();            /* drop tracked fingers (touch builds) */
+        window_textinput(0);
+        window_mousemode(WINDOW_CURSOR_ENABLED);
+        hud_edit_active = 1;
+        hud_editor_set_status("HUD editor - Tab cycles elements, drag to move, F10 saves");
+}
+
+/* Leave the editor. save = commit the layout; otherwise revert to the last
+   saved state. */
+static void hud_editor_close(int save) {
+        if(!hud_edit_active)
+                return;
+
+        if(save) {
+                if(hud_layout_save())
+                        hud_editor_set_status("Layout saved");
+                else
+                        hud_editor_set_status("Saving the layout FAILED (see log)");
+        } else {
+                hud_layout_snapshot_restore();
+        }
+
+        hud_edit_active = 0;
+        hud_edit_dragging = 0;
+        hud_edit_popup = 0;
+        hud_edit_selected = -1;
+        hud_edit_mouse_for_panel = 0;
+        window_textinput(0);
+
+        if(!hud_edit_opened_connected)
+                camera_mode = hud_edit_saved_camera;
+
+        if(!network_connected && hud_edit_return_hud && hud_edit_return_hud != &hud_ingame) {
+                /* Opened from a menu screen with no game running: put the user
+                   back where they came from. */
+                struct hud* back = hud_edit_return_hud;
+                hud_edit_return_hud = NULL;
+                hud_change(back);
+        } else {
+                hud_edit_return_hud = NULL;
+                window_mousemode(WINDOW_CURSOR_DISABLED);
+        }
+}
+
+/* Emergency exit for screen transitions / disconnects while editing (called
+   from hud_change and the per-frame watchdog). Discards unsaved edits and
+   never navigates — the caller owns the screen switch. */
+static void hud_editor_force_close(void) {
+        if(!hud_edit_active)
+                return;
+        hud_edit_active = 0;
+        hud_edit_dragging = 0;
+        hud_edit_popup = 0;
+        hud_edit_selected = -1;
+        hud_edit_mouse_for_panel = 0;
+        hud_edit_return_hud = NULL;
+        hud_layout_snapshot_restore();
+        window_textinput(0);
+        if(!hud_edit_opened_connected)
+                camera_mode = hud_edit_saved_camera;
+}
+
+int hud_editing_mu_panel_hit(void) {
+        return hud_edit_mouse_for_panel;
+}
+
+int hud_editing_text_focus(void) {
+        return hud_edit_text_focus;
+}
+
+/* ---- editor keyboard ------------------------------------------------------ */
+
+static void hud_editor_text_sync(int sel);
+
+static void hud_editor_keyboard(int key, int action, int mods, int internal) {
+        (void)internal;
+        if(action != WINDOW_PRESS)
+                return;                          /* act on press only */
+
+        /* Save-changes dialog modal: only ESC (dismiss) and F10 (confirm). */
+        if(hud_edit_popup) {
+                if(key == WINDOW_KEY_ESCAPE) {
+                        hud_edit_popup = 0;
+                } else if(key == WINDOW_KEY_HUD_EDITOR) {
+                        hud_editor_close(1);
+                }
+                return;
+        }
+
+        switch(key) {
+                case WINDOW_KEY_HUD_EDITOR:      /* F10: save & close */
+                        hud_editor_close(1);
+                        return;
+
+                case WINDOW_KEY_ESCAPE:          /* close (ask when dirty) */
+                        if(hud_layout_is_dirty())
+                                hud_edit_popup = 1;
+                        else
+                                hud_editor_close(0);
+                        return;
+
+                case WINDOW_KEY_TAB: {           /* cycle selection */
+                        int dir = (mods & 1) ? -1 : 1;   /* 1 == GLFW_MOD_SHIFT */
+                        int sel = hud_edit_selected;
+                        for(int i = 0; i < HUD_EL_COUNT; i++) {
+                                sel = (sel + dir + HUD_EL_COUNT) % HUD_EL_COUNT;
+                                if(hud_layout_visible(sel))
+                                        break;
+                        }
+                        hud_edit_selected = sel;
+                        hud_edit_dragging = 0;
+                        hud_editor_text_sync(sel);
+                }
+                        return;
+
+                case WINDOW_KEY_DELETE:
+                        if(hud_edit_selected >= 0) {
+                                hud_layout_set_visible(hud_edit_selected, false);
+                                hud_editor_set_status("%s hidden", hud_layout_name(hud_edit_selected));
+                        }
+                        return;
+
+                case WINDOW_KEY_CURSOR_UP:
+                case WINDOW_KEY_CURSOR_DOWN:
+                case WINDOW_KEY_CURSOR_LEFT:
+                case WINDOW_KEY_CURSOR_RIGHT: {
+                        if(hud_edit_selected < 0)
+                                return;
+                        if(hud_editing_text_focus())
+                                return;          /* typing in the panel fields */
+                        float bx = 0.F, by = 0.F;
+                        hud_layout_origin(hud_edit_selected, &bx, &by);
+                        float step = (mods & 1) ? 10.0F : 1.0F;   /* GLFW_MOD_SHIFT */
+                        switch(key) {
+                                case WINDOW_KEY_CURSOR_UP: by += step; break;
+                                case WINDOW_KEY_CURSOR_DOWN: by -= step; break;
+                                case WINDOW_KEY_CURSOR_LEFT: bx -= step; break;
+                                case WINDOW_KEY_CURSOR_RIGHT: bx += step; break;
+                        }
+                        hud_layout_set_px(hud_edit_selected, bx, by);
+                        hud_editor_text_sync(hud_edit_selected);
+                }
+                        return;
+
+                default:
+                        return;
+        }
+}
+
+/* ---- editor mouse ---------------------------------------------------------- */
+
+static int hud_editor_inside_popup(float sx, float sy) {
+        /* The dialog is a 240x118 mu window centered by the panel code; the
+           exact container rect is not tracked, so use a generous area. */
+        float W = (float)settings.window_width;
+        float H = (float)settings.window_height;
+        float px = W / 2.F - 120.F, py = H / 3.F;
+        return sx >= px - 4.F && sx <= px + 244.F && sy >= py - 4.F && sy <= py + 126.F;
+}
+
+static int hud_editor_inside_panel(float sx, float sy) {
+        return sx >= hud_edit_panel_x - 4.F && sx <= hud_edit_panel_x + hud_edit_panel_w + 4.F
+                && sy >= hud_edit_panel_y - 4.F && sy <= hud_edit_panel_y + hud_edit_panel_h + 4.F;
+}
+
+static void hud_editor_mouseclick(double x, double y, int button, int action, int mods) {
+        (void)mods;
+        float sx = (float)x, sy = (float)y;
+        hud_edit_mouse_x = sx;
+        hud_edit_mouse_y = sy;
+
+        if(action == WINDOW_PRESS) {
+                if(hud_edit_popup) {
+                        /* Modal dialog: clicks outside it just dismiss it (the
+                           dialog itself is a mu window and consumes its own
+                           clicks); nothing reaches the panel meanwhile. */
+                        hud_edit_mouse_for_panel = 0;
+                        if(!hud_editor_inside_popup(sx, sy))
+                                hud_edit_popup = 0;
+                        return;
+                }
+                if(button == WINDOW_MOUSE_LMB) {
+                        if(hud_editor_inside_panel(sx, sy)) {
+                                hud_edit_mouse_for_panel = 1;   /* main.c forwards to mu */
+                                return;
+                        }
+                        hud_edit_mouse_for_panel = 0;
+
+                        float H = (float)settings.window_height;
+                        int el = hud_layout_pick(sx, H - sy);
+                        if(el >= 0) {
+                                if(el != hud_edit_selected) {
+                                        hud_edit_selected = el;
+                                        hud_editor_text_sync(el);
+                                }
+                                float bx = 0.F, by = 0.F;
+                                hud_layout_origin(el, &bx, &by);
+                                hud_edit_grab_x = sx - bx;
+                                hud_edit_grab_y = (H - sy) - by;   /* GL-space grab offset */
+                                hud_edit_dragging = 1;
+                                hud_edit_drag_moved = 0;
+                        } else {
+                                hud_edit_selected = -1;   /* click on empty space deselects */
+                                hud_edit_dragging = 0;
+                        }
+                }
+        } else if(action == WINDOW_RELEASE) {
+                if(button == WINDOW_MOUSE_LMB && hud_edit_dragging) {
+                        hud_edit_dragging = 0;
+                        if(!hud_edit_drag_moved)
+                                hud_editor_set_status("Selected: %s", hud_layout_name(hud_edit_selected));
+                }
+                /* NOTE: hud_edit_mouse_for_panel is deliberately NOT cleared
+                   here — main.c must forward this RELEASE to microui when the
+                   PRESS went to the panel, or mu would think the button is
+                   still held (stuck window drag). The flag is overwritten by
+                   the next PRESS. */
+        }
+}
+
+static void hud_editor_mouselocation(double x, double y) {
+        float sx = (float)x, sy = (float)y;
+        hud_edit_mouse_x = sx;
+        hud_edit_mouse_y = sy;
+
+        if(hud_edit_dragging && hud_edit_selected >= 0) {
+                float W = (float)settings.window_width;
+                float H = (float)settings.window_height;
+                float nx = sx - hud_edit_grab_x;
+                float ny = (H - sy) - hud_edit_grab_y;   /* GL space */
+
+                nx = hud_layout_snap(nx, hud_edit_snap);
+                ny = hud_layout_snap(ny, hud_edit_snap);
+
+                /* Center-snapping with on-screen guide lines. */
+                hud_edit_guide_axis = -1;
+                float w = 0.F, h = 0.F;
+                hud_layout_bounds(hud_edit_selected, &w, &h, &w, &h);
+                if(w <= 0.F || h <= 0.F) {
+                        float nw = 0.F, nh = 0.F;
+                        hud_layout_nominal_bounds(hud_edit_selected, &nw, &nh);
+                        w = nw;
+                        h = nh;
+                }
+                float cx = nx + w / 2.F, cy = ny + h / 2.F;
+                if(fabsf(cx - W / 2.F) < 8.0F) {
+                        nx = W / 2.F - w / 2.F;
+                        hud_edit_guide_axis = 0;
+                        hud_edit_guide_pos = W / 2.F;
+                }
+                if(fabsf(cy - H / 2.F) < 8.0F) {
+                        ny = H / 2.F - h / 2.F;
+                        if(hud_edit_guide_axis < 0) {
+                                hud_edit_guide_axis = 1;
+                                hud_edit_guide_pos = H / 2.F;
+                        }
+                }
+
+                hud_layout_set_px(hud_edit_selected, nx, ny);
+                hud_edit_drag_moved = 1;
+        }
+}
+
+/* ---- chrome drawing helpers (used by frame_begin too) ------------------------ */
+
+/* font_length/font_render take non-const char*; tiny const-friendly wrappers. */
+static float ed_font_length(float h, const char* s) { return font_length(h, (char*)s); }
+static void ed_font(float x, float y, float h, const char* s) { font_render(x, y, h, (char*)s); }
+
+static void ed_outlined_box(float x, float y_top, float w, float h,
+                            float r, float g, float b, float a, float t) {
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glColor4f(r, g, b, a);
+        texture_draw_empty(x - t, y_top - t, w + 2 * t, t);              /* top */
+        texture_draw_empty(x - t, y_top + h, w + 2 * t, t);              /* bottom */
+        texture_draw_empty(x - t, y_top, t, h);                          /* left */
+        texture_draw_empty(x + w, y_top, t, h);                          /* right */
+        glDisable(GL_BLEND);
+        glColor3f(1.F, 1.F, 1.F);
+}
+
+/* Filled translucent box. */
+static void ed_box(float x, float y_top, float w, float h, float r, float g, float b, float a) {
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glColor4f(r, g, b, a);
+        texture_draw_empty(x, y_top, w, h);
+        glDisable(GL_BLEND);
+        glColor3f(1.F, 1.F, 1.F);
+}
+
+/* Selection/hover box for an element: real frame bounds, or the nominal
+   hitbox for elements that drew nothing this frame (e.g. hidden ones). */
+static int ed_element_rect(int el, float* x, float* y, float* w, float* h) {
+        if(hud_layout_bounds(el, x, y, w, h))
+                return 1;
+        float bx = 0.F, by = 0.F;
+        hud_layout_origin(el, &bx, &by);
+        hud_layout_nominal_bounds(el, w, h);
+        *x = bx;
+        *y = by;
+        return 0;
+}
+
+/* ---- per-frame begin -------------------------------------------------------- */
+
+static void hud_editor_text_sync(int sel) {
+        /* Force the X/Y fraction fields to re-seed from the element on the
+           next panel frame. */
+        hud_edit_anchor_buf_sel = -1;
+        if(sel >= 0)
+                hud_edit_scale_tmp = hud_layout_get_scale(sel);
+}
+
+static void hud_editor_frame_begin(float scalex, float scalef) {
+        (void)scalex;
+        (void)scalef;
+        if(!hud_edit_active)
+                return;
+
+        /* Watchdogs: never keep the editor across a screen change or a fresh
+           connection (both go through hud_change; this is defense in depth). */
+        if(screen_current != SCREEN_NONE) {
+                hud_editor_force_close();
+                return;
+        }
+        if(network_connected && !hud_edit_opened_connected) {
+                hud_editor_force_close();
+                return;
+        }
+
+        /* Neutralize polled gameplay keys; events are handled exclusively by
+           the editor keyboard path while editing. */
+        memset(window_pressed_keys, 0, sizeof(window_pressed_keys));
+
+        /* Keep the OS cursor visible even if something else toggled it. */
+        window_mousemode(WINDOW_CURSOR_ENABLED);
+
+        /* Refresh sample message timers so preview chat/killfeed never expires
+           (disconnected sessions only — live data rules when connected). */
+        if(!network_connected) {
+                float now = window_time();
+                if(pv_chat) {
+                        for(int i = 1; i <= 4; i++)
+                                chat_timer[0][i] = now;
+                }
+                if(pv_killfeed) {
+                        for(int i = 1; i <= 2; i++)
+                                chat_timer[1][i] = now;
+                }
+                if(pv_weapons) {
+                        chat_popup_timer = now;
+                        chat_popup_duration = 1.0F;
+                }
+        }
+        hud_edit_open_frame++;
+
+        /* Dim overlay (drawn first, under everything else the editor adds). */
+        if(hud_edit_dim) {
+                float W = (float)settings.window_width;
+                float H = (float)settings.window_height;
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                glColor4f(0.F, 0.F, 0.F, 0.45F);
+                texture_draw_empty(0.F, H, W, H);
+                glDisable(GL_BLEND);
+                glColor3f(1.F, 1.F, 1.F);
+        }
+
+        /* Reference grid (under the elements). */
+        if(hud_edit_grid) {
+                float W = (float)settings.window_width;
+                float H = (float)settings.window_height;
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                glColor4f(1.F, 1.F, 1.F, 0.10F);
+                for(float gx = 0.F; gx <= W; gx += 32.F)
+                        glx_draw_line_2d(floorf(gx), 0.F, floorf(gx), H);
+                for(float gy = 0.F; gy <= H; gy += 32.F)
+                        glx_draw_line_2d(0.F, floorf(gy), W, floorf(gy));
+                glDisable(GL_BLEND);
+                glColor3f(1.F, 1.F, 1.F);
+        }
+
+        /* Disconnected backdrop banner. */
+        if(!network_connected) {
+                font_select(FONT_FANTASY);
+                glColor3f(1.F, 1.F, 1.F);
+                ed_font(10.F, 24.F, 24.F, "HUD Editor (preview mode)");
+                font_select(FONT_FIXEDSYS);
+                glColor3f(0.8F, 0.8F, 0.8F);
+                ed_font(10.F, 46.F, 16.F,
+                        "Sample data - connect to a server to edit against a live game");
+                glColor3f(1.F, 1.F, 1.F);
+        }
+}
+
+static int ed_textbox(mu_Context* ctx, char* buf, int bufsz) {
+        mu_Id id = mu_get_id(ctx, &buf, sizeof(buf));
+        int res = mu_textbox(ctx, buf, bufsz);
+        if(ctx->focus == id)
+                hud_edit_text_focus = 1;
+        return res;
+}
+
+static float ed_parse_frac(const char* s, int* ok) {
+        char* end = NULL;
+        float v = strtof(s, &end);
+        *ok = (end && end != s && *end == '\0');
+        return v;
+}
+
+static void hud_editor_panel(mu_Context* ctx) {
+        static const int row2[] = {58, -1};
+        static const int row3[] = {70, -1};
+        static const int rowXy[] = {14, -1, 14, -1};
+        int w3 = max(40, (hud_edit_panel_w - 24) / 3);
+        int row3col[3] = {w3, w3, w3};
+        int anchor_col[3] = {22, 22, 22};
+
+        if(!mu_begin_window(ctx, "HUD Editor", mu_rect((int)hud_edit_panel_x, (int)hud_edit_panel_y,
+                                                       hud_edit_panel_w, hud_edit_panel_h)))
+                return;
+
+        mu_Container* cnt = mu_get_current_container(ctx);
+        hud_edit_panel_x = (float)cnt->rect.x;
+        hud_edit_panel_y = (float)cnt->rect.y;
+        hud_edit_panel_w = cnt->rect.w;
+        hud_edit_panel_h = cnt->rect.h;
+
+        int sel = hud_edit_selected;
+
+        /* -- element list ---------------------------------------------------- */
+        mu_layout_row(ctx, 1, (int[]) {-1}, -66);
+        mu_begin_panel(ctx, "Elements");
+        mu_layout_row(ctx, 2, (int[]) {24, -1}, 14);
+        for(int e = 0; e < HUD_EL_COUNT; e++) {
+                int vis = hud_layout_visible(e) ? 1 : 0;
+                if(mu_checkbox(ctx, "", &vis))
+                        hud_layout_set_visible(e, vis ? true : false);
+                char namebuf[48];
+                snprintf(namebuf, sizeof(namebuf), "%s%s", (e == sel) ? "\xe2\x97\x8f " : "",
+                         hud_layout_name(e));
+                if(mu_button_ex(ctx, namebuf, 0, 0)) {
+                        if(sel != e) {
+                                sel = hud_edit_selected = e;
+                                hud_editor_text_sync(e);
+                        }
+                }
+        }
+        mu_end_panel(ctx);
+
+        if(sel < 0) {
+                mu_layout_row(ctx, 1, (int[]) {-1}, 0);
+                mu_label(ctx, "Pick an element above, or click one on screen.");
+                mu_layout_row(ctx, 1, (int[]) {-1}, 0);
+                if(mu_button(ctx, "Save layout"))
+                        hud_editor_set_status(hud_layout_save() ? "Layout saved"
+                                                                : "Saving the layout FAILED (see log)");
+                mu_layout_row(ctx, 3, row3col, 0);
+                if(mu_button(ctx, "Revert all"))
+                        hud_layout_snapshot_restore();
+                if(mu_button(ctx, "Reset ALL"))
+                        hud_layout_reset_all();
+                if(mu_button(ctx, "Done"))
+                        hud_editor_close(1);
+                mu_end_window(ctx);
+                return;
+        }
+
+        /* -- selected element controls ---------------------------------------- */
+        mu_layout_row(ctx, 2, row2, 0);
+        int vis = hud_layout_visible(sel) ? 1 : 0;
+        if(mu_checkbox(ctx, "Visible", &vis))
+                hud_layout_set_visible(sel, vis ? true : false);
+
+        int anch = hud_layout_get_anchor(sel);
+        mu_layout_row(ctx, 1, (int[]) {-1}, 0);
+        mu_label(ctx, "Anchor (current is filled):");
+        for(int row = 0; row < 3; row++) {
+                mu_layout_row(ctx, 3, anchor_col, 18);
+                for(int col = 0; col < 3; col++) {
+                        int a = row * 3 + col;
+                        const char* dot = (a == anch) ? "\xe2\x97\x8f" : "\xc2\xb7";
+                        if(mu_button(ctx, dot))
+                                hud_layout_set_anchor(sel, a);
+                }
+        }
+
+        /* X/Y fraction fields. */
+        float W = (float)settings.window_width;
+        float H = (float)settings.window_height;
+        hud_edit_text_focus = 0;
+        float fx, fy;
+        {
+                float bx = 0.F, by = 0.F;
+                hud_layout_origin(sel, &bx, &by);
+                float ax, ay;
+                hud_layout_anchor_point(anch, &ax, &ay);
+                fx = (bx - ax) / W;
+                fy = (by - ay) / H;
+        }
+        if(hud_edit_anchor_buf_sel != sel || hud_edit_dragging) {
+                snprintf(hud_edit_anchor_buf[0], sizeof(hud_edit_anchor_buf[0]), "%.3f", fx);
+                snprintf(hud_edit_anchor_buf[1], sizeof(hud_edit_anchor_buf[1]), "%.3f", fy);
+                hud_edit_anchor_buf_sel = sel;
+        }
+        mu_layout_row(ctx, 4, rowXy, 0);
+        mu_label(ctx, "X");
+        ed_textbox(ctx, hud_edit_anchor_buf[0], sizeof(hud_edit_anchor_buf[0]));
+        mu_label(ctx, "Y");
+        ed_textbox(ctx, hud_edit_anchor_buf[1], sizeof(hud_edit_anchor_buf[1]));
+        if(hud_edit_text_focus) {
+                for(int axis = 0; axis < 2; axis++) {
+                        int ok = 0;
+                        float v = ed_parse_frac(hud_edit_anchor_buf[axis], &ok);
+                        if(ok && fabsf(v - (axis == 0 ? fx : fy)) > 1e-4F
+                           && v >= -1.25F && v <= 1.25F) {
+                                float ax, ay;
+                                hud_layout_anchor_point(anch, &ax, &ay);
+                                hud_layout_set_px(sel,
+                                                  axis == 0 ? ax + v * W : ax + fx * W,
+                                                  axis == 0 ? ay + fy * H : ay + v * H);
+                        }
+                }
+        }
+
+        /* Scale. */
+        if(hud_layout_scalable(sel)) {
+                mu_layout_row(ctx, 2, row3, 0);
+                mu_label(ctx, "Scale");
+                mu_slider(ctx, &hud_edit_scale_tmp, 0.5F, 2.0F);
+                float cur = hud_layout_get_scale(sel);
+                if(fabsf(hud_edit_scale_tmp - cur) > 0.001F)
+                        hud_layout_set_scale(sel, hud_edit_scale_tmp);
+        } else {
+                mu_layout_row(ctx, 1, (int[]) {-1}, 0);
+                mu_label(ctx, "(fixed size element)");
+        }
+
+        mu_layout_row(ctx, 1, (int[]) {-1}, 0);
+        if(mu_button(ctx, "Reset element")) {
+                hud_layout_reset_element(sel);
+                hud_editor_text_sync(sel);
+        }
+
+        /* -- aids ------------------------------------------------------------- */
+        mu_header(ctx, "Aids");
+        mu_layout_row(ctx, 3, row3col, 0);
+        mu_checkbox(ctx, "Grid", &hud_edit_grid);
+        mu_checkbox(ctx, "Guides", &hud_edit_guides);
+        mu_checkbox(ctx, "Safe area", &hud_edit_safe);
+        mu_layout_row(ctx, 3, row3col, 0);
+        mu_checkbox(ctx, "Dim others", &hud_edit_dim);
+        {
+                static const char* snap_labels[] = {"Snap off", "Snap 2", "Snap 4", "Snap 8", "Snap 16", "Snap 32"};
+                static const int snap_values[] = {0, 2, 4, 8, 16, 32};
+                int si = 0;
+                for(int i = 0; i < 6; i++)
+                        if(hud_edit_snap == snap_values[i])
+                                si = i;
+                if(mu_button(ctx, snap_labels[si])) {
+                        si = (si + 1) % 6;
+                        hud_edit_snap = snap_values[si];
+                }
+        }
+
+        /* -- preview switches --------------------------------------------------- */
+        mu_header(ctx, "Preview (sample data when disconnected)");
+        mu_layout_row(ctx, 3, row3col, 0);
+        mu_checkbox(ctx, "Weapons", &pv_weapons);
+        mu_checkbox(ctx, "Palette", &pv_palette);
+        mu_checkbox(ctx, "Chat", &pv_chat);
+        mu_layout_row(ctx, 3, row3col, 0);
+        mu_checkbox(ctx, "Killfeed", &pv_killfeed);
+        mu_checkbox(ctx, "Scores", &pv_scores);
+        mu_checkbox(ctx, "Counters", &pv_gmi);
+        mu_layout_row(ctx, 3, row3col, 0);
+        mu_checkbox(ctx, "Scoreboard", &pv_scoreboard);
+        mu_checkbox(ctx, "Stats", &pv_stats);
+        mu_checkbox(ctx, "FPS box", &pv_fpsbox);
+
+        /* -- commit row ----------------------------------------------------------- */
+        mu_layout_row(ctx, 3, row3col, 0);
+        if(mu_button(ctx, "Revert all")) {
+                hud_layout_snapshot_restore();
+                hud_editor_text_sync(sel);
+        }
+        if(mu_button(ctx, "Reset ALL")) {
+                hud_layout_reset_all();
+                hud_editor_text_sync(sel);
+        }
+        if(mu_button(ctx, "Save"))
+                hud_editor_set_status(hud_layout_save() ? "Layout saved"
+                                                        : "Saving the layout FAILED (see log)");
+        mu_layout_row(ctx, 2, row2, 0);
+        if(mu_button(ctx, "Apply & Resume"))
+                hud_editor_close(1);
+        if(mu_button(ctx, "Discard & Exit"))
+                hud_editor_close(0);
+
+        mu_end_window(ctx);
+
+        /* -- save-changes dialog (drawn after the panel: mu stacks the most
+              recently focused window on top) --------------------------------- */
+        if(hud_edit_popup) {
+                float pw = (float)settings.window_width, ph = (float)settings.window_height;
+                if(mu_begin_window(ctx, "Save changes?",
+                                   mu_rect((int)(pw / 2.F - 120.F), (int)(ph / 3.F), 240, 118))) {
+                        mu_layout_row(ctx, 1, (int[]) {-1}, 0);
+                        mu_label(ctx, hud_layout_is_dirty() ? "The layout has unsaved changes."
+                                                            : "No unsaved changes.");
+                        mu_layout_row(ctx, 3, row3col, 0);
+                        if(mu_button(ctx, "Save")) {
+                                hud_edit_popup = 0;
+                                hud_editor_close(1);
+                        }
+                        if(mu_button(ctx, "Discard")) {
+                                hud_edit_popup = 0;
+                                hud_editor_close(0);
+                        }
+                        if(mu_button(ctx, "Keep editing"))
+                                hud_edit_popup = 0;
+                        mu_end_window(ctx);
+                }
+        }
+}
+
+static void hud_editor_frame_end(mu_Context* ctx, float scalex, float scalef) {
+        (void)scalex;
+        (void)scalef;
+        if(!hud_edit_active)
+                return;
+
+        float W = (float)settings.window_width;
+        float H = (float)settings.window_height;
+
+        /* -- chrome over the elements ----------------------------------------- */
+        if(hud_edit_guides) {
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                glColor4f(0.4F, 0.8F, 1.F, 0.25F);
+                glx_draw_line_2d(W / 2.F, 0.F, W / 2.F, H);
+                glx_draw_line_2d(0.F, H / 2.F, W, H / 2.F);
+                glDisable(GL_BLEND);
+                glColor3f(1.F, 1.F, 1.F);
+        }
+        if(hud_edit_guide_axis >= 0) {
+                glColor4f(0.4F, 1.F, 0.5F, 1.F);
+                if(hud_edit_guide_axis == 0)
+                        glx_draw_line_2d(hud_edit_guide_pos, 0.F, hud_edit_guide_pos, H);
+                else
+                        glx_draw_line_2d(0.F, hud_edit_guide_pos, W, hud_edit_guide_pos);
+                glColor3f(1.F, 1.F, 1.F);
+        }
+        if(hud_edit_safe) {
+                float sx0 = 0.04F * W, sx1 = 0.96F * W;
+                float sy0 = 0.05F * H, sy1 = 0.95F * H;
+                /* GL y is up: a screen band [sy0, sy1] from the top is
+                   [H - sy1, H - sy0] in GL coordinates. */
+                ed_outlined_box(sx0, H - sy1, sx1 - sx0, sy1 - sy0, 0.F, 1.F, 1.F, 0.5F, 1.F);
+        }
+
+        /* Hover highlight (only while not dragging / not over the panel). */
+        hud_edit_hover = -1;
+        if(!hud_edit_dragging && !hud_editor_inside_panel(hud_edit_mouse_x, hud_edit_mouse_y)
+           && !hud_edit_popup && hud_edit_open_frame > 0) {
+                hud_edit_hover = hud_layout_pick(hud_edit_mouse_x, H - hud_edit_mouse_y);
+        }
+        if(hud_edit_hover >= 0 && hud_edit_hover != hud_edit_selected) {
+                float hx, hy, hw, hh;
+                ed_element_rect(hud_edit_hover, &hx, &hy, &hw, &hh);
+                ed_outlined_box(hx, hy, hw, hh, 1.F, 1.F, 1.F, 0.35F, 1.F);
+        }
+
+        /* Selection box. */
+        if(hud_edit_selected >= 0) {
+                float ex, ey, ew, eh;
+                int live = ed_element_rect(hud_edit_selected, &ex, &ey, &ew, &eh);
+                ed_outlined_box(ex, ey, ew, eh, 1.F, 0.85F, 0.2F, 1.F, 2.F);
+                /* corner handles */
+                ed_box(ex - 3.F, ey - 3.F, 6.F, 6.F, 1.F, 0.85F, 0.2F, 1.F);
+                ed_box(ex + ew - 3.F, ey - 3.F, 6.F, 6.F, 1.F, 0.85F, 0.2F, 1.F);
+                ed_box(ex - 3.F, ey + eh - 3.F, 6.F, 6.F, 1.F, 0.85F, 0.2F, 1.F);
+                ed_box(ex + ew - 3.F, ey + eh - 3.F, 6.F, 6.F, 1.F, 0.85F, 0.2F, 1.F);
+                /* label */
+                font_select(FONT_FIXEDSYS);
+                const char* nm = hud_layout_name(hud_edit_selected);
+                float lbl_h = 14.F;
+                float lbl_w = ed_font_length(lbl_h, nm) + 8.F;
+                float lbl_x = max(0.F, min(ex, W - lbl_w));
+                float lbl_y = (ey - lbl_h - 2.F > 0.F) ? ey - lbl_h - 2.F : ey + eh + 2.F;
+                ed_box(lbl_x, lbl_y, lbl_w, lbl_h, 0.F, 0.F, 0.F, 0.75F);
+                glColor3f(1.F, 0.9F, 0.4F);
+                ed_font(lbl_x + 4.F, lbl_y + lbl_h, lbl_h, nm);
+                if(!live) {
+                        glColor3f(1.F, 0.4F, 0.4F);
+                        ed_font(lbl_x + 4.F + ed_font_length(lbl_h, nm) + 8.F, lbl_y + lbl_h, lbl_h,
+                                "(hidden)");
+                }
+                glColor3f(1.F, 1.F, 1.F);
+        }
+
+        /* Status + hint lines at the top. */
+        font_select(FONT_FIXEDSYS);
+        {
+                const char* msg = hud_edit_status;
+                double age = window_time() - hud_edit_status_time;
+                const char* hint = "Tab: cycle  |  Arrows: nudge (Shift = 10px)  |  Del: hide  |  ESC: close  |  F10: save & close";
+                float hint_y = 18.F;
+                if(msg[0] && age < 3.0) {
+                        float mw = ed_font_length(14.F, msg) + 10.F;
+                        ed_box(W / 2.F - mw / 2.F, hint_y, mw, 16.F, 0.F, 0.F, 0.F, 0.6F);
+                        glColor3f(1.F, 1.F, 0.6F);
+                        ed_font(W / 2.F - mw / 2.F + 5.F, hint_y + 14.F, 14.F, msg);
+                }
+                float hw = ed_font_length(12.F, hint);
+                ed_box(W / 2.F - hw / 2.F, 0.F, hw, 14.F, 0.F, 0.F, 0.F, 0.45F);
+                glColor3f(0.9F, 0.9F, 0.9F);
+                ed_font(W / 2.F - hw / 2.F, 12.F, 12.F, hint);
+                glColor3f(1.F, 1.F, 1.F);
+        }
+
+        /* -- microui panel ------------------------------------------------------
+           mu_begin()/mu_end() are owned by the 2D pass in main.c (it wraps
+           render_2D when a context is active); only the window is emitted here. */
+        if(ctx)
+                hud_editor_panel(ctx);
+}
+
 struct hud hud_ingame = {
         hud_ingame_init,
         hud_ingame_render3D,
@@ -4475,6 +5689,8 @@ void hud_common_sidebar(mu_Context* ctx, float scalex, float scaley) {
         hud_nav_button(ctx, &hud_settings, "Settings");
         hud_nav_button(ctx, &hud_controls, "Controls");
         hud_nav_button(ctx, &hud_skins, "Skins");
+        if(mu_button_ex(ctx, hud_edit_active ? "HUD Editor \xe2\x97\x8f" : "HUD Editor", 0, 0))
+                hud_editor_open();
         hud_nav_button(ctx, &hud_macros, "Macros");
         hud_nav_button(ctx, &hud_recording, "Video Recording");
         hud_nav_button(ctx, &hud_replay, "Replay Settings");
@@ -4531,8 +5747,8 @@ static void hud_common_nav(mu_Context* ctx, mu_Rect* frame, float scalex, float 
            label "Demos" and "Disconnect" for the label "Chat Log" (hence both
            rendering cramped). Build labels and widths from ONE list instead so
            they cannot disagree again. */
-        const char* labels[8];
-        float mults[8];
+        const char* labels[10];
+        float mults[10];
         int n = 0;
 #if defined(OS_IOS)
         /* iOS has no Escape key, and while a menu is open the in-game HUD (with
@@ -4547,12 +5763,13 @@ static void hud_common_nav(mu_Context* ctx, mu_Rect* frame, float scalex, float 
         labels[n] = "Settings"; mults[n++] = 1.5F;
         labels[n] = "Controls"; mults[n++] = 1.5F;
         labels[n] = "Skins"; mults[n++] = 1.5F;
+        labels[n] = hud_edit_active ? "HUD Editor \xe2\x97\x8f" : "HUD Editor"; mults[n++] = 1.5F;
         if(!network_connected) { labels[n] = "Demos"; mults[n++] = 1.5F; }
         if(network_connected) { labels[n] = "Chat Log"; mults[n++] = 1.5F; }
         if(serverlist_is_outdated) { labels[n] = "New updates"; mults[n++] = 1.2F; }
         labels[n] = network_connected ? "Disconnect" : "Exit"; mults[n++] = 1.5F;
 
-        int raw[8], widths[9];
+        int raw[10], widths[11];
         int sum = 0;
         for(int k = 0; k < n; k++) {
                 raw[k] = ctx->text_width(ctx->style->font, (char*)labels[k], 0);
@@ -4601,6 +5818,8 @@ static void hud_common_nav(mu_Context* ctx, mu_Rect* frame, float scalex, float 
         hud_nav_button(ctx, &hud_settings, "Settings");
         hud_nav_button(ctx, &hud_controls, "Controls");
         hud_nav_button(ctx, &hud_skins, "Skins");
+        if(mu_button_ex(ctx, hud_edit_active ? "HUD Editor \xe2\x97\x8f" : "HUD Editor", 0, 0))
+                hud_editor_open();
         if(!network_connected)
                 hud_nav_button(ctx, &hud_demolist, "Demos");
 

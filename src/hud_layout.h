@@ -80,6 +80,7 @@ void  hud_layout_set_anchor(int el, int anchor);  /* keeps on-screen position */
 void  hud_layout_set_visible(int el, bool vis);
 void  hud_layout_set_scale(int el, float s);
 float hud_layout_get_scale(int el);
+int   hud_layout_get_anchor(int el);               /* HUD_ANCHOR_* (editor UI) */
 
 /* Frame bounds registry (editor hit-testing / selection chrome).
    Report the union box of everything the element drew this frame, GL space,
@@ -104,6 +105,9 @@ float hud_layout_snap(float px, int grid_px);
 
 /* Anchor point in GL pixels for the CURRENT window size (editor chrome). */
 void  hud_layout_anchor_point(int anchor, float* x, float* y);
+
+/* Nominal hitbox size in on-screen GL pixels (editor fallback box). */
+void  hud_layout_nominal_bounds(int el, float* w, float* h);
 
 /* Element metadata (panel display names, serialized keys, capabilities). */
 const char* hud_layout_name(int el);

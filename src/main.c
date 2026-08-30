@@ -49,6 +49,7 @@
 #include "grenade.h"
 #include "player.h"
 #include "hud.h"
+#include "hud_layout.h"
 #include "config.h"
 #include "log.h"
 #include "ping.h"
@@ -1669,7 +1670,7 @@ void display() {
                 }
         }
 
-	if(hud_active->render_3D)
+	if(hud_active->render_3D && !(hud_editing_active() && !network_connected))
 		/* (interpolated render positions were already swapped in before the
 		   local player block; see above) */
 		hud_active->render_3D();
@@ -1687,7 +1688,11 @@ void display() {
         float scalef = (settings.window_height / 600.0F);
 
         if(hud_active->render_2D) {
-                mu_Context* ctx = hud_active->ctx;
+                /* The in-game HUD owns a mu_Context only while the HUD editor is
+                   active (see hud_init); gating it here keeps the normal
+                   gameplay path free of any microui state. */
+                mu_Context* ctx = (hud_active->ctx && !(hud_active == &hud_ingame && !hud_editing_active()))
+                        ? hud_active->ctx : NULL;
 
                 if(ctx) {
                         /* hud_ui_scale() enlarges touch targets so buttons and list rows
@@ -1947,7 +1952,7 @@ void text_input(struct window_instance* window, const char* utf8) {
 }
 
 void keys(struct window_instance* window, int key, int scancode, int action, int mods) {
-        if(hud_active->ctx) {
+        if(hud_active->ctx && hud_editing_active()) {
                 if(mu_key_translate(key)) {
                         switch(action) {
                                 case WINDOW_RELEASE: mu_input_keyup(hud_active->ctx, mu_key_translate(key)); break;
@@ -2076,7 +2081,13 @@ void mouse_click(struct window_instance* window, int button, int action, int mod
                 hud_active->input_mouseclick(x, y, button, action, mods);
         }
 
-        if(hud_active->ctx) {
+        /* Microui input is only forwarded while a mu context is actually in
+           use (menu screens, or the in-game HUD editor). Feeding it during
+           normal play would accumulate stale mouse/key state in the in-game
+           context that would resurface on the next editor session. */
+        /* Panel presses are pre-sorted by the editor's click handler: only
+           clicks that started inside the microui window reach it here. */
+        if(hud_active->ctx && hud_editing_active() && hud_editing_mu_panel_hit()) {
                 double x, y;
                 window_mouseloc(&x, &y);
                 switch(action) {
@@ -2089,14 +2100,14 @@ void mouse_click(struct window_instance* window, int button, int action, int mod
 void mouse(struct window_instance* window, double x, double y) {
         if(hud_active->input_mouselocation)
                 hud_active->input_mouselocation(x, y);
-        if(hud_active->ctx)
+        if(hud_active->ctx && hud_editing_active())
                 mu_input_mousemove(hud_active->ctx, x, y);
 }
 
 void mouse_scroll(struct window_instance* window, double xoffset, double yoffset) {
         if(hud_active->input_mousescroll)
                 hud_active->input_mousescroll(yoffset);
-        if(hud_active->ctx)
+        if(hud_active->ctx && hud_editing_active())
                 mu_input_scroll(hud_active->ctx, -xoffset * 50, -yoffset * 50);
 }
 
@@ -2370,6 +2381,7 @@ int main(int argc, char** argv) {
         settings.iron_sight = 1;
         settings.replay_enabled = -1;
         config_reload();
+        hud_layout_init();
 
         if(settings.recording_fps == 0) settings.recording_fps = 60;
         if(settings.recording_bitrate_kbps == 0) settings.recording_bitrate_kbps = 2000;
@@ -2451,7 +2463,7 @@ int main(int argc, char** argv) {
                 if(settings.net_early_opt)
                         network_service();
 
-                if(hud_active->render_world) {
+                if(hud_active->render_world && !(hud_editing_active() && !network_connected)) {
                         physics_time_fast += dt;
                         physics_time_fixed += dt;
 
