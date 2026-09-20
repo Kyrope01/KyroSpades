@@ -1764,6 +1764,17 @@ void display() {
                         glDisable(GL_BLEND);
                         glDisable(GL_SCISSOR_TEST);
                 }
+
+                /* Post-UI overlay pass: HUD content that has to be composited ON
+                   TOP of the menu (see struct hud::render_2D_overlay). This must
+                   run here - after the whole microui command list above has been
+                   replayed. Anything drawn from inside render_2D only *builds*
+                   commands and happens before this loop, so direct GL issued
+                   there ends up underneath every translucent panel/button tint.
+                   Note the overlay is responsible for its own GL state and for
+                   restoring the matrices (skins_render_preview does both). */
+                if(hud_active->render_2D_overlay)
+                        hud_active->render_2D_overlay(scalex, scalef);
         }
 
         if(screenshot_anim.active && screenshot_anim.texture) {
@@ -1991,24 +2002,18 @@ void keys(struct window_instance* window, int key, int scancode, int action, int
         if(action == WINDOW_RELEASE && !config_key(key)->toggle)
                 window_pressed_keys[key] = 0;
 
-#ifdef USE_GLFW
+        /* One toggle path for every backend: latch the new state and let
+           window_apply() carry out the transition at the start of the next frame.
+           The GLFW branch used to duplicate that logic inline, which meant leaving
+           fullscreen always restored a hardcoded 800x600 window instead of the real
+           windowed size, and it dereferenced glfwGetVideoMode() unchecked (it
+           returns NULL when no output is reported, e.g. on Wayland). Routing through
+           window_apply() also keeps the fullscreen request at the mode the monitor
+           is already in, so F11 can never trigger a display mode switch. */
         if(key == WINDOW_KEY_FULLSCREEN && action == WINDOW_PRESS) { // switch between fullscreen
-                const GLFWvidmode* mode = glfwGetVideoMode(glfwGetPrimaryMonitor());
-                if(!settings.fullscreen) {
-                        glfwSetWindowMonitor(window->impl, glfwGetPrimaryMonitor(), 0, 0, mode->width, mode->height,
-                                                                 mode->refreshRate);
-                        settings.fullscreen = 1;
-                } else {
-                        glfwSetWindowMonitor(window->impl, NULL, (mode->width - 800) / 2, (mode->height - 600) / 2, 800, 600, 0);
-                        settings.fullscreen = 0;
-                }
-        }
-#else
-        if(key == WINDOW_KEY_FULLSCREEN && action == WINDOW_PRESS) {
                 settings.fullscreen = !settings.fullscreen;
                 window_fromsettings();
         }
-#endif
 
         if(key == WINDOW_KEY_SCREENSHOT && action == WINDOW_PRESS) { // take screenshot
                 time_t pic_time;

@@ -273,8 +273,22 @@ void config_save() {
 
         config_sets("client", "name", settings.name);
         config_sets("client", "last_address", settings.last_address);
-        config_seti("client", "xres", settings.window_width);
-        config_seti("client", "yres", settings.window_height);
+        /* xres/yres mean "the size of the window when it is NOT fullscreen", so
+           persist the windowed size rather than settings.window_width/height:
+           those track the LIVE drawable, which is the monitor's resolution while
+           fullscreen. Worse, this function runs from the settings menu *before*
+           window_apply() has carried out a pending fullscreen transition (it is
+           deferred to the next frame), which used to write the old, small windowed
+           size together with windowed=0. On the next launch GLFW was then asked for
+           a fullscreen window of that size - a real RandR mode switch that dropped
+           the whole desktop to it, and under Wayland/XWayland could take the
+           compositor session down with it. */
+        int xres = settings.window_width;
+        int yres = settings.window_height;
+        if(settings.fullscreen)
+                window_windowed_size(&xres, &yres);
+        config_seti("client", "xres", xres);
+        config_seti("client", "yres", yres);
         config_seti("client", "windowed", !settings.fullscreen);
         config_seti("client", "bg_tile", settings.bg_tile);
         config_setf("client", "bg_tile_speed", settings.bg_tile_speed);

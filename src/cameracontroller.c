@@ -636,7 +636,7 @@ void cameracontroller_spectator(float dt) {
 	spec_rot_pending_y = 0.0F;
 
 	// Normalize input direction
-	float input_len = sqrt(input_x * input_x + input_y * input_y + input_z * input_z);
+	float input_len = sqrtf(input_x * input_x + input_y * input_y + input_z * input_z);
 	
 	// Calculate target velocity based on input
 	float target_speed = 0.0F;
@@ -661,7 +661,7 @@ void cameracontroller_spectator(float dt) {
 	float dv_x = target_vel_x - spec_vel_x;
 	float dv_y = target_vel_y - spec_vel_y;
 	float dv_z = target_vel_z - spec_vel_z;
-	float dv_len = sqrt(dv_x * dv_x + dv_y * dv_y + dv_z * dv_z);
+	float dv_len = sqrtf(dv_x * dv_x + dv_y * dv_y + dv_z * dv_z);
 
 	if(dv_len > 0.0001F) {
 		float rate = (target_speed > 0.0F) ? spec_accel : spec_decel;
@@ -675,9 +675,9 @@ void cameracontroller_spectator(float dt) {
 
 	// Stop completely when drifting with no input and velocity is tiny
 	if(target_speed == 0.0F) {
-		if(fabs(spec_vel_x) < 0.01F) spec_vel_x = 0.0F;
-		if(fabs(spec_vel_y) < 0.01F) spec_vel_y = 0.0F;
-		if(fabs(spec_vel_z) < 0.01F) spec_vel_z = 0.0F;
+		if(fabsf(spec_vel_x) < 0.01F) spec_vel_x = 0.0F;
+		if(fabsf(spec_vel_y) < 0.01F) spec_vel_y = 0.0F;
+		if(fabsf(spec_vel_z) < 0.01F) spec_vel_z = 0.0F;
 	}
 
 	// Apply velocity to position with collision detection

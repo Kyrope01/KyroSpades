@@ -161,6 +161,26 @@ static int pending_height;
 static int windowed_width = 0;
 static int windowed_height = 0;
 
+void window_windowed_size(int* width, int* height) {
+	/* No captured windowed size yet (first launch, or a backend that never
+	   leaves fullscreen, e.g. Android/iOS): settings.window_width/height still
+	   hold the configured window size at that point, so fall back to them. */
+	int w = windowed_width > 0 ? windowed_width : settings.window_width;
+	int h = windowed_height > 0 ? windowed_height : settings.window_height;
+
+	if(width)
+		*width = w;
+	if(height)
+		*height = h;
+}
+
+void window_set_windowed_size(int width, int height) {
+	if(width > 0 && height > 0) {
+		windowed_width = width;
+		windowed_height = height;
+	}
+}
+
 #ifdef USE_GLFW
 
 static bool joystick_available = false;
@@ -418,19 +438,46 @@ void window_init() {
 	*/
 	glfwWindowHint(GLFW_COCOA_RETINA_FRAMEBUFFER, GLFW_FALSE);
 
+	/* ALWAYS create the window windowed, even when settings.fullscreen is set:
+	   window_apply() performs the fullscreen transition on the first frame, at
+	   the mode the monitor is already in.
+	   Passing the monitor here made GLFW ask X11/RandR for a video mode matching
+	   the saved xres/yres - which are a WINDOW size (960x540 by default, or
+	   whatever the settings menu wrote before the transition ran), so every launch
+	   after a fullscreen session switched the whole desktop down to that
+	   resolution. window_apply() then read glfwGetVideoMode() - the *current*
+	   mode, i.e. the one we had just lowered - and "fullscreens" to it, which
+	   locked the low mode in and made reshape() persist it again: sticky until the
+	   user pressed F11 twice (windowed restores the desktop mode, the second press
+	   then sees the real mode). Under Wayland/XWayland the same bogus mode request
+	   is enough to take the compositor session down (blank screen, back to GDM).
+	   The SDL backend below already worked this way: it creates a windowed window
+	   and only ever asks for SDL_WINDOW_FULLSCREEN_DESKTOP. */
 	hud_window->impl
 		= glfwCreateWindow(settings.window_width, settings.window_height, "KyroSpades " KYROSPADES_VERSION,
-						   settings.fullscreen ? glfwGetPrimaryMonitor() : NULL, NULL);
+						   NULL, NULL);
 	if(!hud_window->impl) {
 		log_fatal("Could not open window");
 		glfwTerminate();
 		exit(1);
 	}
 
-	const GLFWvidmode* mode = glfwGetVideoMode(glfwGetPrimaryMonitor());
-	glfwSetWindowPos(hud_window->impl, (mode->width - settings.window_width) / 2.0F,
-					 (mode->height - settings.window_height) / 2.0F);
-	glfwShowWindow(hud_window->impl);
+	/* Both can legitimately be NULL (no output reported yet - seen on Wayland),
+	   and dereferencing them used to segfault at startup. */
+	GLFWmonitor* monitor = glfwGetPrimaryMonitor();
+	const GLFWvidmode* mode = monitor ? glfwGetVideoMode(monitor) : NULL;
+
+	if(mode) {
+		glfwSetWindowPos(hud_window->impl, (mode->width - settings.window_width) / 2,
+						 (mode->height - settings.window_height) / 2);
+	}
+
+	/* Stay hidden while the pending fullscreen transition (window_apply, first
+	   frame) is outstanding, so the desktop doesn't get a flash of the small
+	   windowed frame during loading; window_apply() shows it afterwards. The
+	   GL context works fine on a hidden window. */
+	if(!settings.fullscreen)
+		glfwShowWindow(hud_window->impl);
 
 	glfwMakeContextCurrent(hud_window->impl);
 
@@ -466,21 +513,59 @@ void window_apply() {
 	if(pending_vsync > 1)
 		window_swapping(0);
 
-	const GLFWvidmode* mode = glfwGetVideoMode(glfwGetPrimaryMonitor());
-	if(pending_fullscreen) {
+	/* NULL on a session with no reported output (Wayland) - both calls, and both
+	   were dereferenced unconditionally before. */
+	GLFWmonitor* monitor = glfwGetPrimaryMonitor();
+	const GLFWvidmode* mode = monitor ? glfwGetVideoMode(monitor) : NULL;
+
+	if(pending_fullscreen && monitor && mode) {
 		/* Remember the windowed size first: reshape() overwrites
 		   settings.window_width/height (and thus pending_*) with the
 		   fullscreen size, so it can't be recovered on exit otherwise. */
 		if(!glfwGetWindowMonitor(hud_window->impl))
 			glfwGetWindowSize(hud_window->impl, &windowed_width, &windowed_height);
-		glfwSetWindowMonitor(hud_window->impl, glfwGetPrimaryMonitor(), 0, 0,
+
+		/* Go fullscreen at the mode the monitor is ALREADY in - GLFW's equivalent
+		   of the SDL_WINDOW_FULLSCREEN_DESKTOP the SDL backend uses. The refresh
+		   rate has to come from that same mode: requesting the current resolution
+		   with a mismatched (or 0) rate is what makes X11/XWayland perform a real
+		   mode switch, which is how the desktop ended up stuck at the saved window
+		   size. */
+		glfwSetWindowMonitor(hud_window->impl, monitor, 0, 0,
 							 mode->width, mode->height, mode->refreshRate);
+		log_info("Fullscreen at %ix%i@%iHz", mode->width, mode->height, mode->refreshRate);
 	} else {
 		int w = windowed_width > 0 ? windowed_width : pending_width;
 		int h = windowed_height > 0 ? windowed_height : pending_height;
-		glfwSetWindowMonitor(hud_window->impl, NULL, (mode->width - w) / 2,
-							 (mode->height - h) / 2, w, h, 0);
+
+		if(pending_fullscreen)
+			log_warn("Fullscreen requested but no monitor/video mode is available, staying windowed at %ix%i", w, h);
+
+		if(mode) {
+			glfwSetWindowMonitor(hud_window->impl, NULL, (mode->width - w) / 2,
+								 (mode->height - h) / 2, w, h, 0);
+		} else if(glfwGetWindowMonitor(hud_window->impl)) {
+			/* Leaving fullscreen with no mode to centre against: still get out of
+			   fullscreen and set the size, let the WM place the window. */
+			glfwSetWindowMonitor(hud_window->impl, NULL, 0, 0, w, h, 0);
+		} else {
+			glfwSetWindowSize(hud_window->impl, w, h);
+		}
 	}
+
+	glfwShowWindow(hud_window->impl);
+
+	/* Wayland only delivers the configure event on the next glfwPollEvents(), so
+	   the framebuffer callback - and with it reshape()/glViewport - may not have
+	   run yet when the first frame is drawn. Sync it now if the drawable already
+	   changed; on X11 the callback fires inside glfwSetWindowMonitor, settings
+	   match by now and this is a no-op. reshape() is safe here: unlike window_init
+	   (see the SDL backend's note) the font system is up by the first frame. */
+	int fb_width = 0, fb_height = 0;
+	glfwGetFramebufferSize(hud_window->impl, &fb_width, &fb_height);
+	if(fb_width > 0 && fb_height > 0
+	   && (fb_width != settings.window_width || fb_height != settings.window_height))
+		reshape(hud_window, fb_width, fb_height);
 }
 
 void window_deinit() {

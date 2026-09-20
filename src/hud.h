@@ -40,6 +40,19 @@ struct hud {
 	char render_world;
 	char render_localplayer;
 	mu_Context* ctx;
+	/* Optional pass drawn ON TOP of the finished menu.
+	   render_2D only *builds* microui's command list; main.c replays that list
+	   after render_2D returns. Anything issued with direct GL calls from inside
+	   render_2D therefore lands UNDERNEATH the UI, hidden behind every
+	   translucent panel/button tint - which is exactly why the skins-menu 3D
+	   previews used to look dim (MU_COLOR_PANELBG alone is alpha 192, and it is
+	   drawn twice: Content panel + Skins panel). Content that has to sit above
+	   the menu belongs here; main.c calls it right after the last microui
+	   command was executed.
+	   Deliberately the LAST member: every hud is defined with a positional
+	   initializer list, so appending keeps all of them valid and leaves this
+	   NULL for the huds that don't need an overlay. */
+	void (*render_2D_overlay)(float scalex, float scaley);
 };
 
 struct serverlist_entry {

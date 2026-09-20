@@ -184,6 +184,18 @@ void window_swapping(int value);
 void window_init(void);
 void window_fromsettings(void);
 void window_apply(void);
+/* The size the window has - or should return to - when NOT fullscreen.
+   settings.window_width/height track the live drawable size, which becomes the
+   monitor's resolution while fullscreen, so they must not be persisted as the
+   window size (see config_save). Falls back to the live size when no windowed
+   size has been captured yet, which keeps the mobile backends - where the window
+   is always the screen - behaving exactly as before. */
+void window_windowed_size(int* width, int* height);
+/* Set that size explicitly. Used when the player edits "Game width"/"Game
+   height" in the settings menu: the edit is the new windowed size even if it was
+   made while fullscreen, where it has no visible effect until fullscreen is
+   left. Ignored for non-positive values. */
+void window_set_windowed_size(int width, int height);
 void window_deinit(void);
 void window_update(void);
 int window_closed(void);

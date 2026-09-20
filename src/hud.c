@@ -5442,6 +5442,16 @@ static void hud_settings_render(mu_Context* ctx, float scalex, float scaley) {
                         || settings.ao_multiplier != settings_tmp.ao_multiplier
                         || settings.shadow_quality != settings_tmp.shadow_quality
                         || settings.shadow_intensity != settings_tmp.shadow_intensity;
+
+                /* "Game width"/"Game height" are the WINDOWED size. An explicit edit
+                   has to replace the size we restore when leaving fullscreen even when
+                   it was made while fullscreen (where it has no visible effect),
+                   otherwise F11 drops the player back into the old window and silently
+                   discards the change. Read before the memcpy overwrites settings. */
+                if(settings_tmp.window_width != settings.window_width
+                   || settings_tmp.window_height != settings.window_height)
+                        window_set_windowed_size(settings_tmp.window_width, settings_tmp.window_height);
+
                 memcpy(&settings, &settings_tmp, sizeof(struct RENDER_OPTIONS));
                 window_fromsettings();
                 sound_volume(settings.volume / 10.0F);
@@ -5486,11 +5496,42 @@ struct hud hud_settings = {
 
 static int skins_selected_category = 0;
 static int skins_selected_entry[SKIN_CATEGORIES] = {0, 0, 0, 0, 0, 0, 0, 0};
+/* Deferred 3D previews.
+   hud_skins_render() only *builds* microui's command list - main.c replays it
+   afterwards - so the models can no longer be drawn at the end of that function:
+   they would be painted first and then covered by the panels' translucent tints
+   (MU_COLOR_PANELBG is alpha 192 and is drawn twice here, once for the Content
+   panel and once for the Skins panel, which left only ~6% of the model colour -
+   the "models look dim / are behind the background" bug). The cells are
+   collected below and drawn by hud_skins_render_overlay(), which main.c runs
+   after the last microui command. */
 static int skins_preview_cells_x[256];
 static int skins_preview_cells_y[256];
 static int skins_preview_cat[256];
 static int skins_preview_ent[256];
+/* Per-preview scissor box in microui coordinates (origin top-left, y down): the
+   cell minus its name strip, intersected with the panel's clip rect. Required
+   now that the models are on top of the UI - microui clips its own rects to the
+   panel body, so a cell scrolled out of view draws no button/label at all, and
+   an unclipped model would paint over the sidebar, the category list or the
+   neighbouring cells (and over its own name label). */
+static mu_Rect skins_preview_clip[256];
 static int skins_preview_cell_count = 0;
+
+/* microui keeps intersect_rects() private, so the overlay needs its own copy.
+   Empty intersections collapse to a zero-sized rect at the top-left corner,
+   which the overlay skips. */
+static mu_Rect hud_skins_intersect_rect(mu_Rect a, mu_Rect b) {
+        int x1 = max(a.x, b.x);
+        int y1 = max(a.y, b.y);
+        int x2 = min(a.x + a.w, b.x + b.w);
+        int y2 = min(a.y + a.h, b.y + b.h);
+        if(x2 < x1)
+                x2 = x1;
+        if(y2 < y1)
+                y2 = y1;
+        return mu_rect(x1, y1, x2 - x1, y2 - y1);
+}
 
 static void mu_draw_control_frame_inner(mu_Context* ctx, mu_Rect rect, mu_Color color) {
         mu_draw_rect(ctx, rect, color);
@@ -5498,6 +5539,11 @@ static void mu_draw_control_frame_inner(mu_Context* ctx, mu_Rect rect, mu_Color 
 
 static void hud_skins_init() {
         skins_selected_category = 0;
+        /* hud_change() runs init() for the hud being switched TO, and a nav
+           button can trigger that from inside another hud's render_2D - i.e.
+           after this frame's overlay data was already collected. Drop it so the
+           overlay can never draw cells belonging to a previous visit. */
+        skins_preview_cell_count = 0;
         skins_selected_entry[0] = settings.skin_spade;
         skins_selected_entry[1] = settings.skin_grenade;
         skins_selected_entry[2] = settings.skin_rifle;
@@ -5510,6 +5556,11 @@ static void hud_skins_init() {
 
 static void hud_skins_render(mu_Context* ctx, float scalex, float scaley) {
         hud_common_render(ctx);
+
+        /* Collected fresh every frame; the overlay pass runs after this function
+           returns, so it must never see leftovers from an earlier frame (window
+           failed to open, category without entries, ...). */
+        skins_preview_cell_count = 0;
 
         mu_Rect frame = mu_rect(0, 0, settings.window_width, settings.window_height);
 
@@ -5564,8 +5615,6 @@ static void hud_skins_render(mu_Context* ctx, float scalex, float scaley) {
 
                         mu_layout_row(ctx, cols, widths, cell_h);
 
-                        skins_preview_cell_count = 0;
-
                         for(int i = 0; i < cat->count; i++) {
                                 if(skins_preview_cell_count >= 256)
                                         break;
@@ -5619,11 +5668,22 @@ static void hud_skins_render(mu_Context* ctx, float scalex, float scaley) {
                                         mu_draw_control_text(ctx, cat->entries[i].name, name_rect, MU_COLOR_TEXT, MU_OPT_ALIGNCENTER);
                                         ctx->style->colors[MU_COLOR_TEXT] = old_text;
 
-                                        skins_preview_cells_x[skins_preview_cell_count] = r.x + r.w / 2;
+                                        /* The part of the cell above the name strip. The model is
+                                           centred at 40% of its height (y is measured from the top
+                                           here, converted to GL's bottom-left origin below) and is
+                                           sized to fit, so this box is what the preview may use. */
                                         int model_area_h = r.h - name_overlay_h;
+
+                                        skins_preview_cells_x[skins_preview_cell_count] = r.x + r.w / 2;
                                         skins_preview_cells_y[skins_preview_cell_count] = settings.window_height - (r.y + model_area_h * 0.4F);
                                         skins_preview_cat[skins_preview_cell_count] = skins_selected_category;
                                         skins_preview_ent[skins_preview_cell_count] = i;
+                                        /* mu_get_clip_rect() is the Skins panel body (already
+                                           shrunk for the scrollbar and intersected with the parent
+                                           clips), so cells that scrolled out of the panel collapse
+                                           to an empty rect and are skipped by the overlay. */
+                                        skins_preview_clip[skins_preview_cell_count] = hud_skins_intersect_rect(
+                                                mu_rect(r.x, r.y, r.w, model_area_h), mu_get_clip_rect(ctx));
                                         skins_preview_cell_count++;
                                 }
 
@@ -5642,12 +5702,70 @@ static void hud_skins_render(mu_Context* ctx, float scalex, float scaley) {
 
                 mu_end_window(ctx);
         }
+}
 
-        for(int k = 0; k < skins_preview_cell_count; k++) {
+/* Called by main.c AFTER microui's command list built above has been replayed,
+   i.e. once the menu is actually on screen - so the previews composite ON TOP of
+   it instead of underneath (see struct hud::render_2D_overlay). This is the fix
+   for the models looking dim: they used to be drawn at the end of
+   hud_skins_render(), before the UI, which blended the Content + Skins panel
+   tints (MU_COLOR_PANELBG, alpha 192, twice), the cell button fill and the black
+   name strip over every model. */
+static void hud_skins_render_overlay(float scalex, float scaley) {
+        /* Only the horizontal scale feeds the preview size, exactly as before. */
+        (void)scaley;
+
+        /* Consume the list: hud_change() can switch away from this hud in the same
+           frame (nav clicks are handled while the UI is being built), and the next
+           hud_skins_render() rebuilds it from scratch anyway. */
+        int count = skins_preview_cell_count;
+        skins_preview_cell_count = 0;
+
+        if(count <= 0)
+                return;
+
+        /* kv6 geometry carries alpha-0 vertex colours, so blending MUST stay off
+           here or the models would come out invisible. main.c disables it after
+           the command list, but state it again so this pass never depends on what
+           the UI replay happened to leave behind. Same for the current colour:
+           the last UI command may have left a dark text colour bound. */
+        glDisable(GL_BLEND);
+        glColor4f(1.0F, 1.0F, 1.0F, 1.0F);
+
+        /* Deterministic preview lighting. GL_LIGHT0's ambient/diffuse are whatever
+           kv6_calclight() last computed for a world position (0.5 * the sunlight
+           there), so opening this menu straight from a dark cave rendered the
+           previews almost black, while a fresh main-menu visit fell back to the GL
+           defaults - the same skin looked different depending on where you had last
+           been standing. (-1,-1,-1) is the "full sun, no map position" form the
+           engine already uses for the first-person weapon in main.c; it skips
+           map_sunblock() entirely, so it is safe with no map loaded. Nothing to
+           restore: every world model draw calls kv6_calclight() again first, and
+           GL_LIGHT0 is only ever enabled inside kv6_render(). Only the fixed-function
+           paths are affected - the ES 2.0 kv6 shader does its own lighting. */
+        kv6_calclight(-1, -1, -1);
+
+        glEnable(GL_SCISSOR_TEST);
+
+        for(int k = 0; k < count; k++) {
+                mu_Rect c = skins_preview_clip[k];
+
+                /* Empty when the cell scrolled out of the Skins panel: microui
+                   clips its own rects to the panel body, so such a cell draws no
+                   button, no border and no name - its model must not draw either. */
+                if(c.w <= 0 || c.h <= 0)
+                        continue;
+
+                /* microui's y grows downwards, GL's scissor y upwards - the same
+                   conversion main.c applies to MU_COMMAND_CLIP. */
+                glScissor(c.x, settings.window_height - (c.y + c.h), c.w, c.h);
+
                 skins_render_preview(skins_preview_cat[k], skins_preview_ent[k],
                         skins_preview_cells_x[k], skins_preview_cells_y[k],
                         100.0F * scalex);
         }
+
+        glDisable(GL_SCISSOR_TEST);
 }
 
 static void hud_skins_keyboard(int key, int action, int mods, int internal) {
@@ -5684,6 +5802,9 @@ struct hud hud_skins = {
         0,
         0,
         NULL,
+        /* render_2D_overlay - last member of struct hud: draws the spinning skin
+           previews on top of the finished menu. */
+        hud_skins_render_overlay,
 };
 
 
@@ -5706,7 +5827,11 @@ static char demo_rename_buf[256];
 
 static void hud_demolist_init(void) {
         if(!hud_demolist.ctx) hud_demolist.ctx = malloc(sizeof(mu_Context));
-        hud_skins.ctx = malloc(sizeof(mu_Context));
+        /* NOTE: this used to also do `hud_skins.ctx = malloc(...)` - a copy-paste of
+           the line above, which leaked a context on every visit to this menu (and on
+           every "Refresh" click) and swapped hud_skins' live, mu_init()'ed context
+           for a fresh uninitialised one. hud_skins.ctx is allocated once in
+           hud_init() and must not be touched from here. */
         if(demo_files) { for(int i = 0; i < demo_file_count; i++) free(demo_files[i]); free(demo_files); demo_files = NULL; }
         demo_file_count = demo_list_files(&demo_files);
 }
