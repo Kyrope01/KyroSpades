@@ -126,6 +126,10 @@ static struct {
         int texture;
 } screenshot_anim = {0};
 
+/* Latched "the screenshot key was pressed" request. The key handler must not
+   read the framebuffer itself - see screenshot_capture() for why. */
+static bool screenshot_capture_pending = false;
+
 int chat_input_mode = CHAT_NO_INPUT;
 
 char chat[3][128][256] = {0}; // chat[0] is current input
@@ -2016,47 +2020,12 @@ void keys(struct window_instance* window, int key, int scancode, int action, int
         }
 
         if(key == WINDOW_KEY_SCREENSHOT && action == WINDOW_PRESS) { // take screenshot
-                time_t pic_time;
-                time(&pic_time);
-                char pic_name[128];
-                sprintf(pic_name, "screenshots/%ld.png", (long)pic_time);
-
-                unsigned char* pic_data = malloc(settings.window_width * settings.window_height * 4 * 2);
-                CHECK_ALLOCATION_ERROR(pic_data)
-                glReadBuffer(GL_FRONT);
-                glReadPixels(0, 0, settings.window_width, settings.window_height, GL_RGBA, GL_UNSIGNED_BYTE, pic_data);
-                glReadBuffer(GL_BACK);
-
-                for(int y = 0; y < settings.window_height; y++) { // mirror image (top-bottom)
-                        for(int x = 0; x < settings.window_width; x++)
-                                pic_data[(x + (settings.window_height - y - 1) * settings.window_width) * 4 + 3] = 255;
-                        memcpy(pic_data + settings.window_width * 4 * (y + settings.window_height),
-                                   pic_data + settings.window_width * 4 * (settings.window_height - y - 1), settings.window_width * 4);
-                }
-
-                lodepng_encode32_file(pic_name, pic_data + settings.window_width * settings.window_height * 4,
-                                                          settings.window_width, settings.window_height);
-
-                if(screenshot_anim.texture)
-                        glDeleteTextures(1, (GLuint*)&screenshot_anim.texture);
-                glGenTextures(1, (GLuint*)&screenshot_anim.texture);
-                glBindTexture(GL_TEXTURE_2D, screenshot_anim.texture);
-                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, settings.window_width, settings.window_height, 0, GL_RGBA,
-                                         GL_UNSIGNED_BYTE, pic_data + settings.window_width * settings.window_height * 4);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-                glBindTexture(GL_TEXTURE_2D, 0);
-                screenshot_anim.active = true;
-                screenshot_anim.start_time = window_time();
-
-                free(pic_data);
-
-                sprintf(pic_name, "Saved screenshot as screenshots/%ld.png", (long)pic_time);
-                chat_add(0, 0x00FFFF, pic_name);
-
-                sound_create(SOUND_LOCAL, &sound_screenshot, 0.0F, 0.0F, 0.0F);
+                /* Only latch the request here: this callback fires from inside
+                   glfwPollEvents()/SDL's event pump, which runs AFTER the frame
+                   has already been swapped, so the back buffer is undefined and
+                   the front buffer is unreadable on Wayland. screenshot_capture()
+                   grabs the next finished frame instead. */
+                screenshot_capture_pending = true;
         }
 
         if(key == WINDOW_KEY_SAVE_MAP && action == WINDOW_PRESS) {
@@ -2072,6 +2041,116 @@ void keys(struct window_instance* window, int key, int scancode, int action, int
         } else if(key == WINDOW_KEY_RECORDING && action == WINDOW_PRESS) {
                 recorder_toggle_recording();
         }
+}
+
+/* Read the frame that display() just finished and write it out as a PNG.
+   ────────────────────────────────────────────────────────────────────────
+   Called once per frame from the main loop, AFTER display() has drawn the
+   whole frame and BEFORE window_update() swaps the buffers - exactly where
+   recorder_capture_frame() reads its frames.
+
+   Why it cannot be done from the key handler (which is where it used to
+   live): keys() is dispatched by glfwPollEvents()/SDL's event pump, and
+   window_update() calls that AFTER glfwSwapBuffers()/SDL_GL_SwapWindow().
+   So when the key arrives, the frame the player was looking at has already
+   been swapped away and the back buffer's contents are undefined - the only
+   thing that is still "the visible image" is the front buffer, which is what
+   the old code read.
+
+   Reading GL_FRONT only works where the window system actually hands the
+   driver a front buffer. GLX does, so this worked on X11 and XWayland. EGL
+   on native Wayland does not: Mesa's platform_wayland.c image loader sets
+   image_mask = __DRI_IMAGE_BUFFER_BACK and returns only buffers->back, a
+   __DRI_BUFFER_FRONT_LEFT request falls through to
+   dri2_egl_surface_alloc_local_buffer() - a freshly allocated buffer that
+   was never rendered to - and flushFrontBuffer() is an empty function. The
+   readback therefore returns a zeroed buffer and every screenshot came out
+   pure black (Debian 13 / GNOME / Wayland). Even on GLX, reading GL_FRONT
+   right after a swap is racy (Mesa bug 38123).
+
+   Reading the back buffer before the swap is the portable way to do this and
+   needs no extension: the back buffer is by definition the frame we just
+   drew. On GLES glReadBuffer is a no-op (common.h) and the readback comes
+   from the back buffer anyway, so the mobile path is unaffected. */
+static void screenshot_capture(void) {
+        if(!screenshot_capture_pending)
+                return;
+        screenshot_capture_pending = false;
+
+        int w = settings.window_width;
+        int h = settings.window_height;
+        if(w <= 0 || h <= 0) {
+                log_warn("Screenshot skipped: no valid framebuffer size (%ix%i)", w, h);
+                return;
+        }
+
+        time_t pic_time;
+        time(&pic_time);
+        char pic_name[128];
+        snprintf(pic_name, sizeof(pic_name), "screenshots/%ld.png", (long)pic_time);
+
+        /* Room for two frames: the readback lands in the first half, the
+           vertically flipped copy that actually gets encoded in the second. */
+        size_t frame_bytes = (size_t)w * (size_t)h * 4;
+        unsigned char* pic_data = malloc(frame_bytes * 2);
+        CHECK_ALLOCATION_ERROR(pic_data)
+        unsigned char* flipped = pic_data + frame_bytes;
+
+        /* Read the on-screen framebuffer and not whatever FBO a previous pass
+           may have left bound (iOS uses a non-zero default FBO, and the
+           post-processing passes bind away from the screen). display() already
+           re-binds it, this just keeps the readback independent of that. */
+        glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)window_gl_default_framebuffer);
+        glReadBuffer(GL_BACK);
+        glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pic_data);
+
+        unsigned char rgb_or = 0;
+        for(int y = 0; y < h; y++) { // mirror image (top-bottom)
+                unsigned char* dst = flipped + (size_t)y * (size_t)w * 4;
+                memcpy(dst, pic_data + (size_t)(h - y - 1) * (size_t)w * 4, (size_t)w * 4);
+
+                for(int x = 0; x < w; x++) {
+                        rgb_or |= (unsigned char)(dst[x * 4] | dst[x * 4 + 1] | dst[x * 4 + 2]);
+                        /* The alpha of the default framebuffer is meaningless
+                           (EGL configs on Wayland commonly have 8 alpha bits
+                           that the renderer never writes), so force opaque -
+                           otherwise the PNG is fully transparent and image
+                           viewers show it as black. */
+                        dst[x * 4 + 3] = 255;
+                }
+        }
+
+        if(!rgb_or)
+                log_warn("Screenshot readback is completely black (%ix%i) - either a genuinely black "
+                         "frame or a driver that refused the back-buffer read", w, h);
+
+        unsigned lodepng_err = lodepng_encode32_file(pic_name, flipped, w, h);
+
+        if(screenshot_anim.texture)
+                glDeleteTextures(1, (GLuint*)&screenshot_anim.texture);
+        glGenTextures(1, (GLuint*)&screenshot_anim.texture);
+        glBindTexture(GL_TEXTURE_2D, screenshot_anim.texture);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, flipped);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        screenshot_anim.active = true;
+        screenshot_anim.start_time = window_time();
+
+        free(pic_data);
+
+        if(lodepng_err) {
+                log_error("Could not write %s (lodepng error %u)", pic_name, lodepng_err);
+                snprintf(pic_name, sizeof(pic_name), "Could not save screenshot (error %u)", lodepng_err);
+                chat_add(0, 0xFF4040, pic_name);
+        } else {
+                snprintf(pic_name, sizeof(pic_name), "Saved screenshot as screenshots/%ld.png", (long)pic_time);
+                chat_add(0, 0x00FFFF, pic_name);
+        }
+
+        sound_create(SOUND_LOCAL, &sound_screenshot, 0.0F, 0.0F, 0.0F);
 }
 
 void mouse_click(struct window_instance* window, int button, int action, int mods) {
@@ -2547,6 +2626,12 @@ int main(int argc, char** argv) {
 
  
                  recorder_capture_frame();
+
+                 /* Screenshot readback. Has to sit between display() and
+                    window_update(): the back buffer still holds the frame we
+                    just drew, and window_update() swaps it away (and only then
+                    dispatches the key that asked for this). */
+                 screenshot_capture();
  
 #ifndef OPENGL_ES
                 if(recorder_is_flashing()) {
