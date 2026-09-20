@@ -47,7 +47,6 @@ jobs:
         shell: bash
 
       - name: Cache CMake dependencies
-        if: matrix.platform != 'windows'
         uses: actions/cache@v4
         with:
           path: build/_deps
@@ -59,7 +58,7 @@ jobs:
         uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
-          update: true
+          update: false
           install: >-
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-cmake
