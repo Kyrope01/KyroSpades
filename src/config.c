@@ -1082,7 +1082,6 @@ void config_reload() {
                                  .help = "Render player hand during gameplay",
                                  .name = "Render hand",
                                  .category = "Graphic Settings",
-                                 .subcategory = "Display",
                          });
         list_add(&config_settings,
                          &(struct config_setting) {

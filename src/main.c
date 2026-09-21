@@ -2338,6 +2338,7 @@ int main(int argc, char** argv) {
         settings.rifle_ads_fov = CAMERA_DEFAULT_FOV;
         settings.shotgun_ads_fov = CAMERA_DEFAULT_FOV;
         settings.smg_ads_fov = CAMERA_DEFAULT_FOV;
+        settings.ads_zoom_animation = 1;
         settings.disable_dynamic_fov = 0;
         settings.textured_blocks = 0;
         settings.minimap_zoom = 3;
@@ -2383,6 +2384,12 @@ int main(int argc, char** argv) {
         settings.view_bob_intensity = 2.0F;
         settings.land_dip = 1;
         settings.camera_shake = 1;
+        /* Signature client defaults, enabled out of the box (each can be
+           disabled individually in settings): floating damage numbers,
+           the session stats display and spectator ESP. */
+        settings.damage_numbers = 1;
+        settings.player_stats = 1;
+        settings.esp_in_spec = 1;
         strcpy(settings.name, "DEV_CLIENT");
         strcpy(settings.ui_language, "en_US");
 
