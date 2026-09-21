@@ -51,7 +51,6 @@ jobs:
           mv /tmp/ks-backup-readme README.md 2>/dev/null || true
         shell: bash
       - name: Cache CMake dependencies
-        if: matrix.platform != 'windows'
         uses: actions/cache@v4
         with:
           path: build/_deps
@@ -62,7 +61,7 @@ jobs:
         uses: msys2/setup-msys2@v2
         with:
           msystem: ${{ matrix.msystem }}
-          update: true
+          update: false
           install: >-
             ${{ matrix.compiler_pkg }}
             ${{ matrix.mingw_prefix }}-cmake
@@ -73,12 +72,9 @@ jobs:
             ${{ matrix.mingw_prefix }}-libdeflate
             ${{ matrix.mingw_prefix }}-pkgconf
             ${{ matrix.mingw_prefix }}-python
+            ${{ matrix.mingw_prefix }}-ffmpeg
             zip
             make
-      - name: Install FFmpeg (Windows x64)
-        if: matrix.platform == 'windows' && matrix.arch == 'x64'
-        shell: msys2 {0}
-        run: pacman -S --noconfirm ${{ matrix.mingw_prefix }}-ffmpeg
       - name: Build (Windows)
         if: matrix.platform == 'windows'
         shell: msys2 {0}
