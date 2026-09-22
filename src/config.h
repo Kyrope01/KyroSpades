@@ -156,6 +156,7 @@ extern struct RENDER_OPTIONS {
         float view_bob_intensity;       /* multiplier for view bob strength, 0.0 to 10.0 */
         int land_dip;                 /* small camera dip when landing from a fall */
         int camera_shake;             /* camera shake from gunfire and explosions (view-only) */
+        int damage_feedback;          /* red screen vignette + mild camera shake when the local player takes damage (view-only) */
         char audio_monitor_source[64];
         char ui_language[16];         /* locale reported to servers ("en_US", "de_DE", ...) */
 } settings, settings_tmp;

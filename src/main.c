@@ -61,6 +61,7 @@
 #include "recorder.h"
 #include "bloodmarks.h"
 #include "damagenumbers.h"
+#include "damagefx.h"
 #include "main.h"
 
 int fps = 0;
@@ -93,6 +94,7 @@ static struct {
            filmic tone-mapping flag */
         int uni_pp_ca_strength;
         int uni_pp_filmic;
+        int uni_pp_dmg; /* damage feedback: red edge vignette (0..1) */
         /* Volumetric lighting (god-rays) — faithful port of Luanti's shader */
         unsigned int vol_tex;       /* color texture that receives volumetric output */
         unsigned int vol_fbo;       /* FBO bound to vol_tex (no depth attachment) */
@@ -418,12 +420,15 @@ void display() {
         /* Treat near-zero slider values as OFF: the on-screen sliders can't
            always land exactly on 0 (touch precision), and a visually-nil
            post-process pass would otherwise keep running. */
+        /* damagefx_vignette() keeps the pass alive for the ~1 s the damage
+           vignette fades out, even when every other post-process is off */
         int needs_postproc = ((glx_version || gles_version >= 2)
                               && (settings.exposure < -0.5F || settings.exposure > 0.5F
                                   || settings.saturation < -0.5F || settings.saturation > 0.5F
                                   || settings.contrast < -0.5F || settings.contrast > 0.5F
                                   || settings.vignette > 0.5F || settings.volumetric_light || settings.lens_flare
-                                  || settings.chromatic_aberration || settings.filmic_tonemapping));
+                                  || settings.chromatic_aberration || settings.filmic_tonemapping
+                                  || damagefx_vignette() > 0.003F));
 
         /* Avoid a driver-synchronising glGetIntegerv every frame on the normal
            fast path.  We only need the live framebuffer id when a post-process
@@ -593,6 +598,7 @@ void display() {
                                                 "uniform float pp_vig;\n"
                                                 "uniform float pp_ca_strength;\n"
                                                 "uniform float pp_filmic;\n"
+                                                "uniform float pp_dmg;\n"
                                                 "uniform sampler2D tex;\n"
                                                 "vec3 acesFilm(vec3 x){\n"
                                                 "    const float a=2.51; const float b=0.03;\n"
@@ -617,6 +623,11 @@ void display() {
                                                 "    c = c * pp_scale + pp_bias;\n"
                                                 "    if(pp_filmic > 0.5) c = acesFilm(c);\n"
                                                 "    c *= clamp(1.0 - pp_vig * r2, 0.0, 1.0);\n"
+                                                "    if(pp_dmg > 0.001){\n"
+                                                "        float dm = smoothstep(0.04, 0.45, r2) * pp_dmg;\n"
+                                                "        c = mix(c, vec3(0.55, 0.04, 0.04), dm * 0.22);\n"
+                                                "        c += vec3(0.42, 0.03, 0.03) * dm;\n"
+                                                "    }\n"
                                                 "    gl_FragColor = vec4(c, 1.0);\n"
                                                 "}\n";
                                         postproc.shader = glx_shader(vert, frag);
@@ -631,6 +642,7 @@ void display() {
                                         "uniform float pp_vig;"
                                         "uniform float pp_ca_strength;"
                                         "uniform float pp_filmic;"
+                                        "uniform float pp_dmg;"
                                         "uniform sampler2D tex;"
                                         "vec3 acesFilm(vec3 x){"
                                         "const float a=2.51;const float b=0.03;"
@@ -653,6 +665,7 @@ void display() {
                                         "c=c*pp_scale+pp_bias;"
                                         "if(pp_filmic>0.5)c=acesFilm(c);"
                                         "c*=clamp(1.0-pp_vig*r2,0.0,1.0);"
+                                        "if(pp_dmg>0.001){float dm=smoothstep(0.04,0.45,r2)*pp_dmg;c=mix(c,vec3(0.55,0.04,0.04),dm*0.22);c+=vec3(0.42,0.03,0.03)*dm;}"
                                         "gl_FragColor=vec4(c,1.0);}";
                                 postproc.shader = glx_shader(vert, frag);
 #if defined(OPENGL_ES)
@@ -665,6 +678,7 @@ void display() {
                                         postproc.uni_pp_vig = glGetUniformLocation(postproc.shader, "pp_vig");
                                         postproc.uni_pp_ca_strength = glGetUniformLocation(postproc.shader, "pp_ca_strength");
                                         postproc.uni_pp_filmic = glGetUniformLocation(postproc.shader, "pp_filmic");
+                                        postproc.uni_pp_dmg = glGetUniformLocation(postproc.shader, "pp_dmg");
                                         // sampler binding never changes — set once here, not per frame
                                         glUseProgram(postproc.shader);
                                         glUniform1i(glGetUniformLocation(postproc.shader, "tex"), 0);
@@ -1634,6 +1648,7 @@ void display() {
                                         glUniform1f(postproc.uni_pp_ca_strength,
                                                     settings.chromatic_aberration ? settings.chromatic_aberration_strength * 0.01F : 0.0F);
                                         glUniform1f(postproc.uni_pp_filmic, settings.filmic_tonemapping ? 1.0F : 0.0F);
+                                        glUniform1f(postproc.uni_pp_dmg, damagefx_vignette()); // pp_dmg
 
 #if defined(OPENGL_ES)
                                         if(gles_version >= 2) {
@@ -2295,10 +2310,10 @@ int main(int argc, char** argv) {
         settings.shadow_intensity = 0.40F;
         settings.sky_gradient = 0;
         settings.sky_gradient_intensity = 0.5F;
-        settings.water_waves = 0;
+        settings.water_waves = 1;
         settings.water_wave_intensity = 2.0F;
         settings.water_wave_speed = 1.0F;
-        settings.water_wave_mode = 0;
+        settings.water_wave_mode = 1;
         settings.water_wave_tile_size = 2;
         settings.render_distance = 128.0F;
         settings.spectator_fog_distance = 128.0F;
@@ -2333,7 +2348,7 @@ int main(int argc, char** argv) {
         settings.force_displaylist = 0;
         settings.invert_y = 0;
         settings.smooth_fog = 0;
-        settings.water_shader = 0;
+        settings.water_shader = 1;
         settings.camera_fov = CAMERA_DEFAULT_FOV;
         settings.rifle_ads_fov = CAMERA_DEFAULT_FOV;
         settings.shotgun_ads_fov = CAMERA_DEFAULT_FOV;
@@ -2384,6 +2399,7 @@ int main(int argc, char** argv) {
         settings.view_bob_intensity = 2.0F;
         settings.land_dip = 1;
         settings.camera_shake = 1;
+        settings.damage_feedback = 1;
         /* Signature client defaults, enabled out of the box (each can be
            disabled individually in settings): floating damage numbers,
            the session stats display and spectator ESP. */
@@ -2614,6 +2630,10 @@ int main(int argc, char** argv) {
                 } else {
                         physics_tick_alpha = 1.0F;
                 }
+
+                /* Damage-feedback vignette fades out every frame, including
+                   while a menu is open over the world. */
+                damagefx_update(dt_float);
 
                  display();
  

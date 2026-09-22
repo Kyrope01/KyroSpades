@@ -44,6 +44,7 @@ void cameracontroller_selection(float dt);
 void cameracontroller_death(float dt);
 
 void cameracontroller_add_shake(float intensity);
+void cameracontroller_add_damage_shake(float intensity);
 void cameracontroller_land_dip(float strength);
 void cameracontroller_fps_render(void);
 void cameracontroller_spectator_render(void);

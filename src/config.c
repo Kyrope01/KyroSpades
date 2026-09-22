@@ -364,6 +364,7 @@ void config_save() {
         config_seti("client", "auto_demo_recording", settings.auto_demo_recording);
         config_seti("client", "blood_marks", settings.blood_marks);
         config_seti("client", "damage_numbers", settings.damage_numbers);
+        config_seti("client", "damage_feedback", settings.damage_feedback);
         config_seti("client", "player_stats", settings.player_stats);
         config_seti("client", "player_technical_stats", settings.player_technical_stats);
         config_seti("client", "rain", settings.rain);
@@ -541,6 +542,7 @@ IMPORT_SETTING(settings.camera_movement, camera_movement, atoi(value));
                 IMPORT_SETTING(settings.auto_demo_recording, auto_demo_recording, atoi(value));
                 IMPORT_SETTING(settings.blood_marks, blood_marks, atoi(value));
                 IMPORT_SETTING(settings.damage_numbers, damage_numbers, atoi(value));
+                IMPORT_SETTING(settings.damage_feedback, damage_feedback, atoi(value));
                 IMPORT_SETTING(settings.player_stats, player_stats, atoi(value));
                 IMPORT_SETTING(settings.player_technical_stats, player_technical_stats, atoi(value));
                 IMPORT_SETTING(settings.rain, rain, atoi(value));
@@ -1345,6 +1347,16 @@ void config_reload() {
                                  .name = "Filmic tone mapping",
                                  .category = "Visual Effects",
                                  .subcategory = "Post Processing",
+                         });
+        list_add(&config_settings,
+                         &(struct config_setting) {
+                                 .value = &settings_tmp.damage_feedback,
+                                 .type = CONFIG_TYPE_INT,
+                                 .min = 0,
+                                 .max = 1,
+                                 .help = "Red screen vignette and mild camera shake when you take damage",
+                                 .name = "Damage feedback",
+                                 .category = "Visual Effects",
                          });
         list_add(&config_settings,
                          &(struct config_setting) {

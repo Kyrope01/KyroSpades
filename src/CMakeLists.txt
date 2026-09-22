@@ -65,16 +65,11 @@ endif()
 
 # OpenAL: HRTF (real binaural, inter-aural time+level delay) and EFX
 # (reverb, occlusion filters) only exist in OpenAL SOFT. Apple's
-# OpenAL.framework and the generic OpenAL32.dll that ships with Windows
-# games are NOT openal-soft and support neither. We only accept a system
-# install if its dev headers include AL/efx.h — a solid signal it really is
-# openal-soft. Distro libopenal-dev on Linux ships that header, and so does
-# the MSYS2/MinGW openal package (it *is* openal-soft), which is what the
-# Windows CI installs; letting CMake find it saves rebuilding openal-soft
-# from source on every Windows run. The bare OpenAL32.dll has no headers at
-# all so find_package never sees it, and Creative's old SDK keeps efx.h flat
-# in include/ rather than under AL/, so both fall through to the source
-# build. Otherwise build openal-soft from source, same
+# OpenAL.framework and Windows' bundled/generic OpenAL32.dll are NOT
+# openal-soft and support neither. We only accept a system install if its
+# dev headers include AL/efx.h — a solid signal it really is openal-soft
+# (e.g. distro libopenal-dev on Linux ships that header; Apple/Windows
+# system installs don't). Otherwise build openal-soft from source, same
 # prefer-system/fallback-to-FetchContent pattern as SDL2 above.
 if(ENABLE_SOUND)
         set(OPENAL_USE_FETCHCONTENT FALSE)
@@ -85,7 +80,7 @@ if(ENABLE_SOUND)
         if(OPENAL_LIBRARY AND OPENAL_INCLUDE_DIR AND EXISTS "${OPENAL_INCLUDE_DIR}/AL/efx.h")
                 message(STATUS "OpenAL: using pre-supplied openal-soft (${OPENAL_LIBRARY})")
                 set(OPENAL_FOUND TRUE)
-        elseif(NOT APPLE AND NOT ANDROID)
+        elseif(NOT APPLE AND NOT WIN32 AND NOT ANDROID)
                 find_package(OpenAL QUIET)
                 if(OPENAL_FOUND)
                         find_path(OPENAL_EFX_INCLUDE_DIR AL/efx.h
@@ -223,6 +218,7 @@ list(APPEND CLIENT_SOURCES entitysystem.c)
 list(APPEND CLIENT_SOURCES demo.c)
 list(APPEND CLIENT_SOURCES bloodmarks.c)
 list(APPEND CLIENT_SOURCES damagenumbers.c)
+list(APPEND CLIENT_SOURCES damagefx.c)
 # icon.rc is a Windows resource file — skip it on non-Windows platforms
 if(WIN32)
         list(APPEND CLIENT_SOURCES ${KyroSpades_SOURCE_DIR}/resources/icon.rc)

@@ -66,6 +66,17 @@ void cameracontroller_add_shake(float intensity) {
 		cam_shake_value = 1.25F;
 }
 
+/* Damage shake (view-only): feeds the same accumulator as the
+   gunfire/explosion shake but is gated by the "Damage feedback" setting,
+   so it can be toggled independently of the general camera shake. */
+void cameracontroller_add_damage_shake(float intensity) {
+	if(!settings.damage_feedback)
+		return;
+	cam_shake_value += intensity;
+	if(cam_shake_value > 1.25F)
+		cam_shake_value = 1.25F;
+}
+
 /* Landing dip (view-only): instant drop, exponential recovery */
 static float cam_land_dip = 0.0F;
 void cameracontroller_land_dip(float strength) {
@@ -448,7 +459,7 @@ void cameracontroller_fps_render() {
 		ey += up;
 	}
 
-	if(settings.camera_shake && cam_shake_value > 0.0001F) {
+	if((settings.camera_shake || settings.damage_feedback) && cam_shake_value > 0.0001F) {
 		/* smooth sum-of-sines wobble; amplitude mix tuned so a single
 		   rifle shot is a readable nudge and close explosions a real
 		   wallop (the original pure-quadratic 0.006 was sub-perceptual) */

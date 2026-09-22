@@ -24,6 +24,7 @@
 #include <string.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <limits.h>
 
 #include "libdeflate.h"
 #include "texture.h"
@@ -47,6 +48,7 @@
 #include "window.h"
 #include "bloodmarks.h"
 #include "damagenumbers.h"
+#include "damagefx.h"
 
 void (*packets[256])(void* data, int len) = {NULL};
 
@@ -139,15 +141,35 @@ static void printJoinMsg(int team, char* name) {
 }
 
 void read_PacketMapChunk(void* data, int len) {
-        if(demo_is_seeking()) return;
-        // increase allocated memory if it is not enough to store the next chunk
-        if(compressed_chunk_data_offset + len > compressed_chunk_data_size) {
-                compressed_chunk_data_size += 1024 * 1024;
-                compressed_chunk_data = realloc(compressed_chunk_data, compressed_chunk_data_size);
+        if(demo_is_seeking() || len <= 0) return;
+
+        /* Map chunks arrive in network-sized pieces, but the old allocator
+           grew by exactly 1 MiB. A chunk larger than the remaining capacity
+           could still overflow it, and large maps caused many realloc/copy
+           operations. Grow geometrically, while ensuring one unusually large
+           packet is always covered in a single allocation. */
+        size_t required = (size_t)compressed_chunk_data_offset + (size_t)len;
+        if(required > (size_t)compressed_chunk_data_size) {
+                size_t capacity = compressed_chunk_data_size > 0
+                        ? (size_t)compressed_chunk_data_size : 1024u * 1024u;
+                while(capacity < required) {
+                        size_t next = capacity * 2;
+                        if(next < capacity) { /* size_t overflow guard */
+                                capacity = required;
+                                break;
+                        }
+                        capacity = next;
+                }
+                if(capacity > (size_t)INT_MAX) {
+                        log_error("Compressed map is too large: %zu bytes", required);
+                        return;
+                }
+                compressed_chunk_data = realloc(compressed_chunk_data, capacity);
                 CHECK_ALLOCATION_ERROR(compressed_chunk_data)
+                compressed_chunk_data_size = (int)capacity;
         }
-        // accept any chunk length for "superior" performance, as pointed out by github/NotAFile
-        memcpy(compressed_chunk_data + compressed_chunk_data_offset, data, len);
+
+        memcpy((unsigned char*)compressed_chunk_data + compressed_chunk_data_offset, data, (size_t)len);
         compressed_chunk_data_offset += len;
 }
 
@@ -388,6 +410,8 @@ void read_PacketStateData(void* data, int len) {
         fog_color[0] = p->fog_red / 255.0F;
         fog_color[1] = p->fog_green / 255.0F;
         fog_color[2] = p->fog_blue / 255.0F;
+
+        damagefx_reset();
 
         if(demo_is_playing()) {
                 if(!demo_is_seeking()) {
@@ -826,6 +850,7 @@ void read_PacketKillAction(void* data, int len) {
                         local_player_death_time = window_time();
                         local_player_respawn_time = p->respawn_time;
                         local_player_respawn_cnt_last = 255;
+                        damagefx_death();
                         if(!demo_mute_effects())
                                 sound_create(SOUND_LOCAL, &sound_death, 0.0F, 0.0F, 0.0F);
 
@@ -941,7 +966,13 @@ void read_PacketSetHP(void* data, int len) {
                 return;
         }
         struct PacketSetHP* p = (struct PacketSetHP*)data;
+        int damage = (int)local_player_health - p->hp;
         local_player_health = p->hp;
+        if(damage > 0) {
+                damagefx_hit((float)damage);
+                /* mild shake, scales with the hit size */
+                cameracontroller_add_damage_shake(0.05F + (float)damage * 0.0035F);
+        }
         if(p->type == DAMAGE_SOURCE_GUN) {
                 local_player_last_damage_timer = window_time();
                 if(!demo_mute_effects()) sound_create(SOUND_LOCAL, &sound_hitplayer, 0.0F, 0.0F, 0.0F);
@@ -958,6 +989,7 @@ void read_PacketRestock(void* data, int len) {
         }
         struct PacketRestock* p = (struct PacketRestock*)data;
         local_player_health = 100;
+        damagefx_reset();
         local_player_blocks = 50;
         local_player_grenades = 3;
         weapon_set(true);
