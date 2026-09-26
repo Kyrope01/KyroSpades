@@ -122,11 +122,20 @@ to the top of the server list.
 <dt>Textured Blocks
 <dd>    Blocks can now have textures when textured blocks are enabled.
 
+<dt>Glowing Blocks
+<dd>    The advanced colour selector can mark newly placed blocks as client-only,
+session-persistent coloured light sources. Their terrain-occluded volumetric rays
+fade from full strength nearby to zero at roughly fifty blocks.
+
 <dt>Water Shader and Waves
-<dd>    Water blocks are reflecting blocks while fitting to a voxel game.
+<dd>    Water remains voxel-styled while adding animated waves and reflections.
+The OpenGL Core renderer adds Fresnel shading, responsive wave normals, scene
+lights and terrain shadows, with the established compatibility fallback kept.
 
 <dt>Graphical Effects
 <dd>    Filmic tonemapping, chromatic aberration, volumetric lighting and lens flare.
+OpenGL Core also supports a floating-point HDR scene and soft multipass bloom,
+with compatibility rendering retained when those resources are unavailable.
 
 <dt>Blood Stains
 <dd>    Blood stains option added.
@@ -174,8 +183,15 @@ deadzone before the view starts to follow it.
 <dd>    The big map supports 5 zoom levels, cycled with the map zoom key.
 
 <dt>Realistic Sun Shadows
-<dd>    Blocks cast directional shadows from the sun with adjustable darkness,
-adding real depth to the world.
+<dd>    Terrain blocks cast live directional sun shadows with adjustable darkness
+on the modern Core renderer. The terrain-only pass is cached until geometry or
+coverage changes and never redraws moving entities; older renderers retain baked
+shadows as a safe fallback.
+
+<dt>Flashlight
+<dd>    Press F by default to toggle an OpenSpades-style warm, smoothly aimed
+spotlight while alive in first-person view. The binding can be changed under
+Controls and follows the master dynamic-light setting.
 
 <dt>Sky Gradient
 <dd>    The sky is rendered as a blended gradient with adjustable intensity
@@ -203,6 +219,11 @@ eases down.
 <dd>    Subtle view bobbing while walking, a small camera dip when landing from
 a fall and camera shake from gunfire and explosions (all view-only; can be
 disabled via config.ini).
+
+<dt>Damage Feedback
+<dd>    A red vignette around the screen edges with smooth fading plus a mild
+camera shake when you take damage. Enabled by default, toggleable in the
+settings menu under Visual Effects.
 
 <dt>New HUD Elements
 <dd>    Optional smooth segmented health bar, segmented magazine ammo display
