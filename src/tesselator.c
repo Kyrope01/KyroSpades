@@ -21,8 +21,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <math.h>
 
 #include "common.h"
+#include "config.h"
 #include "glx.h"
 #include "tesselator.h"
 
@@ -43,6 +45,8 @@ void tesselator_create(struct tesselator* t, enum tesselator_vertex_type type, i
         t->vertex_type = type;
         t->has_normal = has_normal;
         t->has_texcoord = has_texcoord;
+        t->normal_explicit = 0;
+        t->normal[0] = t->normal[1] = t->normal[2] = 0;
 
 #ifdef TESSELATE_QUADS
         t->vertices = malloc(t->quad_space * vertex_type_size(t->vertex_type) * 3 * 4);
@@ -110,10 +114,64 @@ void tesselator_free(struct tesselator* t) {
 }
 
 void tesselator_draw(struct tesselator* t, int with_color) {
-#if defined(OPENGL_ES)
+        if(t->quad_count == 0)
+                return;
+#if defined(OPENGL_CORE)
+        {
+                static GLuint stream_vbo = 0;
+                size_t count = (size_t)t->quad_count * 6;
+                size_t vertex_stride = t->vertex_type == VERTEX_INT ? sizeof(GLshort) * 3 : sizeof(GLfloat) * 3;
+                size_t vertex_bytes = count * vertex_stride;
+                size_t color_bytes = with_color ? count * sizeof(uint32_t) : 0;
+                size_t normal_bytes = t->has_normal ? count * sizeof(int8_t) * 3 : 0;
+                size_t texcoord_bytes = t->texcoords ? count * sizeof(float) * 2 : 0;
+                size_t total = vertex_bytes + color_bytes + normal_bytes + texcoord_bytes;
+                size_t offset = 0;
+
+                if(!stream_vbo)
+                        glGenBuffers(1, &stream_vbo);
+                glBindBuffer(GL_ARRAY_BUFFER, stream_vbo);
+                glBufferData(GL_ARRAY_BUFFER, total, NULL, GL_STREAM_DRAW);
+                glBufferSubData(GL_ARRAY_BUFFER, offset, vertex_bytes, t->vertices);
+                glVertexAttribPointer(0, 3, t->vertex_type == VERTEX_INT ? GL_SHORT : GL_FLOAT,
+                                      GL_FALSE, 0, (void*)offset);
+                glEnableVertexAttribArray(0);
+                offset += vertex_bytes;
+
+                if(with_color) {
+                        glBufferSubData(GL_ARRAY_BUFFER, offset, color_bytes, t->colors);
+                        glVertexAttribPointer(1, 4, GL_UNSIGNED_BYTE, GL_TRUE, 0, (void*)offset);
+                        glEnableVertexAttribArray(1);
+                        offset += color_bytes;
+                }
+                if(t->has_normal) {
+                        glBufferSubData(GL_ARRAY_BUFFER, offset, normal_bytes, t->normals);
+                        glVertexAttribPointer(3, 3, GL_BYTE, GL_TRUE, 0, (void*)offset);
+                        glEnableVertexAttribArray(3);
+                        offset += normal_bytes;
+                }
+                if(t->texcoords) {
+                        glBufferSubData(GL_ARRAY_BUFFER, offset, texcoord_bytes, t->texcoords);
+                        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 0, (void*)offset);
+                        glEnableVertexAttribArray(2);
+                }
+
+                glx_use_default_shader();
+                glx_default_shader_set_draw_state(with_color, t->texcoords != NULL, t->has_normal);
+                glDrawArrays(GL_TRIANGLES, 0, (GLsizei)count);
+
+                glDisableVertexAttribArray(0);
+                if(with_color) glDisableVertexAttribArray(1);
+                if(t->has_normal) glDisableVertexAttribArray(3);
+                if(t->texcoords) glDisableVertexAttribArray(2);
+                glBindBuffer(GL_ARRAY_BUFFER, 0);
+                return;
+        }
+#elif defined(OPENGL_ES)
         if(gles_version >= 2) {
                 glx_use_default_shader();
-                glx_default_shader_set_draw_state(with_color, t->texcoords != NULL);
+                glx_default_shader_set_draw_state(with_color, t->texcoords != NULL,
+                                                   t->has_normal && settings.dynamic_lights);
 
                 switch(t->vertex_type) {
                         case VERTEX_INT:
@@ -131,7 +189,7 @@ void tesselator_draw(struct tesselator* t, int with_color) {
                 }
 
                 if(t->has_normal) {
-                        glVertexAttribPointer(3, 3, GL_BYTE, GL_FALSE, 0, t->normals);
+                        glVertexAttribPointer(3, 3, GL_BYTE, GL_TRUE, 0, t->normals);
                         glEnableVertexAttribArray(3);
                 }
 
@@ -149,6 +207,7 @@ void tesselator_draw(struct tesselator* t, int with_color) {
                 return;
         }
 #endif
+#ifndef OPENGL_CORE
         glEnableClientState(GL_VERTEX_ARRAY);
 
         if(t->has_normal) {
@@ -186,6 +245,7 @@ void tesselator_draw(struct tesselator* t, int with_color) {
         glDisableClientState(GL_VERTEX_ARRAY);
         if(t->has_normal)
                 glDisableClientState(GL_NORMAL_ARRAY);
+#endif
 }
 
 void tesselator_glx(struct tesselator* t, struct glx_displaylist* x) {
@@ -224,6 +284,7 @@ void tesselator_set_normal(struct tesselator* t, int8_t x, int8_t y, int8_t z) {
         t->normal[0] = x;
         t->normal[1] = y;
         t->normal[2] = z;
+        t->normal_explicit = 1;
 }
 
 static void tesselator_check_space(struct tesselator* t) {
@@ -278,6 +339,43 @@ static void tesselator_emit_color(struct tesselator* t, uint32_t* colors) {
 #endif
 }
 
+static void tesselator_flat_normal(float ax, float ay, float az, float bx, float by, float bz,
+                                   float cx, float cy, float cz, int8_t normals[12]) {
+        float ux = bx - ax;
+        float uy = by - ay;
+        float uz = bz - az;
+        float vx = cx - ax;
+        float vy = cy - ay;
+        float vz = cz - az;
+        float nx = uy * vz - uz * vy;
+        float ny = uz * vx - ux * vz;
+        float nz = ux * vy - uy * vx;
+        float length = sqrtf(nx * nx + ny * ny + nz * nz);
+        int8_t ix = 0, iy = 0, iz = 0;
+        if(length > 0.000001F) {
+                ix = (int8_t)(nx / length * 127.0F);
+                iy = (int8_t)(ny / length * 127.0F);
+                iz = (int8_t)(nz / length * 127.0F);
+        }
+        for(int i = 0; i < 4; i++) {
+                normals[i * 3 + 0] = ix;
+                normals[i * 3 + 1] = iy;
+                normals[i * 3 + 2] = iz;
+        }
+}
+
+static int8_t* tesselator_flat_normal_i(const int16_t* coords, int8_t normals[12]) {
+        tesselator_flat_normal(coords[0], coords[1], coords[2], coords[3], coords[4], coords[5],
+                               coords[6], coords[7], coords[8], normals);
+        return normals;
+}
+
+static int8_t* tesselator_flat_normal_f(const float* coords, int8_t normals[12]) {
+        tesselator_flat_normal(coords[0], coords[1], coords[2], coords[3], coords[4], coords[5],
+                               coords[6], coords[7], coords[8], normals);
+        return normals;
+}
+
 static void tesselator_emit_normals(struct tesselator* t, int8_t* normals) {
         if(t->has_normal) {
 #ifdef TESSELATE_QUADS
@@ -294,6 +392,10 @@ static void tesselator_emit_normals(struct tesselator* t, int8_t* normals) {
 
 void tesselator_addi(struct tesselator* t, int16_t* coords, uint32_t* colors, int8_t* normals) {
         assert(t->vertex_type == VERTEX_INT);
+
+        int8_t generated_normals[12];
+        if(t->has_normal && !normals)
+                normals = tesselator_flat_normal_i(coords, generated_normals);
 
         tesselator_check_space(t);
         tesselator_emit_color(t, colors);
@@ -315,6 +417,10 @@ void tesselator_addi(struct tesselator* t, int16_t* coords, uint32_t* colors, in
 void tesselator_addf(struct tesselator* t, float* coords, uint32_t* colors, int8_t* normals) {
         assert(t->vertex_type == VERTEX_FLOAT);
 
+        int8_t generated_normals[12];
+        if(t->has_normal && !normals)
+                normals = tesselator_flat_normal_f(coords, generated_normals);
+
         tesselator_check_space(t);
         tesselator_emit_color(t, colors);
         tesselator_emit_normals(t, normals);
@@ -334,20 +440,28 @@ void tesselator_addf(struct tesselator* t, float* coords, uint32_t* colors, int8
 
 void tesselator_addi_simple(struct tesselator* t, int16_t* coords) {
         tesselator_addi(t, coords, (uint32_t[]) {t->color, t->color, t->color, t->color},
-                                        t->has_normal ? (int8_t[]) {t->normal[0], t->normal[1], t->normal[2], t->normal[0], t->normal[1],
-                                                                                                t->normal[2], t->normal[0], t->normal[1], t->normal[2], t->normal[0],
-                                                                                                t->normal[1], t->normal[2]} :
-                                                                        NULL);
+                                        t->has_normal && t->normal_explicit
+                                                ? (int8_t[]) {t->normal[0], t->normal[1], t->normal[2], t->normal[0], t->normal[1],
+                                                              t->normal[2], t->normal[0], t->normal[1], t->normal[2], t->normal[0],
+                                                              t->normal[1], t->normal[2]}
+                                                : NULL);
 }
 
 void tesselator_addi_uv(struct tesselator* t, int16_t* coords, float* uvs) {
         assert(t->vertex_type == VERTEX_INT);
 
+        int8_t generated_normals[12];
+        int8_t explicit_normals[12] = {
+                t->normal[0], t->normal[1], t->normal[2], t->normal[0], t->normal[1], t->normal[2],
+                t->normal[0], t->normal[1], t->normal[2], t->normal[0], t->normal[1], t->normal[2]
+        };
+        int8_t* normals = NULL;
+        if(t->has_normal)
+                normals = t->normal_explicit ? explicit_normals : tesselator_flat_normal_i(coords, generated_normals);
+
         tesselator_check_space(t);
         tesselator_emit_color(t, (uint32_t[]) {t->color, t->color, t->color, t->color});
-        tesselator_emit_normals(t, t->has_normal ? (int8_t[]) {t->normal[0], t->normal[1], t->normal[2], t->normal[0], t->normal[1],
-                                                                                                t->normal[2], t->normal[0], t->normal[1], t->normal[2], t->normal[0],
-                                                                                                t->normal[1], t->normal[2]} : NULL);
+        tesselator_emit_normals(t, normals);
 
 #ifdef TESSELATE_QUADS
         memcpy(((int16_t*)t->vertices) + t->quad_count * 3 * 4, coords, sizeof(int16_t) * 3 * 4);
@@ -368,20 +482,28 @@ void tesselator_addi_uv(struct tesselator* t, int16_t* coords, float* uvs) {
 
 void tesselator_addf_simple(struct tesselator* t, float* coords) {
         tesselator_addf(t, coords, (uint32_t[]) {t->color, t->color, t->color, t->color},
-                                        t->has_normal ? (int8_t[]) {t->normal[0], t->normal[1], t->normal[2], t->normal[0], t->normal[1],
-                                                                                                t->normal[2], t->normal[0], t->normal[1], t->normal[2], t->normal[0],
-                                                                                                t->normal[1], t->normal[2]} :
-                                                                        NULL);
+                                        t->has_normal && t->normal_explicit
+                                                ? (int8_t[]) {t->normal[0], t->normal[1], t->normal[2], t->normal[0], t->normal[1],
+                                                              t->normal[2], t->normal[0], t->normal[1], t->normal[2], t->normal[0],
+                                                              t->normal[1], t->normal[2]}
+                                                : NULL);
 }
 
 void tesselator_addf_uv(struct tesselator* t, float* coords, float* uvs) {
         assert(t->vertex_type == VERTEX_FLOAT);
 
+        int8_t generated_normals[12];
+        int8_t explicit_normals[12] = {
+                t->normal[0], t->normal[1], t->normal[2], t->normal[0], t->normal[1], t->normal[2],
+                t->normal[0], t->normal[1], t->normal[2], t->normal[0], t->normal[1], t->normal[2]
+        };
+        int8_t* normals = NULL;
+        if(t->has_normal)
+                normals = t->normal_explicit ? explicit_normals : tesselator_flat_normal_f(coords, generated_normals);
+
         tesselator_check_space(t);
         tesselator_emit_color(t, (uint32_t[]) {t->color, t->color, t->color, t->color});
-        tesselator_emit_normals(t, t->has_normal ? (int8_t[]) {t->normal[0], t->normal[1], t->normal[2], t->normal[0], t->normal[1],
-                                                                                                t->normal[2], t->normal[0], t->normal[1], t->normal[2], t->normal[0],
-                                                                                                t->normal[1], t->normal[2]} : NULL);
+        tesselator_emit_normals(t, normals);
 
 #ifdef TESSELATE_QUADS
         memcpy(((float*)t->vertices) + t->quad_count * 3 * 4, coords, sizeof(float) * 3 * 4);

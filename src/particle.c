@@ -31,6 +31,7 @@
 #include "model.h"
 #include "weapon.h"
 #include "config.h"
+#include "glx.h"
 #include "tesselator.h"
 #include "entitysystem.h"
 #include "player.h"
@@ -39,6 +40,14 @@
 struct entity_system particles;
 struct tesselator particle_tesselator;
 struct tesselator rain_tesselator[3];
+static struct tesselator anim_tesselator; // animated block-debris sprites ("Particle animations")
+
+/* Sprite sheet animation settings.  The sheet is a grid of equally sized
+   frames read left-to-right, top-to-bottom.  A square sheet is treated as an
+   8x8 grid (64 frames, the supplied tumbling-cube sheet); a wide or tall sheet
+   is treated as a single row/column strip of square frames. */
+#define PARTICLE_ANIM_GRID 8
+#define PARTICLE_ANIM_FPS 24.0F
 
 static float rain_timer = 0.0F;
 static float snow_timer = 0.0F;
@@ -52,6 +61,22 @@ void particle_init() {
         tesselator_create(&particle_tesselator, VERTEX_FLOAT, 0, 0);
         for(int i = 0; i < 3; i++)
                 tesselator_create(&rain_tesselator[i], VERTEX_FLOAT, 0, 1);
+        tesselator_create(&anim_tesselator, VERTEX_FLOAT, 0, 1);
+}
+
+static void particle_anim_layout(int* cols, int* rows) {
+        int w = texture_particle_anim.width;
+        int h = texture_particle_anim.height;
+        if(w <= 0 || h <= 0 || w == h) {
+                *cols = PARTICLE_ANIM_GRID;
+                *rows = PARTICLE_ANIM_GRID;
+        } else if(w > h) {
+                *cols = max(1, (w + h / 2) / h);
+                *rows = 1;
+        } else {
+                *cols = 1;
+                *rows = max(1, (h + w / 2) / w);
+        }
 }
 
 struct particle_update_ctx {
@@ -186,6 +211,8 @@ void particle_update(float dt) {
 
 struct particle_render_ctx {
         struct tesselator* tess;
+        struct tesselator* anim_tess; // NULL when animations are off / texture missing
+        int anim_cols, anim_rows;
         struct tesselator* rain_tess[3];
         float now;   // window_time() hoisted: one call per frame
         float rd_sq; // render distance squared, precomputed
@@ -253,7 +280,58 @@ static bool particle_render_single(void* obj, void* user) {
 
         tesselator_set_color(tess, p->color);
 
-        if(p->type == 255) {
+        if(p->type == 255 && p->block && ctx->anim_tess) {
+                // Animated block debris: camera-facing sprite playing the sprite
+                // sheet, tinted with the block colour.  Sprite is drawn larger than
+                // the cube it replaces because the frames have transparent padding.
+                float half = size * 1.6F;
+
+                float fx = camera_x - p->x, fy = camera_y - p->y, fz = camera_z - p->z;
+                float flen = sqrtf(fx * fx + fy * fy + fz * fz);
+                if(flen < 0.0001F)
+                        return false;
+                fx /= flen;
+                fy /= flen;
+                fz /= flen;
+
+                // right = forward x worldUp(0,1,0) ; fallback when looking straight up/down
+                float rx = -fz, ry = 0.0F, rz = fx;
+                float rlen = sqrtf(rx * rx + rz * rz);
+                if(rlen < 0.0001F) {
+                        rx = 1.0F;
+                        rz = 0.0F;
+                } else {
+                        rx /= rlen;
+                        rz /= rlen;
+                }
+                // up = right x forward
+                float ux = ry * fz - rz * fy;
+                float uy = rz * fx - rx * fz;
+                float uz = rx * fy - ry * fx;
+
+                rx *= half; ry *= half; rz *= half;
+                ux *= half; uy *= half; uz *= half;
+
+                int frames = ctx->anim_cols * ctx->anim_rows;
+                int frame = (int)((ctx->now - p->fade) * PARTICLE_ANIM_FPS + p->anim_phase);
+                frame = ((frame % frames) + frames) % frames;
+                float fw = 1.0F / ctx->anim_cols, fh = 1.0F / ctx->anim_rows;
+                float u0 = (frame % ctx->anim_cols) * fw;
+                float v0 = (frame / ctx->anim_cols) * fh; // v=0 is the top row of the PNG
+                float u1 = u0 + fw, v1 = v0 + fh;
+
+                float coords[12] = {
+                        p->x - rx - ux, p->y - ry - uy, p->z - rz - uz, // bottom-left
+                        p->x + rx - ux, p->y + ry - uy, p->z + rz - uz, // bottom-right
+                        p->x + rx + ux, p->y + ry + uy, p->z + rz + uz, // top-right
+                        p->x - rx + ux, p->y - ry + uy, p->z - rz + uz, // top-left
+                };
+                float uvs[8] = {u0, v1, u1, v1, u1, v0, u0, v0};
+
+                tesselator_set_color(ctx->anim_tess, (p->color & 0xFFFFFF) | 0xFF000000);
+                tesselator_addf_uv(ctx->anim_tess, coords, uvs);
+                particle_stats_vertices += 4;
+        } else if(p->type == 255) {
                 // Block break / spade hit / gun hit particles - always full 3D (6 faces = 24 vertices)
                 particle_stats_vertices += 24;
                 tesselator_addf_cube_face(tess, CUBE_FACE_X_N, p->x - size, p->y - size, p->z - size, size * 2.0F);
@@ -296,24 +374,68 @@ static bool particle_render_single(void* obj, void* user) {
         return false;
 }
 
+/* Texture enable/environment are fixed-function state. Programmable Core and
+   GLES2 paths select texturing from the tesselator's UV stream instead. */
+static void particle_fixed_texture_state(bool enabled) {
+#if !defined(OPENGL_CORE)
+#ifdef OPENGL_ES
+        if(gles_version >= 2)
+                return;
+#endif
+        if(enabled) {
+                glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+                glEnable(GL_TEXTURE_2D);
+        } else {
+                glDisable(GL_TEXTURE_2D);
+        }
+#else
+        (void)enabled;
+#endif
+}
+
 void particle_render() {
         tesselator_clear(&particle_tesselator);
+        tesselator_clear(&anim_tesselator);
         for(int i = 0; i < 3; i++)
                 tesselator_clear(&rain_tesselator[i]);
         particle_stats_vertices = 0;
 
         struct particle_render_ctx ctx = {
                 .tess = &particle_tesselator,
+                .anim_tess = (settings.particle_animations && texture_particle_anim.texture_id) ? &anim_tesselator : NULL,
                 .rain_tess = {&rain_tesselator[0], &rain_tesselator[1], &rain_tesselator[2]},
                 .now = window_time(),
                 .rd_sq = (float)settings.render_distance * (float)settings.render_distance,
         };
+        if(ctx.anim_tess)
+                particle_anim_layout(&ctx.anim_cols, &ctx.anim_rows);
         entitysys_iterate(&particles, &ctx, particle_render_single);
 
         matrix_upload();
 
         // Draw regular (untextured) particles
         tesselator_draw(&particle_tesselator, 1);
+
+        /* Animated block debris sprites. Alpha cutoff is implemented by the
+           default shader on Core/GLES2 and by fixed-function alpha test on
+           compatibility paths. Transparent frame padding therefore never
+           writes depth, while the visible sprite can keep normal depth writes
+           and needs no CPU sorting. */
+        if(anim_tesselator.quad_count > 0) {
+                glActiveTexture(GL_TEXTURE0);
+                particle_fixed_texture_state(true);
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                glx_set_alpha_test(true, 0.5F);
+                glDisable(GL_CULL_FACE);
+                glBindTexture(GL_TEXTURE_2D, texture_particle_anim.texture_id);
+                tesselator_draw(&anim_tesselator, 1);
+                glBindTexture(GL_TEXTURE_2D, 0);
+                glEnable(GL_CULL_FACE);
+                glx_set_alpha_test(false, 0.0F);
+                glDisable(GL_BLEND);
+                particle_fixed_texture_state(false);
+        }
 
         // Draw textured rain particles only when rain is actually present.  The
         // old path toggled texture/blend/cull state and rebound textures every
@@ -324,8 +446,7 @@ void particle_render() {
                 // Mineclonia uses 3 raindrop textures. Enable GL_TEXTURE_2D +
                 // GL_MODULATE so the raindrop PNG alpha is sampled correctly.
                 glActiveTexture(GL_TEXTURE0);
-                glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
-                glEnable(GL_TEXTURE_2D);
+                particle_fixed_texture_state(true);
                 glEnable(GL_BLEND);
                 glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
                 glDisable(GL_CULL_FACE); // rain billboards must be visible from any angle
@@ -340,7 +461,7 @@ void particle_render() {
 
                 glBindTexture(GL_TEXTURE_2D, 0);
                 glDisable(GL_BLEND);
-                glDisable(GL_TEXTURE_2D);
+                particle_fixed_texture_state(false);
                 glEnable(GL_CULL_FACE);
         }
 }
@@ -389,6 +510,43 @@ void particle_create(unsigned int color, float x, float y, float z, float veloci
                                                   .fade = window_time(),
                                                   .color = color,
                                                   .type = 255,
+                                          });
+                particle_stats_total_created++;
+        }
+}
+
+void particle_create_block(unsigned int color, float x, float y, float z, float velocity, float velocity_y, int amount,
+                                                   float min_size, float max_size) {
+        for(int k = 0; k < amount; k++) {
+                float vx = (((float)rand() / (float)RAND_MAX) * 2.0F - 1.0F);
+                float vy = (((float)rand() / (float)RAND_MAX) * 2.0F - 1.0F);
+                float vz = (((float)rand() / (float)RAND_MAX) * 2.0F - 1.0F);
+                float len = len3D(vx, vy, vz);
+                if(len < 0.0001F) {
+                        vx = 0.0F;
+                        vy = 1.0F;
+                        vz = 0.0F;
+                        len = 1.0F;
+                }
+
+                vx = (vx / len) * velocity;
+                vy = (vy / len) * velocity * velocity_y;
+                vz = (vz / len) * velocity;
+
+                entitysys_add(&particles,
+                                          &(struct Particle) {
+                                                  .size = ((float)rand() / (float)RAND_MAX) * (max_size - min_size) + min_size,
+                                                  .x = x,
+                                                  .y = y,
+                                                  .z = z,
+                                                  .vx = vx,
+                                                  .vy = vy,
+                                                  .vz = vz,
+                                                  .fade = window_time(),
+                                                  .color = color,
+                                                  .type = 255,
+                                                  .block = 1,
+                                                  .anim_phase = (float)(rand() % 64),
                                           });
                 particle_stats_total_created++;
         }

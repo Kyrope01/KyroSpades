@@ -53,7 +53,12 @@
 #include "log.h"
 #include "ping.h"
 #include "matrix.h"
+#include "glx.h"
+#include "lighting.h"
+#include "glowing_blocks.h"
+#include "shadow.h"
 #include "water.h"
+#include "postprocess.h"
 #include "texture.h"
 #include "chunk.h"
 #include "skins.h"
@@ -63,6 +68,9 @@
 #include "damagenumbers.h"
 #include "damagefx.h"
 #include "main.h"
+
+#define GLOW_RAY_FULL_DISTANCE 1.0F
+#define GLOW_RAY_TEN_PERCENT_DISTANCE 20.0F
 
 int fps = 0;
 
@@ -81,11 +89,15 @@ int ms_rand() {
 static struct {
         unsigned int texture;
         unsigned int shader;
+        int shader_attempted;
         unsigned int fbo;
         unsigned int depth_rb;
         unsigned int depth_tex;
         int w;
         int h;
+        int hdr;
+        int hdr_requested;
+        int target_failed;
         int uni_pp_sat;
         int uni_pp_scale;
         int uni_pp_bias;
@@ -94,6 +106,11 @@ static struct {
            filmic tone-mapping flag */
         int uni_pp_ca_strength;
         int uni_pp_filmic;
+        int uni_pp_bloom;
+        int uni_pp_bloom_threshold;
+        int uni_pp_bloom_separate;
+        int uni_pp_texel;
+        int uni_pp_bloom_texture;
         int uni_pp_dmg; /* damage feedback: red edge vignette (0..1) */
         /* Volumetric lighting (god-rays) — faithful port of Luanti's shader */
         unsigned int vol_tex;       /* color texture that receives volumetric output */
@@ -114,6 +131,8 @@ static struct {
         int uni_vol2_range;
         int uni_vol2_daylight;
         int uni_vol2_lightdir;
+        int uni_vol2_point_screen;
+        int uni_vol2_point_color;
         /* Lens flare */
         unsigned int flare_shader;
         int uni_flare_sun_pos;
@@ -121,6 +140,68 @@ static struct {
         int uni_flare_strength;
         int uni_flare_include_scene;
 } postproc = {0};
+
+/* Volumetric glow is strongest beside its block, falls to ten percent at
+   twenty blocks, and is fully gone at fifty. The two smooth segments avoid
+   visible brightness steps as the camera moves across either boundary. */
+static float glowing_ray_distance_attenuation(float distance) {
+        if(distance <= GLOW_RAY_FULL_DISTANCE)
+                return 1.0F;
+        if(distance < GLOW_RAY_TEN_PERCENT_DISTANCE) {
+                float t = (distance - GLOW_RAY_FULL_DISTANCE)
+                        / (GLOW_RAY_TEN_PERCENT_DISTANCE - GLOW_RAY_FULL_DISTANCE);
+                float smooth = t * t * (3.0F - 2.0F * t);
+                return 1.0F - 0.9F * smooth;
+        }
+        if(distance < GLOWING_BLOCK_RAY_RANGE) {
+                float t = (distance - GLOW_RAY_TEN_PERCENT_DISTANCE)
+                        / (GLOWING_BLOCK_RAY_RANGE - GLOW_RAY_TEN_PERCENT_DISTANCE);
+                float smooth = t * t * (3.0F - 2.0F * t);
+                return 0.1F * (1.0F - smooth);
+        }
+        return 0.0F;
+}
+
+static void postproc_release_targets(void) {
+        if(postproc.fbo)
+                glDeleteFramebuffers(1, &postproc.fbo);
+        if(postproc.depth_rb)
+                glDeleteRenderbuffers(1, &postproc.depth_rb);
+        if(postproc.texture)
+                glDeleteTextures(1, &postproc.texture);
+        if(postproc.depth_tex)
+                glDeleteTextures(1, &postproc.depth_tex);
+        if(postproc.vol_fbo)
+                glDeleteFramebuffers(1, &postproc.vol_fbo);
+        if(postproc.vol_tex)
+                glDeleteTextures(1, &postproc.vol_tex);
+        postproc.fbo = 0;
+        postproc.depth_rb = 0;
+        postproc.texture = 0;
+        postproc.depth_tex = 0;
+        postproc.vol_fbo = 0;
+        postproc.vol_tex = 0;
+        postproc.w = 0;
+        postproc.h = 0;
+        postproc.hdr = 0;
+        postproc.hdr_requested = 0;
+        postproc.target_failed = 0;
+        postproc.vol_applied = 0;
+}
+
+static void postproc_release_all(void) {
+        postproc_release_targets();
+        if(postproc.shader)
+                glx_delete_program(postproc.shader);
+        if(postproc.vol_shader)
+                glx_delete_program(postproc.vol_shader);
+        if(postproc.vol2_shader)
+                glx_delete_program(postproc.vol2_shader);
+        if(postproc.flare_shader)
+                glx_delete_program(postproc.flare_shader);
+        postprocess_deinit();
+        memset(&postproc, 0, sizeof(postproc));
+}
 
 static struct {
         bool active;
@@ -271,65 +352,7 @@ static float intel_drop_render_y(float dx, float dy, float dz) {
         return 62.0F - (float)ground + model_intel.ypiv * model_intel.scale;
 }
 
-void drawScene() {
-        if(settings.ambient_occlusion) {
-                glShadeModel(GL_SMOOTH);
-        } else {
-                glShadeModel(GL_FLAT);
-        }
-
-        /* Effective fog color for this frame (darkened 10% when filmic is on).
-           Used by every fog path below so the visible fog matches what the
-           user picked in the color picker after ACES tone mapping. */
-        float fc[4];
-        fog_color_render(fc);
-        fc[3] = fog_color[3];
-
-        if(settings.textured_blocks) {
-#ifndef OPENGL_ES
-                if(glx_fog) {
-                        glFogi(GL_FOG_MODE, GL_LINEAR);
-                        glFogf(GL_FOG_START, 0.0F);
-                        glFogf(GL_FOG_END, settings.render_distance);
-                        glFogfv(GL_FOG_COLOR, fc);
-                        glEnable(GL_FOG);
-                }
-#endif
-        }
-
-        matrix_upload();
-        chunk_draw_visible();
-
-        if(settings.textured_blocks) {
-#ifndef OPENGL_ES
-                if(glx_fog)
-                        glDisable(GL_FOG);
-#endif
-        }
-
-        water_render();
-
-        if(settings.smooth_fog) {
-#ifdef OPENGL_ES
-                glFogx(GL_FOG_MODE, GL_EXP2);
-#else
-                glFogi(GL_FOG_MODE, GL_EXP2);
-#endif
-                glFogf(GL_FOG_DENSITY, 0.015F);
-                glFogfv(GL_FOG_COLOR, fc);
-                glEnable(GL_FOG);
-        }
-
-        glShadeModel(GL_FLAT);
-        kv6_calclight(-1, -1, -1);
-        matrix_upload();
-        particle_render();
-        tracer_render();
-        grenade_render();
-        map_damaged_voxels_render();
-        bloodmarks_render();
-        matrix_upload();
-
+static void render_objective_models(void) {
         /* Rest the dropped intel on the floor: scan downward from the drop
            cell for the first solid block and sit the model's bottom on its
            top surface.  The old code rendered it a full block up in the air
@@ -398,6 +421,75 @@ void drawScene() {
         }
 }
 
+void drawScene() {
+#ifndef OPENGL_CORE
+        if(settings.ambient_occlusion) {
+                glShadeModel(GL_SMOOTH);
+        } else {
+                glShadeModel(GL_FLAT);
+        }
+
+        /* Effective fog color for the fixed-function fallback paths. */
+        float fc[4];
+        fog_color_render(fc);
+        fc[3] = fog_color[3];
+#endif
+
+        if(settings.textured_blocks) {
+#if !defined(OPENGL_ES) && !defined(OPENGL_CORE)
+                if(glx_fog) {
+                        glFogi(GL_FOG_MODE, GL_LINEAR);
+                        glFogf(GL_FOG_START, 0.0F);
+                        glFogf(GL_FOG_END, settings.render_distance);
+                        glFogfv(GL_FOG_COLOR, fc);
+                        glEnable(GL_FOG);
+                }
+#endif
+        }
+
+        matrix_upload();
+        /* Keep the terrain shader bound for the complete chunk pass so its
+           sunlight/material response stays stable between transient flashes. */
+        bool terrain_lighting_bound = lighting_world_begin(settings.textured_blocks != 0);
+        chunk_draw_visible();
+        if(terrain_lighting_bound)
+                lighting_world_end();
+
+        if(settings.textured_blocks) {
+#if !defined(OPENGL_ES) && !defined(OPENGL_CORE)
+                if(glx_fog)
+                        glDisable(GL_FOG);
+#endif
+        }
+
+        water_render();
+
+#ifndef OPENGL_CORE
+        if(settings.smooth_fog) {
+#ifdef OPENGL_ES
+                glFogx(GL_FOG_MODE, GL_EXP2);
+#else
+                glFogi(GL_FOG_MODE, GL_EXP2);
+#endif
+                glFogf(GL_FOG_DENSITY, 0.015F);
+                glFogfv(GL_FOG_COLOR, fc);
+                glEnable(GL_FOG);
+        }
+
+        glShadeModel(GL_FLAT);
+#endif
+        kv6_calclight(-1, -1, -1);
+        matrix_upload();
+        particle_render();
+        tracer_render();
+        grenade_render();
+        map_damaged_voxels_render();
+        bloodmarks_render();
+        matrix_upload();
+
+        render_objective_models();
+}
+
 /* SDL's on-screen framebuffer.
    ────────────────────────────────────────────────────────────────────────
    On desktop/Android (EGL) it is object 0; on iOS (UIKit/EAGL) it is a
@@ -421,14 +513,33 @@ void display() {
            always land exactly on 0 (touch precision), and a visually-nil
            post-process pass would otherwise keep running. */
         /* damagefx_vignette() keeps the pass alive for the ~1 s the damage
-           vignette fades out, even when every other post-process is off */
+           vignette fades out, even when every other post-process is off. HDR
+           alone must not force a no-op pass on non-Core or 2.1 fallback paths. */
+        int hdr_postproc = settings.hdr_rendering && postprocess_hdr_supported();
+        int bloom_postproc = settings.bloom && settings.bloom_strength > 0.001F;
+        int glowing_postproc = network_connected && !network_map_transfer
+                && glowing_blocks_has_nearby(camera_x, camera_y, camera_z,
+                                             GLOWING_BLOCK_RAY_RANGE);
         int needs_postproc = ((glx_version || gles_version >= 2)
                               && (settings.exposure < -0.5F || settings.exposure > 0.5F
                                   || settings.saturation < -0.5F || settings.saturation > 0.5F
                                   || settings.contrast < -0.5F || settings.contrast > 0.5F
-                                  || settings.vignette > 0.5F || settings.volumetric_light || settings.lens_flare
-                                  || settings.chromatic_aberration || settings.filmic_tonemapping
+                                  || settings.vignette > 0.5F || settings.volumetric_light || glowing_postproc
+                                  || settings.lens_flare || settings.chromatic_aberration || settings.filmic_tonemapping
+                                  || hdr_postproc || bloom_postproc
                                   || damagefx_vignette() > 0.003F));
+        int desired_hdr = postprocess_hdr_supported()
+                && (settings.hdr_rendering || bloom_postproc);
+        if(needs_postproc && postproc.target_failed) {
+                if(postproc.w == settings.window_width && postproc.h == settings.window_height
+                   && postproc.hdr_requested == desired_hdr) {
+                        /* Do not hammer a driver with the same failed allocation
+                           every frame. Resize or a mode change permits one retry. */
+                        needs_postproc = 0;
+                } else {
+                        postproc_release_targets();
+                }
+        }
 
         /* Avoid a driver-synchronising glGetIntegerv every frame on the normal
            fast path.  We only need the live framebuffer id when a post-process
@@ -472,25 +583,28 @@ void display() {
 #endif
 
                 if(needs_postproc) {
-                        if(postproc.texture && (postproc.w != settings.window_width || postproc.h != settings.window_height)) {
-                                glDeleteFramebuffers(1, &postproc.fbo);
-                                glDeleteRenderbuffers(1, &postproc.depth_rb);
-                                glDeleteTextures(1, &postproc.texture);
-                                glDeleteTextures(1, &postproc.depth_tex);
-                                glDeleteFramebuffers(1, &postproc.vol_fbo);
-                                glDeleteTextures(1, &postproc.vol_tex);
-                                postproc.fbo = 0;
-                                postproc.depth_rb = 0;
-                                postproc.texture = 0;
-                                postproc.depth_tex = 0;
-                                postproc.vol_fbo = 0;
-                                postproc.vol_tex = 0;
-                        }
+                        /* Bloom also needs the floating-point scene target so
+                           highlights above display white survive extraction. */
+                        if(postproc.texture && (postproc.w != settings.window_width || postproc.h != settings.window_height
+                                                || postproc.hdr_requested != desired_hdr))
+                                postproc_release_targets();
 
+                        GLint scene_internal_format = GL_RGBA;
+                        GLenum scene_pixel_type = GL_UNSIGNED_BYTE;
+#ifdef OPENGL_CORE
+                        if(desired_hdr) {
+                                scene_internal_format = GL_RGBA16F;
+                                scene_pixel_type = GL_FLOAT;
+                        }
+#endif
                         if(!postproc.texture) {
                                 glGenTextures(1, &postproc.texture);
                                 glBindTexture(GL_TEXTURE_2D, postproc.texture);
-                                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, settings.window_width, settings.window_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+                                glTexImage2D(GL_TEXTURE_2D, 0, scene_internal_format,
+                                             settings.window_width, settings.window_height, 0,
+                                             GL_RGBA, scene_pixel_type, NULL);
+                                postproc.hdr = desired_hdr;
+                                postproc.hdr_requested = desired_hdr;
                                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
                                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
                                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -533,7 +647,35 @@ void display() {
                                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
                                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
                                 glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, postproc.depth_tex, 0);
-                                if(glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+                                GLenum scene_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+#ifdef OPENGL_CORE
+                                if(scene_status != GL_FRAMEBUFFER_COMPLETE && desired_hdr) {
+                                        /* Some nominally Core drivers expose float textures but
+                                           cannot render to them. Retry the exact same pipeline with
+                                           RGBA8 rather than dropping the entire post-process pass. */
+                                        log_warn("HDR scene target is incomplete (0x%x); retrying with the compatibility target",
+                                                 scene_status);
+                                        glDeleteTextures(1, &postproc.texture);
+                                        glGenTextures(1, &postproc.texture);
+                                        glBindTexture(GL_TEXTURE_2D, postproc.texture);
+                                        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
+                                                     settings.window_width, settings.window_height, 0,
+                                                     GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+                                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                                        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                                               GL_TEXTURE_2D, postproc.texture, 0);
+                                        postproc.hdr = 0;
+                                        scene_internal_format = GL_RGBA;
+                                        scene_pixel_type = GL_UNSIGNED_BYTE;
+                                        scene_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+                                }
+#endif
+                                if(scene_status != GL_FRAMEBUFFER_COMPLETE) {
+                                        log_error("Post-process framebuffer is incomplete (0x%x); rendering without post-processing",
+                                                  scene_status);
                                         glDeleteFramebuffers(1, &postproc.fbo);
                                         glDeleteRenderbuffers(1, &postproc.depth_rb);
                                         glDeleteTextures(1, &postproc.texture);
@@ -542,19 +684,31 @@ void display() {
                                         postproc.depth_rb = 0;
                                         postproc.texture = 0;
                                         postproc.depth_tex = 0;
+                                        postproc.target_failed = 1;
                                 }
                                 glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)live_screen_fbo);
                                 glBindRenderbuffer(GL_RENDERBUFFER, 0);
 #endif
                         }
 
-                        /* Volumetric light output texture + FBO (color only, no depth).
-                           This is where the god-rays shader writes its result. */
-                        if(settings.volumetric_light && !postproc.vol_tex) {
+#ifdef OPENGL_CORE
+                        /* Follow the format that actually succeeded, which may
+                           be RGBA8 after the guarded HDR allocation fallback. */
+                        if(!postproc.hdr) {
+                                scene_internal_format = GL_RGBA;
+                                scene_pixel_type = GL_UNSIGNED_BYTE;
+                        }
+#endif
+
+                        /* Auxiliary color target shared by god-rays and lens flare.
+                           Either effect may run independently of the other. */
+                        if(postproc.texture && (settings.volumetric_light || glowing_postproc || settings.lens_flare)
+                           && !postproc.vol_tex) {
                                 glGenTextures(1, &postproc.vol_tex);
                                 glBindTexture(GL_TEXTURE_2D, postproc.vol_tex);
-                                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, settings.window_width, settings.window_height, 0,
-                                                GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+                                glTexImage2D(GL_TEXTURE_2D, 0, scene_internal_format,
+                                                settings.window_width, settings.window_height, 0,
+                                                GL_RGBA, scene_pixel_type, NULL);
                                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
                                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
                                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -575,9 +729,10 @@ void display() {
                         postproc.w = settings.window_width;
                         postproc.h = settings.window_height;
 
-                        if(!postproc.shader) {
-#if defined(OPENGL_ES)
-                                if(gles_version >= 2) {
+                        if(!postproc.shader && !postproc.shader_attempted) {
+                                postproc.shader_attempted = 1;
+#if defined(GLX_PROGRAMMABLE)
+                                if(glx_version) {
                                         const char* vert =
                                                 "attribute vec2 a_Position;\n"
                                                 "attribute vec2 a_TexCoord;\n"
@@ -598,8 +753,13 @@ void display() {
                                                 "uniform float pp_vig;\n"
                                                 "uniform float pp_ca_strength;\n"
                                                 "uniform float pp_filmic;\n"
+                                                "uniform float pp_bloom;\n"
+                                                "uniform float pp_bloom_threshold;\n"
+                                                "uniform float pp_bloom_separate;\n"
+                                                "uniform vec2 pp_texel;\n"
                                                 "uniform float pp_dmg;\n"
                                                 "uniform sampler2D tex;\n"
+                                                "uniform sampler2D pp_bloom_texture;\n"
                                                 "vec3 acesFilm(vec3 x){\n"
                                                 "    const float a=2.51; const float b=0.03;\n"
                                                 "    const float c=2.43; const float d=0.59; const float e=0.14;\n"
@@ -617,6 +777,25 @@ void display() {
                                                 "        c.b = texture2D(tex, uv - off).b;\n"
                                                 "    } else {\n"
                                                 "        c = texture2D(tex, uv).rgb;\n"
+                                                "    }\n"
+                                                "    if(pp_bloom > 0.001){\n"
+                                                "        if(pp_bloom_separate > 0.5){\n"
+                                                "            c += texture2D(pp_bloom_texture, uv).rgb * pp_bloom;\n"
+                                                "        } else {\n"
+                                                "            vec3 glow = vec3(0.0);\n"
+                                                "            glow += texture2D(tex, uv + pp_texel * vec2( 2.0, 0.0)).rgb;\n"
+                                                "            glow += texture2D(tex, uv + pp_texel * vec2(-2.0, 0.0)).rgb;\n"
+                                                "            glow += texture2D(tex, uv + pp_texel * vec2(0.0,  2.0)).rgb;\n"
+                                                "            glow += texture2D(tex, uv + pp_texel * vec2(0.0, -2.0)).rgb;\n"
+                                                "            glow += texture2D(tex, uv + pp_texel * vec2( 1.5,  1.5)).rgb;\n"
+                                                "            glow += texture2D(tex, uv + pp_texel * vec2(-1.5,  1.5)).rgb;\n"
+                                                "            glow += texture2D(tex, uv + pp_texel * vec2( 1.5, -1.5)).rgb;\n"
+                                                "            glow += texture2D(tex, uv + pp_texel * vec2(-1.5, -1.5)).rgb;\n"
+                                                "            glow *= 0.125;\n"
+                                                "            float peak = max(glow.r, max(glow.g, glow.b));\n"
+                                                "            float gate = max(peak - pp_bloom_threshold, 0.0) / max(peak, 0.0001);\n"
+                                                "            c += glow * gate * pp_bloom;\n"
+                                                "        }\n"
                                                 "    }\n"
                                                 "    float g = dot(c, vec3(0.299, 0.587, 0.114));\n"
                                                 "    c = mix(vec3(g), c, pp_sat);\n"
@@ -642,8 +821,13 @@ void display() {
                                         "uniform float pp_vig;"
                                         "uniform float pp_ca_strength;"
                                         "uniform float pp_filmic;"
+                                        "uniform float pp_bloom;"
+                                        "uniform float pp_bloom_threshold;"
+                                        "uniform float pp_bloom_separate;"
+                                        "uniform vec2 pp_texel;"
                                         "uniform float pp_dmg;"
                                         "uniform sampler2D tex;"
+                                        "uniform sampler2D pp_bloom_texture;"
                                         "vec3 acesFilm(vec3 x){"
                                         "const float a=2.51;const float b=0.03;"
                                         "const float c=2.43;const float d=0.59;const float e=0.14;"
@@ -660,6 +844,23 @@ void display() {
                                         "c.g=texture2D(tex,uv).g;"
                                         "c.b=texture2D(tex,uv-off).b;"
                                         "}else{c=texture2D(tex,uv).rgb;}"
+                                        "if(pp_bloom>0.001){"
+                                        "if(pp_bloom_separate>0.5){c+=texture2D(pp_bloom_texture,uv).rgb*pp_bloom;}"
+                                        "else{"
+                                        "vec3 glow=vec3(0.0);"
+                                        "glow+=texture2D(tex,uv+pp_texel*vec2(2.0,0.0)).rgb;"
+                                        "glow+=texture2D(tex,uv+pp_texel*vec2(-2.0,0.0)).rgb;"
+                                        "glow+=texture2D(tex,uv+pp_texel*vec2(0.0,2.0)).rgb;"
+                                        "glow+=texture2D(tex,uv+pp_texel*vec2(0.0,-2.0)).rgb;"
+                                        "glow+=texture2D(tex,uv+pp_texel*vec2(1.5,1.5)).rgb;"
+                                        "glow+=texture2D(tex,uv+pp_texel*vec2(-1.5,1.5)).rgb;"
+                                        "glow+=texture2D(tex,uv+pp_texel*vec2(1.5,-1.5)).rgb;"
+                                        "glow+=texture2D(tex,uv+pp_texel*vec2(-1.5,-1.5)).rgb;"
+                                        "glow*=0.125;"
+                                        "float peak=max(glow.r,max(glow.g,glow.b));"
+                                        "float gate=max(peak-pp_bloom_threshold,0.0)/max(peak,0.0001);"
+                                        "c+=glow*gate*pp_bloom;"
+                                        "}}"
                                         "float g=dot(c,vec3(0.299,0.587,0.114));"
                                         "c=mix(vec3(g),c,pp_sat);"
                                         "c=c*pp_scale+pp_bias;"
@@ -668,21 +869,42 @@ void display() {
                                         "if(pp_dmg>0.001){float dm=smoothstep(0.04,0.45,r2)*pp_dmg;c=mix(c,vec3(0.55,0.04,0.04),dm*0.22);c+=vec3(0.42,0.03,0.03)*dm;}"
                                         "gl_FragColor=vec4(c,1.0);}";
                                 postproc.shader = glx_shader(vert, frag);
-#if defined(OPENGL_ES)
+#if defined(GLX_PROGRAMMABLE)
                                 }
 #endif
                                 if(postproc.shader) {
-                                        postproc.uni_pp_sat = glGetUniformLocation(postproc.shader, "pp_sat");
-                                        postproc.uni_pp_scale = glGetUniformLocation(postproc.shader, "pp_scale");
-                                        postproc.uni_pp_bias = glGetUniformLocation(postproc.shader, "pp_bias");
-                                        postproc.uni_pp_vig = glGetUniformLocation(postproc.shader, "pp_vig");
-                                        postproc.uni_pp_ca_strength = glGetUniformLocation(postproc.shader, "pp_ca_strength");
-                                        postproc.uni_pp_filmic = glGetUniformLocation(postproc.shader, "pp_filmic");
-                                        postproc.uni_pp_dmg = glGetUniformLocation(postproc.shader, "pp_dmg");
-                                        // sampler binding never changes — set once here, not per frame
-                                        glUseProgram(postproc.shader);
-                                        glUniform1i(glGetUniformLocation(postproc.shader, "tex"), 0);
-                                        glUseProgram(0);
+                                        postproc.uni_pp_sat = glx_uniform_location(postproc.shader, "pp_sat");
+                                        postproc.uni_pp_scale = glx_uniform_location(postproc.shader, "pp_scale");
+                                        postproc.uni_pp_bias = glx_uniform_location(postproc.shader, "pp_bias");
+                                        postproc.uni_pp_vig = glx_uniform_location(postproc.shader, "pp_vig");
+                                        postproc.uni_pp_ca_strength = glx_uniform_location(postproc.shader, "pp_ca_strength");
+                                        postproc.uni_pp_filmic = glx_uniform_location(postproc.shader, "pp_filmic");
+                                        postproc.uni_pp_bloom = glx_uniform_location(postproc.shader, "pp_bloom");
+                                        postproc.uni_pp_bloom_threshold = glx_uniform_location(postproc.shader, "pp_bloom_threshold");
+                                        postproc.uni_pp_bloom_separate = glx_uniform_location(postproc.shader, "pp_bloom_separate");
+                                        postproc.uni_pp_texel = glx_uniform_location(postproc.shader, "pp_texel");
+                                        postproc.uni_pp_dmg = glx_uniform_location(postproc.shader, "pp_dmg");
+                                        postproc.uni_pp_bloom_texture = glx_uniform_location(postproc.shader, "pp_bloom_texture");
+                                        GLint scene_sampler = glx_uniform_location(postproc.shader, "tex");
+                                        if(postproc.uni_pp_sat < 0 || postproc.uni_pp_scale < 0 || postproc.uni_pp_bias < 0
+                                           || postproc.uni_pp_vig < 0 || postproc.uni_pp_ca_strength < 0
+                                           || postproc.uni_pp_filmic < 0 || postproc.uni_pp_bloom < 0
+                                           || postproc.uni_pp_bloom_threshold < 0 || postproc.uni_pp_bloom_separate < 0
+                                           || postproc.uni_pp_texel < 0 || postproc.uni_pp_dmg < 0
+                                           || postproc.uni_pp_bloom_texture < 0 || scene_sampler < 0) {
+                                                log_error("Post-process shader contract is incomplete; rendering without post-processing");
+                                                glx_delete_program(postproc.shader);
+                                                postproc.shader = 0;
+                                        } else {
+                                                /* Sampler bindings never change. Preserve the caller's
+                                                   program while initializing both texture units. */
+                                                GLint previous_program = 0;
+                                                previous_program = (GLint)glx_current_program();
+                                                glx_use_program(postproc.shader);
+                                                glUniform1i(scene_sampler, 0);
+                                                glUniform1i(postproc.uni_pp_bloom_texture, 1);
+                                                glx_use_program((GLuint)previous_program);
+                                        }
                                 }
                         }
 
@@ -692,8 +914,8 @@ void display() {
                            by depth (sky pixels have depth==1.0), Preetham atmospheric scattering
                            tint, and additive blend onto the original color. */
                         if(settings.volumetric_light && !postproc.vol_shader) {
-#if defined(OPENGL_ES)
-                                if(gles_version >= 2) {
+#if defined(GLX_PROGRAMMABLE)
+                                if(glx_version) {
                                         const char* vvert =
                                                 "attribute vec2 a_Position;\n"
                                                 "attribute vec2 a_TexCoord;\n"
@@ -803,32 +1025,30 @@ void display() {
                                         "gl_FragColor=vec4(color,1.0);"
                                         "}";
                                 postproc.vol_shader = glx_shader(vvert, vfrag);
-#if defined(OPENGL_ES)
+#if defined(GLX_PROGRAMMABLE)
                                 }
 #endif
                                 if(postproc.vol_shader) {
-                                        postproc.uni_vol_sun_pos = glGetUniformLocation(postproc.vol_shader, "sunPositionScreen");
-                                        postproc.uni_vol_sun_brightness = glGetUniformLocation(postproc.vol_shader, "sunBrightness");
-                                        postproc.uni_vol_strength = glGetUniformLocation(postproc.vol_shader, "volumetricLightStrength");
-                                        postproc.uni_vol_daylight = glGetUniformLocation(postproc.vol_shader, "dayLight");
-                                        postproc.uni_vol_lightdir = glGetUniformLocation(postproc.vol_shader, "v_LightDirection");
+                                        postproc.uni_vol_sun_pos = glx_uniform_location(postproc.vol_shader, "sunPositionScreen");
+                                        postproc.uni_vol_sun_brightness = glx_uniform_location(postproc.vol_shader, "sunBrightness");
+                                        postproc.uni_vol_strength = glx_uniform_location(postproc.vol_shader, "volumetricLightStrength");
+                                        postproc.uni_vol_daylight = glx_uniform_location(postproc.vol_shader, "dayLight");
+                                        postproc.uni_vol_lightdir = glx_uniform_location(postproc.vol_shader, "v_LightDirection");
                                         // sampler bindings never change — set once here
-                                        glUseProgram(postproc.vol_shader);
-                                        glUniform1i(glGetUniformLocation(postproc.vol_shader, "rendered"), 0);
-                                        glUniform1i(glGetUniformLocation(postproc.vol_shader, "depthmap"), 1);
-                                        glUseProgram(0);
+                                        glx_use_program(postproc.vol_shader);
+                                        glUniform1i(glx_uniform_location(postproc.vol_shader, "rendered"), 0);
+                                        glUniform1i(glx_uniform_location(postproc.vol_shader, "depthmap"), 1);
+                                        glx_use_program(0);
                                 }
                         }
 
-                        /* Compile the mode 2 directional volumetric light shader.
-                           Mode 2 uses the SAME sun screen position as mode 1 and lens flare,
-                           but with a longer march range and stronger intensity, making the
-                           rays visible from any angle — not just when looking at the sun.
-                           The shader marches from each pixel toward the sun's screen UV and
-                           counts how many samples hit sky (depth == 1.0) vs terrain. */
-                        if(settings.volumetric_light && !postproc.vol2_shader) {
-#if defined(OPENGL_ES)
-                                if(gles_version >= 2) {
+                        /* Compile the mode 2 volumetric-light shader. The sun path
+                           marches toward the shared screen-space sun position, while a
+                           bounded pair of projected glowing blocks uses shorter coloured,
+                           depth-aware ray marches. Either path can run independently. */
+                        if((settings.volumetric_light || glowing_postproc) && !postproc.vol2_shader) {
+#if defined(GLX_PROGRAMMABLE)
+                                if(glx_version) {
                                         const char* v2vert =
                                                 "attribute vec2 a_Position;\n"
                                                 "attribute vec2 a_TexCoord;\n"
@@ -848,15 +1068,19 @@ void display() {
                                                 "uniform float rayBrightness;\n"
                                                 "uniform float rayRange;\n"
                                                 "uniform vec3 dayLight;\n"
+                                                "uniform vec4 pointLightScreen[2];\n"
+                                                "uniform vec4 pointLightColor[2];\n"
                                                 "float noise(vec3 uvd){\n"
                                                 "    return fract(dot(sin(uvd*vec3(13041.19699,27723.29171,61029.77801)),vec3(73137.11101,37312.92319,10108.89991)));\n"
                                                 "}\n"
                                                 "void main(){\n"
                                                 "    vec2 uv = v_TexCoord;\n"
                                                 "    vec3 color = texture2D(rendered, uv).rgb;\n"
+                                                "    float rawDepth = texture2D(depthmap, uv).r;\n"
                                                 "    if (sunBrightness > 0.0 && volumetricLightStrength > 0.0 && sunPositionScreen.z > 0.0) {\n"
                                                 "        vec2 sunUV = 0.5 * sunPositionScreen.xy / sunPositionScreen.z + 0.5;\n"
-                                                "        float rawDepth = texture2D(depthmap, uv).r;\n"
+                                                "        float sunVisibility = step(1.0, texture2D(depthmap, clamp(sunUV, vec2(0.0), vec2(1.0))).r);\n"
+                                                "        if (sunVisibility > 0.0) {\n"
                                                 "        const float samples = 50.0;\n"
                                                 "        float result = 0.0;\n"
                                                 "        float bias = noise(vec3(uv, rawDepth));\n"
@@ -873,7 +1097,35 @@ void display() {
                                                 "        float distToSun = length(dir);\n"
                                                 "        float falloff = 1.0 - clamp(distToSun * 0.7 / rayRange, 0.0, 0.85);\n"
                                                 "        vec3 rayColor = dayLight * rayBrightness;\n"
-                                                "        color += rayColor * occlusion * falloff * sunBrightness * volumetricLightStrength * 3.0;\n"
+                                                "        color += rayColor * occlusion * falloff * sunVisibility * sunBrightness * volumetricLightStrength * 3.0;\n"
+                                                "        }\n"
+                                                "    }\n"
+                                                "    for (int p = 0; p < 2; ++p) {\n"
+                                                "        vec4 source = pointLightScreen[p];\n"
+                                                "        vec4 lightColor = pointLightColor[p];\n"
+                                                "        if (source.w > 0.5 && lightColor.a > 0.0) {\n"
+                                                "            vec2 dir = source.xy - uv;\n"
+                                                "            float distanceSq = dot(dir, dir);\n"
+                                                "            if (distanceSq < 0.6084) {\n"
+                                                "                float bias = noise(vec3(uv + source.xy, rawDepth));\n"
+                                                "                float visible = 0.0;\n"
+                                                "                float nearSourceVisible = 0.0;\n"
+                                                "                for (int j = 0; j < 12; ++j) {\n"
+                                                "                    float t = (float(j) + bias) / (11.0 + bias);\n"
+                                                "                    vec2 samplepos = mix(uv, source.xy, t);\n"
+                                                "                    if (min(samplepos.x, samplepos.y) > 0.0 && max(samplepos.x, samplepos.y) < 1.0) {\n"
+                                                "                        float sceneDepth = texture2D(depthmap, samplepos).r;\n"
+                                                "                        float pathDepth = mix(rawDepth, source.z, t);\n"
+                                                "                        float pathVisible = step(pathDepth - 0.00002, sceneDepth);\n"
+                                                "                        visible += pathVisible;\n"
+                                                "                        if (j >= 8) nearSourceVisible += pathVisible;\n"
+                                                "                    }\n"
+                                                "                }\n"
+                                                "                float emitterVisibility = clamp(nearSourceVisible * 0.75, 0.0, 1.0);\n"
+                                                "                float falloff = 1.0 - smoothstep(0.04, 0.78, sqrt(distanceSq));\n"
+                                                "                color += lightColor.rgb * lightColor.a * (visible / 12.0) * emitterVisibility * falloff * 0.32;\n"
+                                                "            }\n"
+                                                "        }\n"
                                                 "    }\n"
                                                 "    gl_FragColor = vec4(color, 1.0);\n"
                                                 "}\n";
@@ -890,15 +1142,19 @@ void display() {
                                         "uniform float rayBrightness;"
                                         "uniform float rayRange;"
                                         "uniform vec3 dayLight;"
+                                        "uniform vec4 pointLightScreen[2];"
+                                        "uniform vec4 pointLightColor[2];"
                                         "float noise(vec3 uvd){"
                                         "return fract(dot(sin(uvd*vec3(13041.19699,27723.29171,61029.77801)),vec3(73137.11101,37312.92319,10108.89991)));"
                                         "}"
                                         "void main(){"
                                         "vec2 uv=gl_TexCoord[0].xy;"
                                         "vec3 color=texture2D(rendered,uv).rgb;"
+                                        "float rawDepth=texture2D(depthmap,uv).r;"
                                         "if(sunBrightness>0.0&&volumetricLightStrength>0.0&&sunPositionScreen.z>0.0){"
                                         "vec2 sunUV=0.5*sunPositionScreen.xy/sunPositionScreen.z+0.5;"
-                                        "float rawDepth=texture2D(depthmap,uv).r;"
+                                        "float sunVisibility=step(1.0,texture2D(depthmap,clamp(sunUV,vec2(0.0),vec2(1.0))).r);"
+                                        "if(sunVisibility>0.0){"
                                         "const float samples=50.0;"
                                         "float result=0.0;"
                                         "float bias=noise(vec3(uv,rawDepth));"
@@ -915,16 +1171,41 @@ void display() {
                                         "float distToSun=length(dir);"
                                         "float falloff=1.0-clamp(distToSun*0.7/rayRange,0.0,0.85);"
                                         "vec3 rayColor=dayLight*rayBrightness;"
-                                        "color+=rayColor*occlusion*falloff*sunBrightness*volumetricLightStrength*3.0;"
+                                        "color+=rayColor*occlusion*falloff*sunVisibility*sunBrightness*volumetricLightStrength*3.0;"
+                                        "}"
+                                        "}"
+                                        "for(int p=0;p<2;++p){"
+                                        "vec4 source=pointLightScreen[p],lightColor=pointLightColor[p];"
+                                        "if(source.w>0.5&&lightColor.a>0.0){"
+                                        "vec2 pdir=source.xy-uv;"
+                                        "float distanceSq=dot(pdir,pdir);"
+                                        "if(distanceSq<0.6084){"
+                                        "float pbias=noise(vec3(uv+source.xy,rawDepth)),visible=0.0,nearVisible=0.0;"
+                                        "for(int j=0;j<12;++j){"
+                                        "float t=(float(j)+pbias)/(11.0+pbias);"
+                                        "vec2 samplepos=mix(uv,source.xy,t);"
+                                        "if(min(samplepos.x,samplepos.y)>0.0&&max(samplepos.x,samplepos.y)<1.0){"
+                                        "float sceneDepth=texture2D(depthmap,samplepos).r;"
+                                        "float pathDepth=mix(rawDepth,source.z,t);"
+                                        "float pathVisible=step(pathDepth-0.00002,sceneDepth);"
+                                        "visible+=pathVisible;"
+                                        "if(j>=8)nearVisible+=pathVisible;"
+                                        "}"
+                                        "}"
+                                        "float emitterVisibility=clamp(nearVisible*0.75,0.0,1.0);"
+                                        "float pfalloff=1.0-smoothstep(0.04,0.78,sqrt(distanceSq));"
+                                        "color+=lightColor.rgb*lightColor.a*(visible/12.0)*emitterVisibility*pfalloff*0.32;"
+                                        "}"
+                                        "}"
                                         "}"
                                         "gl_FragColor=vec4(color,1.0);"
                                         "}";
                                 postproc.vol2_shader = glx_shader(v2vert, v2frag);
-#if defined(OPENGL_ES)
+#if defined(GLX_PROGRAMMABLE)
                                 }
 #endif
 #endif
-#if defined(OPENGL_ES)
+#if defined(GLX_PROGRAMMABLE)
                                 /* Close the "else" branch opened by "} else {" above.
                                    On ES builds the else block was opened but its
                                    matching close was inside the inactive #else
@@ -932,24 +1213,29 @@ void display() {
                                 }
 #endif
                                 if(postproc.vol2_shader) {
-                                        postproc.uni_vol2_sun_dir = glGetUniformLocation(postproc.vol2_shader, "sunPositionScreen");
-                                        postproc.uni_vol2_sun_brightness = glGetUniformLocation(postproc.vol2_shader, "sunBrightness");
-                                        postproc.uni_vol2_strength = glGetUniformLocation(postproc.vol2_shader, "volumetricLightStrength");
-                                        postproc.uni_vol2_brightness = glGetUniformLocation(postproc.vol2_shader, "rayBrightness");
-                                        postproc.uni_vol2_range = glGetUniformLocation(postproc.vol2_shader, "rayRange");
-                                        postproc.uni_vol2_daylight = glGetUniformLocation(postproc.vol2_shader, "dayLight");
+                                        postproc.uni_vol2_sun_dir = glx_uniform_location(postproc.vol2_shader, "sunPositionScreen");
+                                        postproc.uni_vol2_sun_brightness = glx_uniform_location(postproc.vol2_shader, "sunBrightness");
+                                        postproc.uni_vol2_strength = glx_uniform_location(postproc.vol2_shader, "volumetricLightStrength");
+                                        postproc.uni_vol2_brightness = glx_uniform_location(postproc.vol2_shader, "rayBrightness");
+                                        postproc.uni_vol2_range = glx_uniform_location(postproc.vol2_shader, "rayRange");
+                                        postproc.uni_vol2_daylight = glx_uniform_location(postproc.vol2_shader, "dayLight");
                                         postproc.uni_vol2_lightdir = -1;
-                                        glUseProgram(postproc.vol2_shader);
-                                        glUniform1i(glGetUniformLocation(postproc.vol2_shader, "rendered"), 0);
-                                        glUniform1i(glGetUniformLocation(postproc.vol2_shader, "depthmap"), 1);
-                                        glUseProgram(0);
+                                        postproc.uni_vol2_point_screen
+                                                = glx_uniform_location(postproc.vol2_shader, "pointLightScreen[0]");
+                                        postproc.uni_vol2_point_color
+                                                = glx_uniform_location(postproc.vol2_shader, "pointLightColor[0]");
+                                        glx_use_program(postproc.vol2_shader);
+                                        glUniform1i(glx_uniform_location(postproc.vol2_shader, "rendered"), 0);
+                                        glUniform1i(glx_uniform_location(postproc.vol2_shader, "depthmap"), 1);
+                                        glx_use_program(0);
                                 }
                         }
 
-                        /* Compile the lens flare shader once. Half-size flare. */
+                        /* Compile the lens flare shader once. Keep the complete
+                           ghost pattern, but at half its previous footprint. */
                         if(settings.lens_flare && !postproc.flare_shader) {
-#if defined(OPENGL_ES)
-                                if(gles_version >= 2) {
+#if defined(GLX_PROGRAMMABLE)
+                                if(glx_version) {
                                         const char* fvert =
                                                 "attribute vec2 a_Position;\n"
                                                 "attribute vec2 a_TexCoord;\n"
@@ -973,28 +1259,31 @@ void display() {
                                                 "    if (includeScene > 0.5) color = texture2D(rendered, uv).rgb;\n"
                                                 "    if (sunBrightness > 0.0 && lensFlareStrength > 0.0 && sunPositionScreen.z > 0.0) {\n"
                                                 "        vec2 sunUV = 0.5 * sunPositionScreen.xy / sunPositionScreen.z + 0.5;\n"
-                                                "        float sunDepth = texture2D(depthmap, sunUV).r;\n"
-                                                "        float occlusion = (sunDepth < 1.0) ? 0.15 : 1.0;\n"
+                                                "        float onScreen = step(0.0, min(sunUV.x, sunUV.y)) * step(max(sunUV.x, sunUV.y), 1.0);\n"
+                                                "        float sunDepth = texture2D(depthmap, clamp(sunUV, vec2(0.0), vec2(1.0))).r;\n"
+                                                "        float occlusion = onScreen * step(1.0, sunDepth);\n"
+                                                "        if (occlusion > 0.0) {\n"
                                                 "        vec2 dir = uv - sunUV;\n"
                                                 "        float dist = length(dir);\n"
                                                 "        vec3 flare = vec3(0.0);\n"
-                                                "        flare += vec3(1.0, 0.95, 0.8) * exp(-dist * 20.0) * 0.75;\n"
+                                                "        flare += vec3(1.0, 0.95, 0.8) * exp(-dist * 40.0) * 0.75;\n"
                                                 "        vec2 toCenter = vec2(0.5) - sunUV;\n"
                                                 "        float axisLen = length(toCenter);\n"
                                                 "        if (axisLen > 0.001) {\n"
                                                 "            vec2 axis = toCenter / axisLen;\n"
-                                                "            vec2 g1 = sunUV + axis * 0.25;\n"
-                                                "            flare += vec3(0.6, 0.7, 1.0) * exp(-length(uv - g1) * 60.0) * 0.3;\n"
-                                                "            vec2 g2 = sunUV + axis * 0.5;\n"
-                                                "            flare += vec3(0.9, 0.6, 1.0) * exp(-length(uv - g2) * 50.0) * 0.25;\n"
-                                                "            vec2 g3 = sunUV + axis * 0.75;\n"
-                                                "            flare += vec3(1.0, 0.8, 0.5) * exp(-length(uv - g3) * 40.0) * 0.2;\n"
-                                                "            vec2 g4 = sunUV + axis * 1.1;\n"
-                                                "            flare += vec3(0.5, 1.0, 0.8) * exp(-length(uv - g4) * 36.0) * 0.175;\n"
-                                                "            vec2 g5 = sunUV - axis * 0.175;\n"
-                                                "            flare += vec3(0.7, 0.5, 1.0) * exp(-length(uv - g5) * 80.0) * 0.15;\n"
+                                                "            vec2 g1 = sunUV + axis * 0.125;\n"
+                                                "            flare += vec3(0.6, 0.7, 1.0) * exp(-length(uv - g1) * 120.0) * 0.3;\n"
+                                                "            vec2 g2 = sunUV + axis * 0.25;\n"
+                                                "            flare += vec3(0.9, 0.6, 1.0) * exp(-length(uv - g2) * 100.0) * 0.25;\n"
+                                                "            vec2 g3 = sunUV + axis * 0.375;\n"
+                                                "            flare += vec3(1.0, 0.8, 0.5) * exp(-length(uv - g3) * 80.0) * 0.2;\n"
+                                                "            vec2 g4 = sunUV + axis * 0.55;\n"
+                                                "            flare += vec3(0.5, 1.0, 0.8) * exp(-length(uv - g4) * 72.0) * 0.175;\n"
+                                                "            vec2 g5 = sunUV - axis * 0.0875;\n"
+                                                "            flare += vec3(0.7, 0.5, 1.0) * exp(-length(uv - g5) * 160.0) * 0.15;\n"
                                                 "        }\n"
                                                 "        color += flare * lensFlareStrength * occlusion * sunBrightness;\n"
+                                                "        }\n"
                                                 "    }\n"
                                                 "    gl_FragColor = vec4(color, 1.0);\n"
                                                 "}\n";
@@ -1015,50 +1304,53 @@ void display() {
                                         "if(includeScene>0.5)color=texture2D(rendered,uv).rgb;"
                                         "if(sunBrightness>0.0&&lensFlareStrength>0.0&&sunPositionScreen.z>0.0){"
                                         "vec2 sunUV=0.5*sunPositionScreen.xy/sunPositionScreen.z+0.5;"
-                                        "float sunDepth=texture2D(depthmap,sunUV).r;"
-                                        "float occlusion=(sunDepth<1.0)?0.15:1.0;"
+                                        "float onScreen=step(0.0,min(sunUV.x,sunUV.y))*step(max(sunUV.x,sunUV.y),1.0);"
+                                        "float sunDepth=texture2D(depthmap,clamp(sunUV,vec2(0.0),vec2(1.0))).r;"
+                                        "float occlusion=onScreen*step(1.0,sunDepth);"
+                                        "if(occlusion>0.0){"
                                         "vec2 dir=uv-sunUV;"
                                         "float dist=length(dir);"
                                         "vec3 flare=vec3(0.0);"
-                                        "flare+=vec3(1.0,0.95,0.8)*exp(-dist*20.0)*0.75;"
+                                        "flare+=vec3(1.0,0.95,0.8)*exp(-dist*40.0)*0.75;"
                                         "vec2 toCenter=vec2(0.5)-sunUV;"
                                         "float axisLen=length(toCenter);"
                                         "if(axisLen>0.001){"
                                         "vec2 axis=toCenter/axisLen;"
-                                        "vec2 g1=sunUV+axis*0.25;"
-                                        "flare+=vec3(0.6,0.7,1.0)*exp(-length(uv-g1)*60.0)*0.3;"
-                                        "vec2 g2=sunUV+axis*0.5;"
-                                        "flare+=vec3(0.9,0.6,1.0)*exp(-length(uv-g2)*50.0)*0.25;"
-                                        "vec2 g3=sunUV+axis*0.75;"
-                                        "flare+=vec3(1.0,0.8,0.5)*exp(-length(uv-g3)*40.0)*0.2;"
-                                        "vec2 g4=sunUV+axis*1.1;"
-                                        "flare+=vec3(0.5,1.0,0.8)*exp(-length(uv-g4)*36.0)*0.175;"
-                                        "vec2 g5=sunUV-axis*0.175;"
-                                        "flare+=vec3(0.7,0.5,1.0)*exp(-length(uv-g5)*80.0)*0.15;"
+                                        "vec2 g1=sunUV+axis*0.125;"
+                                        "flare+=vec3(0.6,0.7,1.0)*exp(-length(uv-g1)*120.0)*0.3;"
+                                        "vec2 g2=sunUV+axis*0.25;"
+                                        "flare+=vec3(0.9,0.6,1.0)*exp(-length(uv-g2)*100.0)*0.25;"
+                                        "vec2 g3=sunUV+axis*0.375;"
+                                        "flare+=vec3(1.0,0.8,0.5)*exp(-length(uv-g3)*80.0)*0.2;"
+                                        "vec2 g4=sunUV+axis*0.55;"
+                                        "flare+=vec3(0.5,1.0,0.8)*exp(-length(uv-g4)*72.0)*0.175;"
+                                        "vec2 g5=sunUV-axis*0.0875;"
+                                        "flare+=vec3(0.7,0.5,1.0)*exp(-length(uv-g5)*160.0)*0.15;"
                                         "}"
                                         "color+=flare*lensFlareStrength*occlusion*sunBrightness;"
+                                        "}"
                                         "}"
                                         "gl_FragColor=vec4(color,1.0);"
                                         "}";
                                 postproc.flare_shader = glx_shader(fvert, ffrag);
-#if defined(OPENGL_ES)
+#if defined(GLX_PROGRAMMABLE)
                                 }
 #endif
 #endif
-#if defined(OPENGL_ES)
+#if defined(GLX_PROGRAMMABLE)
                                 /* Close the "else" branch opened by "} else {" above.
                                    Same fix as the vol2_shader block above. */
                                 }
 #endif
                                 if(postproc.flare_shader) {
-                                        postproc.uni_flare_sun_pos = glGetUniformLocation(postproc.flare_shader, "sunPositionScreen");
-                                        postproc.uni_flare_sun_brightness = glGetUniformLocation(postproc.flare_shader, "sunBrightness");
-                                        postproc.uni_flare_strength = glGetUniformLocation(postproc.flare_shader, "lensFlareStrength");
-                                        postproc.uni_flare_include_scene = glGetUniformLocation(postproc.flare_shader, "includeScene");
-                                        glUseProgram(postproc.flare_shader);
-                                        glUniform1i(glGetUniformLocation(postproc.flare_shader, "rendered"), 0);
-                                        glUniform1i(glGetUniformLocation(postproc.flare_shader, "depthmap"), 1);
-                                        glUseProgram(0);
+                                        postproc.uni_flare_sun_pos = glx_uniform_location(postproc.flare_shader, "sunPositionScreen");
+                                        postproc.uni_flare_sun_brightness = glx_uniform_location(postproc.flare_shader, "sunBrightness");
+                                        postproc.uni_flare_strength = glx_uniform_location(postproc.flare_shader, "lensFlareStrength");
+                                        postproc.uni_flare_include_scene = glx_uniform_location(postproc.flare_shader, "includeScene");
+                                        glx_use_program(postproc.flare_shader);
+                                        glUniform1i(glx_uniform_location(postproc.flare_shader, "rendered"), 0);
+                                        glUniform1i(glx_uniform_location(postproc.flare_shader, "depthmap"), 1);
+                                        glx_use_program(0);
                                 }
                         }
 
@@ -1086,6 +1378,8 @@ void display() {
                 if(camera_mode == CAMERAMODE_SPECTATOR)
                         settings.render_distance = settings.spectator_fog_distance;
 
+                camera_ads_update(dt_float);
+
                 if(settings.opengl14) {
                         matrix_identity(matrix_projection);
                         matrix_perspective(matrix_projection, camera_fov_scaled(dt_float),
@@ -1098,9 +1392,36 @@ void display() {
                         matrix_identity(matrix_model);
                         matrix_upload();
 
+#ifndef OPENGL_CORE
                         float lpos[4] = {0.0F, -1.0F, 1.0F, 0.0F};
                         glLightfv(GL_LIGHT0, GL_POSITION, lpos);
+#endif
                 }
+
+                /* OpenSpades-style eye flashlight: smooth a warm 90-degree
+                   spotlight toward the rendered view. It remains a local-only
+                   visual and is available only to a living first-person player. */
+                float flashlight_dx = sinf(camera_rot_x) * sinf(camera_rot_y);
+                float flashlight_dy = cosf(camera_rot_y);
+                float flashlight_dz = cosf(camera_rot_x) * sinf(camera_rot_y);
+                bool flashlight_usable = network_connected && !network_map_transfer
+                        && players[local_player_id].connected
+                        && players[local_player_id].alive
+                        && players[local_player_id].team != TEAM_SPECTATOR
+                        && camera_mode == CAMERAMODE_FPS;
+                lighting_flashlight_update(dt_float, flashlight_usable,
+                                            camera_x, camera_y, camera_z,
+                                            flashlight_dx, flashlight_dy, flashlight_dz);
+
+                /* Submit moving lights at their current simulation positions,
+                   then resolve them together with active flashes. The local
+                   flashlight reserves one slot while active. */
+                tracer_submit_lights();
+                glowing_blocks_prepare_frame(camera_x, camera_y, camera_z);
+                lighting_prepare_frame(window_time(), camera_x, camera_y, camera_z);
+#ifdef GLX_PROGRAMMABLE
+                lighting_apply_program((unsigned int)glx_default_shader_program());
+#endif
 
                 camera_ExtractFrustum();
 
@@ -1112,6 +1433,10 @@ void display() {
                         damagenumbers_capture_camera();
 
                 if(!network_map_transfer) {
+                        /* Refresh the cached sun depth map from the real camera
+                           state before HUD/view-model matrices overwrite it. */
+                        shadow_render();
+
                         /* Sky gradient: drawn as a background BEFORE the 3D scene so
                            terrain correctly draws on top of it. The gradient makes the
                            upper sky darker (like real atmospheric perspective), blending
@@ -1120,19 +1445,24 @@ void display() {
                            model still active, which made per-vertex colors not
                            interpolate — the entire quad rendered as fog_color (invisible). */
                         if(settings.sky_gradient) {
-                                glMatrixMode(GL_PROJECTION);
-                                glPushMatrix();
-                                glLoadIdentity();
-                                glOrtho(0.0, settings.window_width, 0.0, settings.window_height, -1.0, 1.0);
-                                glMatrixMode(GL_MODELVIEW);
-                                glPushMatrix();
-                                glLoadIdentity();
+                                matrix_push(matrix_projection);
+                                matrix_push(matrix_view);
+                                matrix_push(matrix_model);
+                                matrix_identity(matrix_projection);
+                                matrix_ortho(matrix_projection, 0.0F, (float)settings.window_width,
+                                             0.0F, (float)settings.window_height, -1.0F, 1.0F);
+                                matrix_identity(matrix_view);
+                                matrix_identity(matrix_model);
+                                matrix_upload_p();
+                                matrix_upload();
 
                                 glDisable(GL_DEPTH_TEST);
                                 glDepthMask(GL_FALSE);
+#ifndef OPENGL_CORE
                                 glDisable(GL_TEXTURE_2D);
-#ifndef OPENGL_ES
+#if !defined(OPENGL_ES)
                                 glShadeModel(GL_SMOOTH);
+#endif
 #endif
 
                                 float h = (float)settings.window_height;
@@ -1154,11 +1484,11 @@ void display() {
                                 glDepthMask(GL_TRUE);
                                 glEnable(GL_DEPTH_TEST);
 
-                                glMatrixMode(GL_MODELVIEW);
-                                glPopMatrix();
-                                glMatrixMode(GL_PROJECTION);
-                                glPopMatrix();
-                                glMatrixMode(GL_MODELVIEW);
+                                matrix_pop(matrix_model);
+                                matrix_pop(matrix_view);
+                                matrix_pop(matrix_projection);
+                                matrix_upload_p();
+                                matrix_upload();
                         }
 
                         water_reflection_pass();
@@ -1286,7 +1616,6 @@ void display() {
                                         cubes[0].y = pos[2];
                                         cubes[0].z = 63 - pos[1];
                                 }
-                                glEnableClientState(GL_VERTEX_ARRAY);
                                 float drag_active_f = (float)local_player_drag_active;
                                 int line_invalid = 0;
                                 if(amount > local_player_blocks) {
@@ -1301,12 +1630,12 @@ void display() {
                                         r = 1.0F - drag_active_f; g = 1.0F - drag_active_f; b = 1.0F - drag_active_f;
                                 }
                                 glColor3f(r, g, b);
-                                glLineWidth(1.0F + 7.0F * drag_active_f);
+                                glx_set_line_width(1.0F + 7.0F * drag_active_f);
                                 while(amount > 0) {
                                         int tmp = cubes[amount - 1].y;
                                         cubes[amount - 1].y = 63 - cubes[amount - 1].z;
                                         cubes[amount - 1].z = tmp;
-                                        short vertices[72] = {cubes[amount - 1].x,         cubes[amount - 1].y,         cubes[amount - 1].z,
+                                        float vertices[72] = {cubes[amount - 1].x,         cubes[amount - 1].y,         cubes[amount - 1].z,
                                                                                   cubes[amount - 1].x,     cubes[amount - 1].y,         cubes[amount - 1].z + 1,
                                                                                   cubes[amount - 1].x,     cubes[amount - 1].y,         cubes[amount - 1].z,
                                                                                   cubes[amount - 1].x + 1, cubes[amount - 1].y,         cubes[amount - 1].z,
@@ -1332,11 +1661,9 @@ void display() {
                                                                                   cubes[amount - 1].x + 1, cubes[amount - 1].y + 1, cubes[amount - 1].z + 1,
                                                                                   cubes[amount - 1].x,     cubes[amount - 1].y,         cubes[amount - 1].z + 1,
                                                                                   cubes[amount - 1].x,     cubes[amount - 1].y + 1, cubes[amount - 1].z + 1};
-                                        glVertexPointer(3, GL_SHORT, 0, vertices);
-                                        glDrawArrays(GL_LINES, 0, 24);
+                                        glx_draw_vertices_3d(vertices, 24, GL_LINES);
                                         amount--;
                                 }
-                                glDisableClientState(GL_VERTEX_ARRAY);
                                 glEnable(GL_DEPTH_TEST);
                                 glDepthMask(GL_TRUE);
                         }
@@ -1366,12 +1693,12 @@ void display() {
                                         matrix_push(matrix_projection);
                                         matrix_translate(matrix_projection, 0.0F, -0.25F, 0.0F);
                                         matrix_upload_p();
-#ifdef OPENGL_ES
+#ifdef GLX_PROGRAMMABLE
                                         if(camera_mode == CAMERAMODE_FPS)
                                                 glx_disable_sphericalfog();
 #endif
                                         player_render(&players[local_player_id], local_player_id);
-#ifdef OPENGL_ES
+#ifdef GLX_PROGRAMMABLE
                                         if(camera_mode == CAMERAMODE_FPS)
                                                 glx_enable_sphericalfog();
 #endif
@@ -1399,8 +1726,10 @@ void display() {
                         camera_inside_block_render();
 
                         glx_disable_sphericalfog();
+#if !defined(OPENGL_CORE)
                         if(settings.smooth_fog)
                                 glDisable(GL_FOG);
+#endif
 
                         if(needs_postproc) {
                                 mat4 saved_proj2, saved_view2, saved_model2;
@@ -1413,6 +1742,38 @@ void display() {
                                 matrix_upload_p();
                                 matrix_upload();
 
+                                GLboolean depth_test_was_on = glIsEnabled(GL_DEPTH_TEST);
+                                GLboolean depth_mask_was_on = GL_TRUE;
+                                GLboolean blend_was_on = glIsEnabled(GL_BLEND);
+                                GLboolean scissor_was_on = glIsEnabled(GL_SCISSOR_TEST);
+                                GLboolean cull_was_on = glIsEnabled(GL_CULL_FACE);
+                                GLint previous_program = 0;
+                                GLint previous_active_texture = GL_TEXTURE0;
+                                GLint previous_viewport[4] = {0, 0, settings.window_width, settings.window_height};
+                                GLint previous_texture0 = 0;
+                                GLint previous_texture1 = 0;
+                                GLint previous_blend_src_rgb = GL_ONE;
+                                GLint previous_blend_dst_rgb = GL_ZERO;
+                                GLint previous_blend_src_alpha = GL_ONE;
+                                GLint previous_blend_dst_alpha = GL_ZERO;
+                                GLint previous_blend_equation_rgb = GL_FUNC_ADD;
+                                GLint previous_blend_equation_alpha = GL_FUNC_ADD;
+                                glGetBooleanv(GL_DEPTH_WRITEMASK, &depth_mask_was_on);
+                                previous_program = (GLint)glx_current_program();
+                                glGetIntegerv(GL_ACTIVE_TEXTURE, &previous_active_texture);
+                                glGetIntegerv(GL_VIEWPORT, previous_viewport);
+                                glGetIntegerv(GL_BLEND_SRC_RGB, &previous_blend_src_rgb);
+                                glGetIntegerv(GL_BLEND_DST_RGB, &previous_blend_dst_rgb);
+                                glGetIntegerv(GL_BLEND_SRC_ALPHA, &previous_blend_src_alpha);
+                                glGetIntegerv(GL_BLEND_DST_ALPHA, &previous_blend_dst_alpha);
+                                glGetIntegerv(GL_BLEND_EQUATION_RGB, &previous_blend_equation_rgb);
+                                glGetIntegerv(GL_BLEND_EQUATION_ALPHA, &previous_blend_equation_alpha);
+                                glActiveTexture(GL_TEXTURE0);
+                                glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous_texture0);
+                                glActiveTexture(GL_TEXTURE1);
+                                glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous_texture1);
+                                glActiveTexture(GL_TEXTURE0);
+
                                 glDisable(GL_DEPTH_TEST);
                                 glDepthMask(GL_FALSE);
                                 /* The world is rendered into postproc.texture with alpha=0 in
@@ -1423,7 +1784,6 @@ void display() {
                                    the "frozen serverlist with shaders on" bug. The shader now
                                    also forces alpha=1, but disabling blend here makes it robust
                                    regardless of the sampled colour's alpha. */
-                                GLboolean blend_was_on = glIsEnabled(GL_BLEND);
                                 glDisable(GL_BLEND);
                                 glDisable(GL_SCISSOR_TEST);
                                 glDisable(GL_CULL_FACE);
@@ -1431,14 +1791,18 @@ void display() {
                                 glActiveTexture(GL_TEXTURE0);
 
                                 /* === Volumetric light (god-rays) pass ===
-                                   Faithful port of Luanti's pipeline: sample the scene color
-                                   + depth, run a 30-tap radial blur toward the screen-space sun
-                                   position, modulate by Preetham scattering, and write the
-                                   additive result into postproc.vol_tex. The postproc blit below
-                                   then reads vol_tex instead of the raw scene texture. */
+                                   Sample scene colour + depth and march toward the screen-space
+                                   sun and up to two nearby glowing blocks. The additive result is
+                                   written into postproc.vol_tex, which the composite pass uses in
+                                   place of the raw scene texture. */
                                 postproc.vol_applied = 0;
-                                if(settings.volumetric_light && settings.volumetric_light_strength > 0.0F
-                                   && !network_map_transfer
+                                struct glowing_block_light glow_ray_candidates[GLOWING_BLOCK_FRAME_LIGHTS];
+                                int glow_ray_candidate_count = glowing_blocks_frame_lights(
+                                        glow_ray_candidates, GLOWING_BLOCK_FRAME_LIGHTS);
+                                bool sun_volumetric = settings.volumetric_light
+                                        && settings.volumetric_light_strength > 0.0F;
+                                if((sun_volumetric || glow_ray_candidate_count > 0)
+                                   && !network_map_transfer && postproc.vol2_shader
                                    && postproc.vol_fbo && postproc.vol_tex
                                    && postproc.fbo && postproc.depth_tex) {
 
@@ -1498,6 +1862,64 @@ void display() {
                                         /* Warm daylight tint for the ray color. */
                                         float vol_day_light[3] = { 1.0F, 0.95F, 0.8F };
 
+                                        /* Project the nearest visible glowing blocks. Moving the
+                                           ray origin slightly toward the camera puts it just in
+                                           front of the emitting voxel's depth, so the voxel can
+                                           occlude rays behind it without hiding its own source. */
+                                        float glow_ray_screen[2 * 4] = {0};
+                                        float glow_ray_color[2 * 4] = {0};
+                                        int glow_ray_count = 0;
+                                        for(int i = 0; i < glow_ray_candidate_count && glow_ray_count < 2; i++) {
+                                                vec4 source_world = {
+                                                        glow_ray_candidates[i].position[0],
+                                                        glow_ray_candidates[i].position[1],
+                                                        glow_ray_candidates[i].position[2],
+                                                        1.0F
+                                                };
+                                                float toward_x = camera_x - source_world[0];
+                                                float toward_y = camera_y - source_world[1];
+                                                float toward_z = camera_z - source_world[2];
+                                                float toward_length = sqrtf(toward_x * toward_x + toward_y * toward_y
+                                                                             + toward_z * toward_z);
+                                                float distance_attenuation
+                                                        = glowing_ray_distance_attenuation(toward_length);
+                                                if(distance_attenuation <= 0.0F)
+                                                        continue;
+                                                if(toward_length > 0.001F) {
+                                                        float offset = 0.90F / toward_length;
+                                                        source_world[0] += toward_x * offset;
+                                                        source_world[1] += toward_y * offset;
+                                                        source_world[2] += toward_z * offset;
+                                                }
+
+                                                vec4 source_clip;
+                                                glmc_mat4_mulv(vol_mvp, source_world, source_clip);
+                                                if(source_clip[3] <= 0.0001F)
+                                                        continue;
+                                                float ndc_x = source_clip[0] / source_clip[3];
+                                                float ndc_y = source_clip[1] / source_clip[3];
+                                                float ndc_z = source_clip[2] / source_clip[3];
+                                                float uv_x = ndc_x * 0.5F + 0.5F;
+                                                float uv_y = ndc_y * 0.5F + 0.5F;
+                                                float depth = ndc_z * 0.5F + 0.5F;
+                                                if(depth <= 0.0F || depth >= 1.0F
+                                                   || uv_x < 0.0F || uv_x > 1.0F
+                                                   || uv_y < 0.0F || uv_y > 1.0F)
+                                                        continue;
+
+                                                int base = glow_ray_count * 4;
+                                                glow_ray_screen[base + 0] = uv_x;
+                                                glow_ray_screen[base + 1] = uv_y;
+                                                glow_ray_screen[base + 2] = depth;
+                                                glow_ray_screen[base + 3] = 1.0F;
+                                                glow_ray_color[base + 0] = glow_ray_candidates[i].color[0];
+                                                glow_ray_color[base + 1] = glow_ray_candidates[i].color[1];
+                                                glow_ray_color[base + 2] = glow_ray_candidates[i].color[2];
+                                                glow_ray_color[base + 3]
+                                                        = glow_ray_candidates[i].intensity * distance_attenuation;
+                                                glow_ray_count++;
+                                        }
+
                                         /* Render into vol_fbo (color = vol_tex). */
                                         glBindFramebuffer(GL_FRAMEBUFFER, postproc.vol_fbo);
 
@@ -1510,17 +1932,23 @@ void display() {
                                         /* Use the vol2 shader (the only volumetric light method). */
                                         unsigned int active_shader = postproc.vol2_shader;
 
-                                        if(active_shader) {
-                                                glUseProgram(active_shader);
+                                        if(active_shader && (sun_volumetric || glow_ray_count > 0)) {
+                                                glx_use_program(active_shader);
                                                 glUniform3f(postproc.uni_vol2_sun_dir, vol_sun_clip[0], vol_sun_clip[1], vol_sun_clip[2]);
-                                                glUniform1f(postproc.uni_vol2_sun_brightness, vol_sun_brightness);
-                                                glUniform1f(postproc.uni_vol2_strength, settings.volumetric_light_strength);
+                                                glUniform1f(postproc.uni_vol2_sun_brightness,
+                                                            sun_volumetric ? vol_sun_brightness : 0.0F);
+                                                glUniform1f(postproc.uni_vol2_strength,
+                                                            sun_volumetric ? settings.volumetric_light_strength : 0.0F);
                                                 glUniform1f(postproc.uni_vol2_brightness, settings.volumetric_light_brightness);
                                                 glUniform1f(postproc.uni_vol2_range, settings.volumetric_light_range);
                                                 glUniform3f(postproc.uni_vol2_daylight, vol_day_light[0], vol_day_light[1], vol_day_light[2]);
+                                                if(postproc.uni_vol2_point_screen >= 0)
+                                                        glUniform4fv(postproc.uni_vol2_point_screen, 2, glow_ray_screen);
+                                                if(postproc.uni_vol2_point_color >= 0)
+                                                        glUniform4fv(postproc.uni_vol2_point_color, 2, glow_ray_color);
 
-#if defined(OPENGL_ES)
-                                                if(gles_version >= 2) {
+#if defined(GLX_PROGRAMMABLE)
+                                                if(glx_version) {
                                                         glx_draw_screen_quad();
                                                 } else {
 #else
@@ -1531,11 +1959,12 @@ void display() {
                                                 glTexCoord2f(0.0F, 1.0F); glVertex2f(0.0F, (float)settings.window_height);
                                                 glEnd();
 #endif
-#if defined(OPENGL_ES)
+#if defined(GLX_PROGRAMMABLE)
                                                 }
 #endif
 
-                                                glUseProgram(0);
+                                                glx_use_program(0);
+                                                postproc.vol_applied = 1;
                                         }
 
                                         /* Unbind both texture units. */
@@ -1543,8 +1972,6 @@ void display() {
                                         glBindTexture(GL_TEXTURE_2D, 0);
                                         glActiveTexture(GL_TEXTURE0);
                                         glBindTexture(GL_TEXTURE_2D, 0);
-
-                                        postproc.vol_applied = 1;
                                 }
 
                                 /* === Lens flare pass === */
@@ -1576,55 +2003,73 @@ void display() {
                                         if(fl_sun_brightness < 0.0F) fl_sun_brightness = 0.0F;
                                         if(fl_sun_brightness > 1.0F) fl_sun_brightness = 1.0F;
 
-                                        glBindFramebuffer(GL_FRAMEBUFFER, postproc.vol_fbo);
-                                        glActiveTexture(GL_TEXTURE1);
-                                        glBindTexture(GL_TEXTURE_2D, postproc.depth_tex);
-                                        glActiveTexture(GL_TEXTURE0);
-                                        glBindTexture(GL_TEXTURE_2D, postproc.texture);
+                                        /* A no-op full-screen flare still paid for every fragment.
+                                           Skip it entirely at night or while the sun is behind us. */
+                                        if(fl_sun_brightness > 0.0F && fl_sun_clip[2] > 0.0F) {
+                                                glBindFramebuffer(GL_FRAMEBUFFER, postproc.vol_fbo);
+                                                glActiveTexture(GL_TEXTURE1);
+                                                glBindTexture(GL_TEXTURE_2D, postproc.depth_tex);
+                                                glActiveTexture(GL_TEXTURE0);
+                                                glBindTexture(GL_TEXTURE_2D, postproc.texture);
 
-                                        glUseProgram(postproc.flare_shader);
-                                        glUniform3f(postproc.uni_flare_sun_pos, fl_sun_clip[0], fl_sun_clip[1], fl_sun_clip[2]);
-                                        glUniform1f(postproc.uni_flare_sun_brightness, fl_sun_brightness);
-                                        glUniform1f(postproc.uni_flare_strength, 1.0F);
+                                                glx_use_program(postproc.flare_shader);
+                                                glUniform3f(postproc.uni_flare_sun_pos, fl_sun_clip[0], fl_sun_clip[1], fl_sun_clip[2]);
+                                                glUniform1f(postproc.uni_flare_sun_brightness, fl_sun_brightness);
+                                                glUniform1f(postproc.uni_flare_strength, 1.0F);
 
-                                        if(postproc.vol_applied) {
-                                                glUniform1f(postproc.uni_flare_include_scene, 0.0F);
-                                                glEnable(GL_BLEND);
-                                                glBlendFunc(GL_ONE, GL_ONE);
-                                        } else {
-                                                glUniform1f(postproc.uni_flare_include_scene, 1.0F);
-                                        }
+                                                if(postproc.vol_applied) {
+                                                        glUniform1f(postproc.uni_flare_include_scene, 0.0F);
+                                                        glEnable(GL_BLEND);
+                                                        glBlendFunc(GL_ONE, GL_ONE);
+                                                } else {
+                                                        glUniform1f(postproc.uni_flare_include_scene, 1.0F);
+                                                }
 
-#if defined(OPENGL_ES)
-                                        if(gles_version >= 2) {
-                                                glx_draw_screen_quad();
-                                        } else {
+#if defined(GLX_PROGRAMMABLE)
+                                                if(glx_version) {
+                                                        glx_draw_screen_quad();
+                                                } else {
 #else
-                                        glBegin(GL_QUADS);
-                                        glTexCoord2f(0.0F, 0.0F); glVertex2f(0.0F, 0.0F);
-                                        glTexCoord2f(1.0F, 0.0F); glVertex2f((float)settings.window_width, 0.0F);
-                                        glTexCoord2f(1.0F, 1.0F); glVertex2f((float)settings.window_width, (float)settings.window_height);
-                                        glTexCoord2f(0.0F, 1.0F); glVertex2f(0.0F, (float)settings.window_height);
-                                        glEnd();
+                                                glBegin(GL_QUADS);
+                                                glTexCoord2f(0.0F, 0.0F); glVertex2f(0.0F, 0.0F);
+                                                glTexCoord2f(1.0F, 0.0F); glVertex2f((float)settings.window_width, 0.0F);
+                                                glTexCoord2f(1.0F, 1.0F); glVertex2f((float)settings.window_width, (float)settings.window_height);
+                                                glTexCoord2f(0.0F, 1.0F); glVertex2f(0.0F, (float)settings.window_height);
+                                                glEnd();
 #endif
-#if defined(OPENGL_ES)
-                                        }
+#if defined(GLX_PROGRAMMABLE)
+                                                }
 #endif
 
-                                        if(postproc.vol_applied) glDisable(GL_BLEND);
-                                        glUseProgram(0);
-                                        glActiveTexture(GL_TEXTURE1);
-                                        glBindTexture(GL_TEXTURE_2D, 0);
-                                        glActiveTexture(GL_TEXTURE0);
-                                        glBindTexture(GL_TEXTURE_2D, 0);
-                                        postproc.vol_applied = 1;
+                                                if(postproc.vol_applied) glDisable(GL_BLEND);
+                                                glx_use_program(0);
+                                                glActiveTexture(GL_TEXTURE1);
+                                                glBindTexture(GL_TEXTURE_2D, 0);
+                                                glActiveTexture(GL_TEXTURE0);
+                                                glBindTexture(GL_TEXTURE_2D, 0);
+                                                postproc.vol_applied = 1;
+                                        }
+                                }
+
+                                unsigned int scene_texture = postproc.vol_applied ? postproc.vol_tex : postproc.texture;
+                                unsigned int bloom_texture = 0;
+                                if(bloom_postproc && postproc.fbo && scene_texture) {
+                                        /* Strict Core uses a half-resolution bright pass followed by
+                                           four horizontal/vertical Gaussian pairs. If allocation or
+                                           compilation fails, a zero result selects the established
+                                           single-pass compatibility bloom in the composite shader. */
+                                        bloom_texture = postprocess_bloom_render(scene_texture,
+                                                                                 settings.window_width,
+                                                                                 settings.window_height,
+                                                                                 settings.bloom_threshold);
                                 }
 
                                 if(postproc.fbo) {
                                         /* Off-screen-FBO path (desktop/non-iOS): bind the screen and
                                            sample the world texture we rendered into. */
                                         glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)live_screen_fbo);
-                                        glBindTexture(GL_TEXTURE_2D, postproc.vol_applied ? postproc.vol_tex : postproc.texture);
+                                        glActiveTexture(GL_TEXTURE0);
+                                        glBindTexture(GL_TEXTURE_2D, scene_texture);
                                 } else if(postproc.texture) {
                                         /* Copy mode (iOS): the world was just rendered straight to the
                                            screen. Copy it into postproc.texture (reads the currently
@@ -1632,15 +2077,21 @@ void display() {
                                            isn't in GLES2), then the shader quad below redraws it graded
                                            over the same screen. If the quad pass fails for any reason,
                                            the un-graded world is already visible — no more freeze. */
+                                        glActiveTexture(GL_TEXTURE0);
                                         glBindTexture(GL_TEXTURE_2D, postproc.texture);
                                         glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, settings.window_width, settings.window_height);
+                                }
+                                if(bloom_texture) {
+                                        glActiveTexture(GL_TEXTURE1);
+                                        glBindTexture(GL_TEXTURE_2D, bloom_texture);
+                                        glActiveTexture(GL_TEXTURE0);
                                 }
 
                                 if(postproc.shader) {
                                         // derive final shader factors on CPU once per frame
                                         float e = 1.0F + settings.exposure / 100.0F;
                                         float ct = 1.0F + settings.contrast / 100.0F;
-                                        glUseProgram(postproc.shader);
+                                        glx_use_program(postproc.shader);
                                         glUniform1f(postproc.uni_pp_sat, 1.0F + settings.saturation / 100.0F); // pp_sat
                                         glUniform1f(postproc.uni_pp_scale, e * ct);                            // pp_scale
                                         glUniform1f(postproc.uni_pp_bias, 0.5F * (1.0F - ct));                  // pp_bias
@@ -1648,10 +2099,14 @@ void display() {
                                         glUniform1f(postproc.uni_pp_ca_strength,
                                                     settings.chromatic_aberration ? settings.chromatic_aberration_strength * 0.01F : 0.0F);
                                         glUniform1f(postproc.uni_pp_filmic, settings.filmic_tonemapping ? 1.0F : 0.0F);
+                                        glUniform1f(postproc.uni_pp_bloom, bloom_postproc ? settings.bloom_strength : 0.0F);
+                                        glUniform1f(postproc.uni_pp_bloom_threshold, settings.bloom_threshold);
+                                        glUniform1f(postproc.uni_pp_bloom_separate, bloom_texture ? 1.0F : 0.0F);
+                                        glUniform2f(postproc.uni_pp_texel, 1.0F / settings.window_width, 1.0F / settings.window_height);
                                         glUniform1f(postproc.uni_pp_dmg, damagefx_vignette()); // pp_dmg
 
-#if defined(OPENGL_ES)
-                                        if(gles_version >= 2) {
+#if defined(GLX_PROGRAMMABLE)
+                                        if(glx_version) {
                                                 glx_draw_screen_quad();
                                         } else {
 #else
@@ -1662,19 +2117,34 @@ void display() {
                                         glTexCoord2f(0.0F, 1.0F); glVertex2f(0.0F, (float)settings.window_height);
                                         glEnd();
 #endif
-#if defined(OPENGL_ES)
+#if defined(GLX_PROGRAMMABLE)
                                         }
 #endif
 
-                                        glUseProgram(0);
+                                        glx_use_program(0);
                                 }
 
-                                glBindTexture(GL_TEXTURE_2D, 0);
+                                /* Clear the newly presented depth buffer before restoring
+                                   every state changed by the post-process pipeline. */
                                 glDepthMask(GL_TRUE);
                                 glClear(GL_DEPTH_BUFFER_BIT);
-                                glEnable(GL_DEPTH_TEST);
-                                if(blend_was_on)
-                                        glEnable(GL_BLEND);
+                                glDepthMask(depth_mask_was_on);
+                                glBlendFuncSeparate((GLenum)previous_blend_src_rgb, (GLenum)previous_blend_dst_rgb,
+                                                    (GLenum)previous_blend_src_alpha, (GLenum)previous_blend_dst_alpha);
+                                glBlendEquationSeparate((GLenum)previous_blend_equation_rgb,
+                                                        (GLenum)previous_blend_equation_alpha);
+                                if(depth_test_was_on) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
+                                if(blend_was_on) glEnable(GL_BLEND); else glDisable(GL_BLEND);
+                                if(scissor_was_on) glEnable(GL_SCISSOR_TEST); else glDisable(GL_SCISSOR_TEST);
+                                if(cull_was_on) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);
+                                glActiveTexture(GL_TEXTURE1);
+                                glBindTexture(GL_TEXTURE_2D, (GLuint)previous_texture1);
+                                glActiveTexture(GL_TEXTURE0);
+                                glBindTexture(GL_TEXTURE_2D, (GLuint)previous_texture0);
+                                glActiveTexture((GLenum)previous_active_texture);
+                                glx_use_program((GLuint)previous_program);
+                                glViewport(previous_viewport[0], previous_viewport[1],
+                                           previous_viewport[2], previous_viewport[3]);
 
                                 memcpy(matrix_projection, saved_proj2, sizeof(mat4));
                                 memcpy(matrix_view, saved_view2, sizeof(mat4));
@@ -1815,18 +2285,14 @@ void display() {
                         float y = (float)settings.window_height - margin * ease;
                         float alpha = t <= fade_start ? 1.0F : 1.0F - (t - fade_start) / (1.0F - fade_start);
 
-                glEnable(GL_BLEND);
-                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-#if !defined(OPENGL_ES)
-                glEnable(GL_TEXTURE_2D);
-#endif
-                glBindTexture(GL_TEXTURE_2D, screenshot_anim.texture);
-                glColor4f(1.0F, 1.0F, 1.0F, alpha);
-                texture_draw_empty(x, y, w, h);
-#if !defined(OPENGL_ES)
-                glDisable(GL_TEXTURE_2D);
-#endif
-                        glLineWidth(2.0F);
+                        glEnable(GL_BLEND);
+                        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                        glColor4f(1.0F, 1.0F, 1.0F, alpha);
+                        struct texture screenshot_texture = {.texture_id = (GLuint)screenshot_anim.texture};
+                        texture_draw_sector(&screenshot_texture, x, y, w, h, 0.0F, 0.0F, 1.0F, 1.0F);
+                        glEnable(GL_BLEND);
+                        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                        glx_set_line_width(2.0F);
                         glColor4f(1.0F, 1.0F, 1.0F, alpha);
                         glx_draw_line_2d(x, y, x + w, y);
                         glx_draw_line_2d(x + w, y, x + w, y - h);
@@ -1846,19 +2312,26 @@ void init() {
         glEnable(GL_CULL_FACE);
         glCullFace(GL_BACK);
         glFrontFace(GL_CCW);
+#ifndef OPENGL_CORE
 #ifdef OPENGL_ES
         glHint(GL_PERSPECTIVE_CORRECTION_HINT, GL_FASTEST);
 #else
         glHint(GL_PERSPECTIVE_CORRECTION_HINT, GL_NICEST);
 #endif
+#endif
         glClearDepth(1.0F);
         glDepthFunc(GL_LEQUAL);
+#ifndef OPENGL_CORE
         glShadeModel(GL_SMOOTH);
         glDisable(GL_FOG);
+#endif
 
         map_init();
 
         glx_init();
+        lighting_init();
+        shadow_init();
+        water_init();
 
         font_init();
         player_init();
@@ -2203,8 +2676,17 @@ void deinit() {
         recorder_shutdown();
         rpc_deinit();
         ping_deinit();
+        postproc_release_all();
+        /* Stop the reflection worker before network teardown can release or
+           replace map storage it may be reading. */
+        water_deinit();
         if(network_connected)
                 network_disconnect();
+        glowing_blocks_deinit();
+        lighting_deinit();
+        shadow_deinit();
+        texture_blocks_release_materials();
+        glx_deinit();
         window_deinit();
 }
 
@@ -2306,7 +2788,7 @@ int main(int argc, char** argv) {
         settings.shadow_entities = 0;
         settings.ambient_occlusion = 1;
         settings.ao_multiplier = 1.0F;
-        settings.shadow_quality = 1; /* realistic directional shadows from blocks */
+        settings.shadow_quality = 1; /* directional terrain shadows */
         settings.shadow_intensity = 0.40F;
         settings.sky_gradient = 0;
         settings.sky_gradient_intensity = 0.5F;
@@ -2349,6 +2831,7 @@ int main(int argc, char** argv) {
         settings.invert_y = 0;
         settings.smooth_fog = 0;
         settings.water_shader = 1;
+        settings.particle_animations = 1;
         settings.camera_fov = CAMERA_DEFAULT_FOV;
         settings.rifle_ads_fov = CAMERA_DEFAULT_FOV;
         settings.shotgun_ads_fov = CAMERA_DEFAULT_FOV;
@@ -2380,9 +2863,18 @@ int main(int argc, char** argv) {
            client keeps the original BetterSpades fast render path. */
         settings.chromatic_aberration = 1; /* edge chromatic fringe, on by default */
         settings.chromatic_aberration_strength = 1.5F;
-        /* Post-processing features on by default: filmic tone mapping and
-           chromatic aberration are part of the intended look. */
+        /* Filmic tone mapping and chromatic aberration retain the established
+           client defaults. HDR and multipass bloom are completed opt-in effects
+           so compatibility renderers keep their proven default cost profile. */
         settings.filmic_tonemapping = 1;
+        settings.hdr_rendering = 0;
+        settings.bloom = 0;
+        settings.bloom_strength = 0.35F;
+        settings.bloom_threshold = 0.8F;
+        settings.dynamic_lights = 1;
+        settings.flash_lights = 1;
+        settings.tracer_lights = 1;
+        settings.dynamic_light_intensity = 3.0F;
         settings.chat_mention_r = 255;
         settings.chat_mention_g = 255;
         /* Movement-feel / network smoothing defaults: all on, each can be
@@ -2496,10 +2988,22 @@ int main(int argc, char** argv) {
         window_fromsettings();
 
 #ifndef OPENGL_ES
-        if(glewInit())
+#ifdef OPENGL_CORE
+        /* GLEW otherwise filters extension entry points that are exposed by a
+           strict Core context without appearing in the legacy extension list. */
+        glewExperimental = GL_TRUE;
+#endif
+        if(glewInit()) {
+#ifdef OPENGL_CORE
+                log_fatal("Could not load the OpenGL 3.3 Core entry points");
+                window_deinit();
+                exit(1);
+#else
                 log_error("Could not load extended OpenGL functions!");
-        else
+#endif
+        } else {
                 log_debug("GLEW initialized successfully");
+        }
 #endif
 
         log_info("Vendor: %s", glGetString(GL_VENDOR));
@@ -2663,44 +3167,48 @@ int main(int argc, char** argv) {
 #ifndef OPENGL_ES
                 if(recorder_is_flashing()) {
                         glColor4f(0.0F, 1.0F, 0.0F, 0.5F);
-                        glLineWidth(5.0F);
-                        glBegin(GL_LINE_LOOP);
-                        glVertex2f(0.0F, 0.0F);
-                        glVertex2f((float)settings.window_width, 0.0F);
-                        glVertex2f((float)settings.window_width, (float)settings.window_height);
-                        glVertex2f(0.0F, (float)settings.window_height);
-                        glEnd();
-                        glLineWidth(1.0F);
+                        glx_set_line_width(5.0F);
+                        glx_draw_line_2d(0.0F, 0.0F, (float)settings.window_width, 0.0F);
+                        glx_draw_line_2d((float)settings.window_width, 0.0F,
+                                         (float)settings.window_width, (float)settings.window_height);
+                        glx_draw_line_2d((float)settings.window_width, (float)settings.window_height,
+                                         0.0F, (float)settings.window_height);
+                        glx_draw_line_2d(0.0F, (float)settings.window_height, 0.0F, 0.0F);
+                        glx_set_line_width(1.0F);
                 }
                 if(recorder_is_error_flashing()) {
                         glColor4f(1.0F, 0.3F, 0.0F, 0.5F);
-                        glLineWidth(5.0F);
-                        glBegin(GL_LINE_LOOP);
-                        glVertex2f(0.0F, 0.0F);
-                        glVertex2f((float)settings.window_width, 0.0F);
-                        glVertex2f((float)settings.window_width, (float)settings.window_height);
-                        glVertex2f(0.0F, (float)settings.window_height);
-                        glEnd();
-                        glLineWidth(1.0F);
+                        glx_set_line_width(5.0F);
+                        glx_draw_line_2d(0.0F, 0.0F, (float)settings.window_width, 0.0F);
+                        glx_draw_line_2d((float)settings.window_width, 0.0F,
+                                         (float)settings.window_width, (float)settings.window_height);
+                        glx_draw_line_2d((float)settings.window_width, (float)settings.window_height,
+                                         0.0F, (float)settings.window_height);
+                        glx_draw_line_2d(0.0F, (float)settings.window_height, 0.0F, 0.0F);
+                        glx_set_line_width(1.0F);
                 }
  
                  if(recorder_is_recording_active()) {
                          float blink = sin(window_time() * 3.0F) * 0.5F + 0.5F;
                          if(blink > 0.0F) {
+#ifndef OPENGL_CORE
                                  glDisable(GL_TEXTURE_2D);
+#endif
                                  glEnable(GL_BLEND);
                                  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
                                  glColor4f(1.0F, 0.0F, 0.0F, 0.7F);
-                                 glLineWidth(2.0F);
-                                 glBegin(GL_LINE_LOOP);
-                                 glVertex2f(0.5F, 0.5F);
-                                 glVertex2f((float)settings.window_width - 0.5F, 0.5F);
-                                 glVertex2f((float)settings.window_width - 0.5F, (float)settings.window_height - 0.5F);
-                                 glVertex2f(0.5F, (float)settings.window_height - 0.5F);
-                                 glEnd();
-                                 glLineWidth(1.0F);
+                                 glx_set_line_width(2.0F);
+                                 float rx = (float)settings.window_width - 0.5F;
+                                 float ry = (float)settings.window_height - 0.5F;
+                                 glx_draw_line_2d(0.5F, 0.5F, rx, 0.5F);
+                                 glx_draw_line_2d(rx, 0.5F, rx, ry);
+                                 glx_draw_line_2d(rx, ry, 0.5F, ry);
+                                 glx_draw_line_2d(0.5F, ry, 0.5F, 0.5F);
+                                 glx_set_line_width(1.0F);
                                  glDisable(GL_BLEND);
+#ifndef OPENGL_CORE
                                  glEnable(GL_TEXTURE_2D);
+#endif
                          }
                  }
 #endif

@@ -32,6 +32,8 @@
 #include "file.h"
 #include "common.h"
 #include "glx.h"
+#include "lighting.h"
+#include "glowing_blocks.h"
 #include "list.h"
 #include "matrix.h"
 #include "texture.h"
@@ -536,8 +538,10 @@ static int chat_input_offset_at(double sx_pixel, double sy_pixel) {
 }
 
 static int mouse_seed_pending = 1;
+static void hud_colorpicker_close(int restore_cursor);
 
 static void hud_ingame_init() {
+        hud_colorpicker_close(0); /* never come back to a half-open picker */
         window_textinput(0);
         chat_input_mode = CHAT_NO_INPUT;
         window_mousemode(WINDOW_CURSOR_DISABLED);
@@ -1300,7 +1304,7 @@ glColor3ub(settings.chat_mention_r, settings.chat_mention_g, settings.chat_menti
 } else {
 glColor3ub(red(chat_color[channel][idx]), green(chat_color[channel][idx]), blue(chat_color[channel][idx]));
 }
-glLineWidth(3);
+glx_set_line_width(3);
 if(channel == 0) {
 glx_draw_line_2d(x - 11.F, y + settings.chat_spacing / 2.F + 1.F,
                   x - 11.F, floor(y - 16.F - settings.chat_spacing / 2 + 1.F));
@@ -1308,7 +1312,7 @@ glx_draw_line_2d(x - 11.F, y + settings.chat_spacing / 2.F + 1.F,
 glx_draw_line_2d(x - 11.F, y + 2.F,
                   x - 11.F, y - 16.F);
 }
-glLineWidth(1);
+glx_set_line_width(1);
 glColor3ub(255, 255, 255);
 }
 
@@ -1367,7 +1371,7 @@ static void demo_playback_render_overlay(float scalef) {
                 progress = demo_scrub_target / DemoPlaybackState.duration;
         if(progress < 0.0f) progress = 0.0f;
         if(progress > 1.0f) progress = 1.0f;
-#if !defined(OPENGL_ES)
+#if !defined(OPENGL_ES) && !defined(OPENGL_CORE)
         glDisable(GL_TEXTURE_2D);
 #endif
         glEnable(GL_BLEND);
@@ -1377,7 +1381,7 @@ static void demo_playback_render_overlay(float scalef) {
         glColor4f(0.25f, 0.72f, 1.0f, 0.85f);
         glx_draw_quad_2d(bar_x, bar_y, bar_w * progress, bar_h);
         glDisable(GL_BLEND);
-#if !defined(OPENGL_ES)
+#if !defined(OPENGL_ES) && !defined(OPENGL_CORE)
         glEnable(GL_TEXTURE_2D);
 #endif
         float text_h = 13.0f * scalef;
@@ -1436,14 +1440,376 @@ static void hud_draw_target_at(float x, float y, float size) {
         texture_draw(&texture_target, ceilf(x - size * 0.5F), ceilf(y + size * 0.5F), size, size);
 }
 
+/* Fixed-function texture combiners do not exist on Core or GLES2. Their
+   programmable texture helpers already apply vertex colour modulation. */
+static void hud_fixed_texture_modulate(void) {
+#ifndef OPENGL_CORE
+#ifdef OPENGL_ES
+        if(gles_version >= 2)
+                return;
+#endif
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+#endif
+}
+
+/* ── Block colour selector (C with the block tool) ───────────────────────────
+   HSV picker on a grey panel: preview swatch + saturation/value square +
+   hue slider + session glowing-block placement toggle. While open the cursor is free,
+   mouse-look and mouse buttons are routed to the picker, and the colour is
+   applied locally while dragging and sent to the server on mouse release
+   (not every mouse move, which would flood PACKET_SETCOLOR). */
+static int cp_open = 0;
+static int cp_drag = 0; /* 0 none, 1 SV square, 2 hue slider */
+static int cp_dirty = 0; /* colour changed locally but not yet sent */
+static float cp_h = 0.0F, cp_s = 0.0F, cp_v = 0.0F; /* h 0..360, s/v 0..1 */
+static float cp_tex_built_hue = -1.0F;
+static int cp_tex_ready = 0;
+static struct texture cp_tex_sv, cp_tex_hue, cp_tex_disc;
+static unsigned int cp_buf_sv[256 * 256];
+static unsigned int cp_buf_hue[256 * 4];
+static unsigned int cp_buf_disc[64 * 64];
+
+/* The project-wide rgba macro shifts a signed int into bit 31. Keep this new
+   picker path well-defined for opaque and high-alpha pixels. */
+static unsigned int cp_rgba(int r, int g, int b, int a) {
+        return (unsigned int)(r & 0xFF)
+                | (unsigned int)(g & 0xFF) << 8
+                | (unsigned int)(b & 0xFF) << 16
+                | (unsigned int)(a & 0xFF) << 24;
+}
+
+struct cp_layout {
+        float u;                    /* scale unit */
+        float px, py, pw, ph;       /* panel, screen coords (y down) */
+        float prev_x, area_y, prev_w, area_h;
+        float sv_x, sv_w;
+        float hue_x, hue_y, hue_w, hue_h;
+        float glow_x, glow_y, glow_w, glow_h;
+};
+
+static void cp_hsv_to_rgb(float h, float s, float v, int* r, int* g, int* b) {
+        h = fmodf(h, 360.0F);
+        if(h < 0.0F) h += 360.0F;
+        float c = v * s;
+        float x = c * (1.0F - fabsf(fmodf(h / 60.0F, 2.0F) - 1.0F));
+        float m = v - c;
+        float rf, gf, bf;
+        if(h < 60.0F) { rf = c; gf = x; bf = 0; }
+        else if(h < 120.0F) { rf = x; gf = c; bf = 0; }
+        else if(h < 180.0F) { rf = 0; gf = c; bf = x; }
+        else if(h < 240.0F) { rf = 0; gf = x; bf = c; }
+        else if(h < 300.0F) { rf = x; gf = 0; bf = c; }
+        else { rf = c; gf = 0; bf = x; }
+        *r = (int)((rf + m) * 255.0F + 0.5F);
+        *g = (int)((gf + m) * 255.0F + 0.5F);
+        *b = (int)((bf + m) * 255.0F + 0.5F);
+}
+
+/* Keeps the previous hue for greys (s == 0) and black (v == 0) so opening the
+   picker on a grey block doesn't reset the hue slider to red. */
+static void cp_rgb_to_hsv(int r, int g, int b, float* h, float* s, float* v) {
+        float rf = r / 255.0F, gf = g / 255.0F, bf = b / 255.0F;
+        float mx = fmaxf(rf, fmaxf(gf, bf)), mn = fminf(rf, fminf(gf, bf));
+        float d = mx - mn;
+        *v = mx;
+        *s = (mx > 0.0F) ? d / mx : 0.0F;
+        if(d > 0.0F) {
+                float hh;
+                if(mx == rf) hh = 60.0F * fmodf((gf - bf) / d, 6.0F);
+                else if(mx == gf) hh = 60.0F * ((bf - rf) / d + 2.0F);
+                else hh = 60.0F * ((rf - gf) / d + 4.0F);
+                if(hh < 0.0F) hh += 360.0F;
+                *h = hh;
+        }
+}
+
+static void cp_layout_get(struct cp_layout* l) {
+        float u = fminf(settings.window_height / 900.0F, settings.window_width / 760.0F);
+        l->u = u;
+        /* Panel = colour area + hue slider + padding; the padding is large
+           enough that the knobs (radius 12u) never stick out of the grey. */
+        float pad = 16.0F * u;
+        float cw = 650.0F * u;
+        l->area_h = 228.0F * u;
+        l->hue_h = 8.0F * u;
+        l->glow_h = 30.0F * u;
+        l->pw = cw + 2.0F * pad;
+        l->ph = pad + l->area_h + 24.0F * u + l->hue_h
+                + 22.0F * u + l->glow_h + pad + 12.0F * u;
+        l->px = (settings.window_width - l->pw) * 0.5F;
+        l->py = (settings.window_height - l->ph) * 0.5F;
+        l->area_y = l->py + pad;
+        l->prev_x = l->px + pad;
+        l->prev_w = 204.0F * u;
+        l->sv_x = l->prev_x + l->prev_w;
+        l->sv_w = cw - l->prev_w;
+        l->hue_x = l->prev_x + 32.0F * u;
+        l->hue_w = cw - 64.0F * u;
+        l->hue_y = l->area_y + l->area_h + 24.0F * u;
+        l->glow_w = 220.0F * u;
+        l->glow_x = l->px + (l->pw - l->glow_w) * 0.5F;
+        l->glow_y = l->hue_y + l->hue_h + 22.0F * u;
+}
+
+static void cp_textures_init(void) {
+        if(cp_tex_ready)
+                return;
+        for(int x = 0; x < 256; x++) {
+                int r, g, b;
+                cp_hsv_to_rgb(x / 255.0F * 360.0F, 1.0F, 1.0F, &r, &g, &b);
+                for(int y = 0; y < 4; y++)
+                        cp_buf_hue[y * 256 + x] = cp_rgba(r, g, b, 255);
+        }
+        /* Anti-aliased white disc for the knobs and rounded slider ends. */
+        for(int y = 0; y < 64; y++) {
+                for(int x = 0; x < 64; x++) {
+                        float dx = x + 0.5F - 32.0F, dy = y + 0.5F - 32.0F;
+                        float a = 31.0F - sqrtf(dx * dx + dy * dy);
+                        a = fmaxf(0.0F, fminf(1.0F, a + 0.5F));
+                        cp_buf_disc[y * 64 + x] = cp_rgba(255, 255, 255, (int)(a * 255.0F));
+                }
+        }
+        texture_create_buffer(&cp_tex_hue, 256, 4, (unsigned char*)cp_buf_hue, 1);
+        texture_filter(&cp_tex_hue, TEXTURE_FILTER_LINEAR);
+        texture_filter(&cp_tex_hue, TEXTURE_WRAP_CLAMP);
+        texture_create_buffer(&cp_tex_disc, 64, 64, (unsigned char*)cp_buf_disc, 1);
+        texture_filter(&cp_tex_disc, TEXTURE_FILTER_LINEAR);
+        texture_filter(&cp_tex_disc, TEXTURE_WRAP_CLAMP);
+        texture_create_buffer(&cp_tex_sv, 256, 256, (unsigned char*)cp_buf_sv, 1);
+        cp_tex_ready = 1;
+        cp_tex_built_hue = -1.0F;
+}
+
+/* Rebuild the saturation/value square only when the hue actually changed. */
+static void cp_textures_update(void) {
+        if(cp_tex_built_hue == cp_h)
+                return;
+        cp_tex_built_hue = cp_h;
+        for(int y = 0; y < 256; y++) {
+                for(int x = 0; x < 256; x++) {
+                        int r, g, b;
+                        cp_hsv_to_rgb(cp_h, x / 255.0F, 1.0F - y / 255.0F, &r, &g, &b);
+                        cp_buf_sv[y * 256 + x] = cp_rgba(r, g, b, 255);
+                }
+        }
+        texture_create_buffer(&cp_tex_sv, 256, 256, (unsigned char*)cp_buf_sv, 0);
+        texture_filter(&cp_tex_sv, TEXTURE_FILTER_LINEAR);
+        texture_filter(&cp_tex_sv, TEXTURE_WRAP_CLAMP);
+}
+
+static void cp_apply_local(void) {
+        int r, g, b;
+        cp_hsv_to_rgb(cp_h, cp_s, cp_v, &r, &g, &b);
+        players[local_player_id].block.red = r;
+        players[local_player_id].block.green = g;
+        players[local_player_id].block.blue = b;
+        cp_dirty = 1;
+}
+
+static void cp_commit(void) {
+        if(cp_dirty) {
+                network_updateColor();
+                cp_dirty = 0;
+        }
+}
+
+static void hud_colorpicker_open(void) {
+        cp_rgb_to_hsv(players[local_player_id].block.red, players[local_player_id].block.green,
+                      players[local_player_id].block.blue, &cp_h, &cp_s, &cp_v);
+        cp_open = 1;
+        cp_drag = 0;
+        cp_dirty = 0;
+        /* Release anything held so the tool doesn't keep acting behind the UI. */
+        button_map[0] = button_map[1] = button_map[2] = 0;
+        local_player_drag_active = 0;
+        window_mousemode(WINDOW_CURSOR_ENABLED);
+}
+
+static void hud_colorpicker_close(int restore_cursor) {
+        if(!cp_open)
+                return;
+        cp_commit();
+        cp_open = 0;
+        cp_drag = 0;
+        button_map[0] = button_map[1] = button_map[2] = 0;
+        if(restore_cursor) {
+                window_mousemode(WINDOW_CURSOR_DISABLED);
+                mouse_seed_pending = 1; /* no camera jump from the cursor travel */
+        }
+}
+
+/* Update H/S/V from a cursor position for the active drag target. */
+static void cp_drag_to(double x, double y) {
+        struct cp_layout l;
+        cp_layout_get(&l);
+        if(cp_drag == 1) {
+                cp_s = fmaxf(0.0F, fminf(1.0F, (float)(x - l.sv_x) / l.sv_w));
+                cp_v = 1.0F - fmaxf(0.0F, fminf(1.0F, (float)(y - l.area_y) / l.area_h));
+                cp_apply_local();
+        } else if(cp_drag == 2) {
+                float t = fmaxf(0.0F, fminf(1.0F, (float)(x - l.hue_x) / l.hue_w));
+                cp_h = t * 360.0F;
+                if(cp_h >= 360.0F) cp_h = 359.999F; /* keep the 360 == 0 knob on the right */
+                cp_apply_local();
+        }
+}
+
+static void cp_mouseclick(double x, double y, int button, int action) {
+        if(button != WINDOW_MOUSE_LMB)
+                return;
+        if(action == WINDOW_RELEASE) {
+                if(cp_drag)
+                        cp_commit();
+                cp_drag = 0;
+                return;
+        }
+        if(action != WINDOW_PRESS)
+                return;
+        struct cp_layout l;
+        cp_layout_get(&l);
+        float knob = 14.0F * l.u; /* generous grab zone around the thin slider */
+        if(x >= l.glow_x && x <= l.glow_x + l.glow_w
+           && y >= l.glow_y && y <= l.glow_y + l.glow_h) {
+                glowing_blocks_set_placement_enabled(!glowing_blocks_placement_enabled());
+                return;
+        }
+        if(x >= l.sv_x && x <= l.sv_x + l.sv_w && y >= l.area_y && y <= l.area_y + l.area_h) {
+                cp_drag = 1;
+        } else if(x >= l.hue_x - knob && x <= l.hue_x + l.hue_w + knob
+                  && y >= l.hue_y + l.hue_h * 0.5F - knob && y <= l.hue_y + l.hue_h * 0.5F + knob) {
+                cp_drag = 2;
+        } else if(x < l.px || x > l.px + l.pw || y < l.py || y > l.py + l.ph) {
+                hud_colorpicker_close(1); /* click outside the panel closes it */
+                return;
+        }
+        cp_drag_to(x, y);
+}
+
+/* Screen-space (y down) rectangle helper on top of the GL-space HUD. */
+static void cp_rect(float x, float y, float w, float h) {
+        texture_draw_empty(x, settings.window_height - y, w, h);
+}
+
+static void cp_tex(struct texture* t, float x, float y, float w, float h) {
+        texture_draw(t, x, settings.window_height - y, w, h);
+}
+
+static void cp_disc(float cx, float cy, float r) {
+        cp_tex(&cp_tex_disc, cx - r, cy - r, r * 2.0F, r * 2.0F);
+}
+
+static void hud_colorpicker_render(void) {
+        if(!cp_open)
+                return;
+
+        int r, g, b;
+        cp_hsv_to_rgb(cp_h, cp_s, cp_v, &r, &g, &b);
+        /* Follow colour changes made elsewhere while open (E to sample a
+           block, palette arrow keys, server) instead of showing stale values. */
+        struct Player* lp = &players[local_player_id];
+        if(!cp_drag && (lp->block.red != r || lp->block.green != g || lp->block.blue != b)) {
+                cp_rgb_to_hsv(lp->block.red, lp->block.green, lp->block.blue, &cp_h, &cp_s, &cp_v);
+                cp_hsv_to_rgb(cp_h, cp_s, cp_v, &r, &g, &b);
+                cp_dirty = 0; /* whoever changed it already handled sending it */
+        }
+
+        cp_textures_init();
+        cp_textures_update();
+
+        struct cp_layout l;
+        cp_layout_get(&l);
+        float u = l.u;
+
+        hud_fixed_texture_modulate();
+        glDisable(GL_DEPTH_TEST);
+
+        /* Even neutral-grey backing sized to the picker, with a thin darker
+           border, so the colours stay readable whatever the world behind is. */
+        glColor3ub(0x2E, 0x2E, 0x2E);
+        cp_rect(l.px - 1.0F, l.py - 1.0F, l.pw + 2.0F, l.ph + 2.0F);
+        glColor3ub(0x5A, 0x5A, 0x5A);
+        cp_rect(l.px, l.py, l.pw, l.ph);
+
+        /* Preview + saturation/value square. */
+        glColor3ub(r, g, b);
+        cp_rect(l.prev_x, l.area_y, l.prev_w, l.area_h);
+        glColor3f(1.0F, 1.0F, 1.0F);
+        cp_tex(&cp_tex_sv, l.sv_x, l.area_y, l.sv_w, l.area_h);
+
+        /* Hue slider with rounded ends. */
+        float hr = l.hue_h * 0.5F;
+        glColor3ub(255, 0, 0);
+        cp_disc(l.hue_x, l.hue_y + hr, hr);
+        cp_disc(l.hue_x + l.hue_w, l.hue_y + hr, hr);
+        glColor3f(1.0F, 1.0F, 1.0F);
+        cp_tex(&cp_tex_hue, l.hue_x, l.hue_y, l.hue_w, l.hue_h);
+
+        /* Knobs: white ring, filled with the colour they select. */
+        float kr = 12.0F * u, ring = 2.5F * u;
+        float kx = l.sv_x + cp_s * l.sv_w, ky = l.area_y + (1.0F - cp_v) * l.area_h;
+        glColor3f(1.0F, 1.0F, 1.0F);
+        cp_disc(kx, ky, kr);
+        glColor3ub(r, g, b);
+        cp_disc(kx, ky, kr - ring);
+
+        int hr_, hg_, hb_;
+        cp_hsv_to_rgb(cp_h, 1.0F, 1.0F, &hr_, &hg_, &hb_);
+        float hx = l.hue_x + cp_h / 360.0F * l.hue_w;
+        glColor3f(1.0F, 1.0F, 1.0F);
+        cp_disc(hx, l.hue_y + hr, kr);
+        glColor3ub(hr_, hg_, hb_);
+        cp_disc(hx, l.hue_y + hr, kr - ring);
+
+        /* Session-only placement mode. Turning it off stops marking future
+           blocks; already acknowledged glowing blocks remain active until they
+           are destroyed or the map/server session ends. */
+        double mouse_x, mouse_y;
+        window_mouseloc(&mouse_x, &mouse_y);
+        bool glow_enabled = glowing_blocks_placement_enabled();
+        bool glow_hover = mouse_x >= l.glow_x && mouse_x <= l.glow_x + l.glow_w
+                && mouse_y >= l.glow_y && mouse_y <= l.glow_y + l.glow_h;
+        glColor3ub(0x24, 0x24, 0x24);
+        cp_rect(l.glow_x - 1.0F, l.glow_y - 1.0F, l.glow_w + 2.0F, l.glow_h + 2.0F);
+        if(glow_enabled)
+                glColor3ub(glow_hover ? 0x3E : 0x32, glow_hover ? 0xA8 : 0x90, glow_hover ? 0x61 : 0x50);
+        else
+                glColor3ub(glow_hover ? 0x87 : 0x70, glow_hover ? 0x4B : 0x3D, glow_hover ? 0x4B : 0x3D);
+        cp_rect(l.glow_x, l.glow_y, l.glow_w, l.glow_h);
+
+        char glow_label[32];
+        snprintf(glow_label, sizeof(glow_label), "Glowing blocks: %s", glow_enabled ? "ON" : "OFF");
+        float glow_text_h = 16.0F * u;
+        /* font_render uses the glyph's GL-space top edge, so center from the
+           button top rather than treating this coordinate as a baseline. */
+        float glow_text_y = settings.window_height - l.glow_y
+                - (l.glow_h - glow_text_h) * 0.5F;
+        font_select(FONT_FIXEDSYS);
+        glColor3f(1.0F, 1.0F, 1.0F);
+        font_centered(l.glow_x + l.glow_w * 0.5F, glow_text_y,
+                      glow_text_h, glow_label);
+
+        glColor3f(1.0F, 1.0F, 1.0F);
+}
+
 static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
         // window_mousemode(camera_mode==CAMERAMODE_SELECTION?WINDOW_CURSOR_ENABLED:WINDOW_CURSOR_DISABLED);
 
-        /* World/model rendering can leave GL_TEXTURE_ENV_MODE set to GL_BLEND
-           (fog) or GL_COMBINE (team colorize), which makes HUD textures ignore
-           glColor and sample incorrectly (e.g. the minimap rendered black).
-           Force the standard modulate mode for all HUD drawing. */
-        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+        /* Fixed-function world/model rendering can leave the texture combiner
+           in a non-HUD mode. Restore standard modulation for legacy drawing. */
+        hud_fixed_texture_modulate();
+
+        /* Close the colour selector as soon as it no longer applies: tool
+           switched, died, became spectator, chat/menu/team screen opened. */
+        if(cp_open) {
+                struct Player* lp = &players[local_player_id];
+                if(show_exit) {
+                        hud_colorpicker_close(0); /* menu owns the cursor now */
+                } else if(lp->held_item != TOOL_BLOCK || !lp->alive || lp->team == TEAM_SPECTATOR
+                          || camera_mode != CAMERAMODE_FPS || screen_current != SCREEN_NONE
+                          || chat_input_mode != CHAT_NO_INPUT || network_map_transfer) {
+                        hud_colorpicker_close(1);
+                }
+        }
 
         hud_active->render_localplayer = players[local_player_id].team != TEAM_SPECTATOR
                 && (screen_current == SCREEN_NONE || camera_mode != CAMERAMODE_FPS);
@@ -1474,11 +1840,6 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                         particle_stats_last_total = particle_stats_total_created;
                         particle_stats_last_time = now;
                 }
-        }
-
-        if(cameracontroller_yclamp) {
-                glColor3f(1.0F, 1.0F, 1.0F);
-                hud_font_render(8.F, settings.window_height / 2 - 4.F, 16.0F, "Y-Clamp enabled", .5f);
         }
 
         if(window_key_down(WINDOW_KEY_NETWORKSTATS)) {
@@ -1576,8 +1937,10 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
 
                 font_select(FONT_FIXEDSYS);
         } else {
-                if(window_key_down(WINDOW_KEY_HIDEHUD))
+                if(window_key_down(WINDOW_KEY_HIDEHUD)) {
+                        hud_colorpicker_render(); /* still usable with the HUD hidden */
                         return;
+                }
 
                 /* Floating damage numbers: drawn early in the 2D pass so chat/
                    scoreboard/other HUD elements still layer on top of them. */
@@ -1893,7 +2256,10 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                            && cameracontroller_bodyview_mode)) {
                         glColor3f(1.0F, 1.0F, 1.0F);
 
-                        if(settings.iron_sight && players[local_id].held_item == TOOL_GUN && players[local_id].input.buttons.rmb
+                        /* camera_ads_scope_progress stays > 0 for 150 ms after RMB is
+                           released, so the scope shrinks away instead of vanishing. */
+                        if(settings.iron_sight && players[local_id].held_item == TOOL_GUN
+                           && (players[local_id].input.buttons.rmb || camera_ads_scope_progress > 0.0F)
                            && players[local_id].alive) {
                                 struct texture* zoom;
                                 switch(players[local_id].weapon) {
@@ -1910,10 +2276,8 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 float size_scale = 1.0F;
 
                                 if(settings.ads_zoom_animation) {
-                                        float ads_time = window_time() - players[local_id].input.buttons.rmb_start;
-                                        float ads_scale = fmin(ads_time / 0.15F, 1.0F);
-                                        // Use smoothstep for smoother zoom-in animation
-                                        float ads_scale_smooth = ads_scale * ads_scale * (3.0F - 2.0F * ads_scale);
+                                        // Smoothstepped 0..1, animates on press AND release
+                                        float ads_scale_smooth = camera_ads_scope_progress;
                                         current_zoom_factor = 1.0F + (zoom_factor - 1.0F) * ads_scale_smooth;
                                         // Scale the image size from 0.5x to 1.0x during ADS transition
                                         size_scale = 0.5F + 0.5F * ads_scale_smooth;
@@ -2031,6 +2395,24 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 texture_draw(&texture_color_selection, palette_left(), palette_top(),
                                                          palette_size(), palette_size());
                                 glColor3f(1.0F, 1.0F, 1.0F);
+#ifndef USE_TOUCH
+                                /* Hint above the palette for the advanced colour selector
+                                   (only for your own player, and not while it's open). */
+                                if(is_local && camera_mode == CAMERAMODE_FPS && !cp_open) {
+                                        char cp_key[32] = "C";
+                                        struct config_key_pair* ck = config_key(WINDOW_KEY_COLORPICKER);
+                                        if(ck)
+                                                window_keyname(ck->def, cp_key, sizeof(cp_key));
+                                        char cp_hint[96];
+                                        snprintf(cp_hint, sizeof(cp_hint), "Press %s to open advanced selector", cp_key);
+                                        float hs = fmaxf(10.0F, roundf(palette_cell() * 0.6F));
+                                        font_select(FONT_FIXEDSYS);
+                                        glColor3f(1.0F, 1.0F, 1.0F);
+                                        hud_font_render_outlined(
+                                                palette_left() + (palette_size() - font_length(hs, cp_hint)) * 0.5F,
+                                                palette_top() + hs + 4.0F, hs, cp_hint, 0.8F);
+                                }
+#endif
                         }
 
                         if(settings.show_live_player_count) {
@@ -2226,7 +2608,7 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
 
                                                 color = mu_accent_color(1.F, 255);
                                                 glColor4ub(color.r, color.g, color.b, color.a);
-                                                glLineWidth(3);
+                                                glx_set_line_width(3);
                                                 glx_draw_line_2d(3.0F, 90.F, chat_width + 19.F, 90.F);
                                         }
 
@@ -2688,10 +3070,10 @@ texture_draw_empty_rotated(settings.window_width - 143 * scalef + tent2_x * map_
 
                 color = mu_accent_color(1.F, 255);
                 glColor3ub(color.r, color.g, color.b);
-                glLineWidth(3);
+                glx_set_line_width(3);
                 glx_draw_line_2d(settings.window_width - 5.F, floor(settings.window_height / 2.F - 18.F + 84.F),
                                   settings.window_width - 5.F, floor(settings.window_height / 2.F - 18.F + 48.F));
-                glLineWidth(1);
+                glx_set_line_width(1);
                 glColor3ub(255, 255, 255);
                 glDisable(GL_BLEND);
 
@@ -2705,7 +3087,7 @@ texture_draw_empty_rotated(settings.window_width - 143 * scalef + tent2_x * map_
         }
 
 #ifdef USE_TOUCH
-        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+        hud_fixed_texture_modulate();
         glColor3f(1.0F, 1.0F, 1.0F);
         if(camera_mode == CAMERAMODE_FPS || camera_mode == CAMERAMODE_SPECTATOR) {
                 texture_draw_rotated(&texture_ui_joystick, settings.window_height * 0.3F, settings.window_height * 0.3F,
@@ -2780,6 +3162,7 @@ texture_draw_empty_rotated(settings.window_width - 143 * scalef + tent2_x * map_
                 }
         }
 #endif
+        hud_colorpicker_render(); /* last: on top of every other HUD element */
         demo_playback_render_overlay(scalef);
 }
 
@@ -2832,6 +3215,13 @@ static void hud_ingame_mouselocation(double x, double y) {
                 return;
         }
         if(show_exit) return;
+
+        /* Colour selector open: the cursor is free, no mouse-look. */
+        if(cp_open) {
+                if(cp_drag)
+                        cp_drag_to(x, y);
+                return;
+        }
 
         /* Skip first delta: cursor was free in another HUD. */
         if(mouse_seed_pending) {
@@ -2912,13 +3302,18 @@ void hud_ingame_mouseclick(double x, double y, int button, int action, int mods)
         }
         if(show_exit) return;
 
+        /* Colour selector open: clicks go to it, never to the tool. */
+        if(cp_open) {
+                cp_mouseclick(x, y, button, action);
+                return;
+        }
+
         if(button == WINDOW_MOUSE_LMB) {
                 button_map[0] = (action == WINDOW_PRESS);
         }
         if(button == WINDOW_MOUSE_RMB) {
                 if(action == WINDOW_PRESS && players[local_player_id].held_item == TOOL_GUN && !settings.hold_down_sights
                    && !players[local_player_id].items_show) {
-                        int was_aiming = players[local_player_id].input.buttons.rmb;
                         players[local_player_id].input.buttons.rmb ^= 1;
                         if(players[local_player_id].input.buttons.rmb) {
                                 players[local_player_id].input.buttons.rmb_start = window_time();
@@ -3218,6 +3613,24 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
                                 }
                         }
 
+                        if(cp_open && !show_exit) {
+                                if(key == WINDOW_KEY_COLORPICKER || key == WINDOW_KEY_ESCAPE) {
+                                        hud_colorpicker_close(1);
+                                        return;
+                                }
+                                /* N would re-lock the cursor underneath the open picker. */
+                                if(key == WINDOW_KEY_NO)
+                                        return;
+                        } else if(key == WINDOW_KEY_COLORPICKER && !show_exit
+                                  && players[local_player_id].held_item == TOOL_BLOCK
+                                  && players[local_player_id].alive
+                                  && players[local_player_id].team != TEAM_SPECTATOR
+                                  && camera_mode == CAMERAMODE_FPS && screen_current == SCREEN_NONE
+                                  && !network_map_transfer) {
+                                hud_colorpicker_open();
+                                return;
+                        }
+
                         if(key == WINDOW_KEY_NO || (show_exit && key == WINDOW_KEY_ESCAPE)) {
                                 show_exit = 0;
                                 window_mousemode(WINDOW_CURSOR_DISABLED);
@@ -3260,6 +3673,15 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
                                 settings.minimap_zoom++;
                                 if(settings.minimap_zoom > 5)
                                         settings.minimap_zoom = 1;
+                        }
+
+                        if(key == WINDOW_KEY_FLASHLIGHT && screen_current == SCREEN_NONE
+                           && camera_mode == CAMERAMODE_FPS
+                           && players[local_player_id].connected
+                           && players[local_player_id].alive
+                           && players[local_player_id].team != TEAM_SPECTATOR) {
+                                if(lighting_flashlight_toggle())
+                                        sound_create(SOUND_LOCAL, &sound_switch, 0.0F, 0.0F, 0.0F);
                         }
 
                         if(key == WINDOW_KEY_COMMAND) {
@@ -3539,10 +3961,6 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
 
                                 window_mousemode(show_exit ? WINDOW_CURSOR_ENABLED : WINDOW_CURSOR_DISABLED);
                                 return;
-                        }
-
-                        if(players[local_player_id].team == TEAM_SPECTATOR && key == WINDOW_KEY_YCLAMP) {
-                                cameracontroller_yclamp ^= 1;
                         }
 
                         if(key == WINDOW_KEY_PICKCOLOR && players[local_player_id].held_item == TOOL_BLOCK) {
@@ -5436,12 +5854,18 @@ static void hud_settings_render(mu_Context* ctx, float scalex, float scaley) {
         }
 
         if(memcmp(&settings, &settings_tmp, sizeof(struct RENDER_OPTIONS)) != 0) {
+                int lighting_changed = settings.dynamic_lights != settings_tmp.dynamic_lights;
+                int shadow_changed = settings.shadow_quality != settings_tmp.shadow_quality
+                        || settings.shadow_intensity != settings_tmp.shadow_intensity;
+                int water_mesh_changed = !!(settings.water_shader || settings.water_waves)
+                        != !!(settings_tmp.water_shader || settings_tmp.water_waves);
                 int remesh = settings.textured_blocks != settings_tmp.textured_blocks
                         || settings.ambient_occlusion != settings_tmp.ambient_occlusion
                         || settings.greedy_meshing != settings_tmp.greedy_meshing
                         || settings.ao_multiplier != settings_tmp.ao_multiplier
-                        || settings.shadow_quality != settings_tmp.shadow_quality
-                        || settings.shadow_intensity != settings_tmp.shadow_intensity;
+                        || shadow_changed
+                        || water_mesh_changed
+                        || lighting_changed;
 
                 /* "Game width"/"Game height" are the WINDOWED size. An explicit edit
                    has to replace the size we restore when leaving fullscreen even when
@@ -5453,6 +5877,16 @@ static void hud_settings_render(mu_Context* ctx, float scalex, float scaley) {
                         window_set_windowed_size(settings_tmp.window_width, settings_tmp.window_height);
 
                 memcpy(&settings, &settings_tmp, sizeof(struct RENDER_OPTIONS));
+                if(lighting_changed || shadow_changed) {
+                        lighting_set_enabled(settings.dynamic_lights != 0);
+                        /* set_enabled() turns the option back off when this
+                           context cannot compile the lighting program. */
+                        settings_tmp.dynamic_lights = settings.dynamic_lights;
+                        if(lighting_supported())
+                                texture_blocks_prepare_materials();
+                        else
+                                texture_blocks_release_materials();
+                }
                 window_fromsettings();
                 sound_volume(settings.volume / 10.0F);
                 config_save();
@@ -5740,9 +6174,9 @@ static void hud_skins_render_overlay(float scalex, float scaley) {
            been standing. (-1,-1,-1) is the "full sun, no map position" form the
            engine already uses for the first-person weapon in main.c; it skips
            map_sunblock() entirely, so it is safe with no map loaded. Nothing to
-           restore: every world model draw calls kv6_calclight() again first, and
-           GL_LIGHT0 is only ever enabled inside kv6_render(). Only the fixed-function
-           paths are affected - the ES 2.0 kv6 shader does its own lighting. */
+           restore: every world model draw calls kv6_calclight() again first. The
+           fixed-function and strict Core model paths consume this value; the ES 2.0
+           fallback keeps its existing shader lighting behavior. */
         kv6_calclight(-1, -1, -1);
 
         glEnable(GL_SCISSOR_TEST);

@@ -81,6 +81,7 @@ static int config_glfw_to_sdl(int code) {
                 case 67:  return SDLK_c;
                 case 68:  return SDLK_d;
                 case 69:  return SDLK_e;
+                case 70:  return SDLK_f;
                 case 77:  return SDLK_m;
                 case 78:  return SDLK_n;
                 case 80:  return SDLK_p;
@@ -359,6 +360,14 @@ void config_save() {
         config_seti("client", "chromatic_aberration", settings.chromatic_aberration);
         config_setf("client", "chromatic_aberration_strength", settings.chromatic_aberration_strength);
         config_seti("client", "filmic_tonemapping", settings.filmic_tonemapping);
+        config_seti("client", "hdr_rendering", settings.hdr_rendering);
+        config_seti("client", "bloom", settings.bloom);
+        config_setf("client", "bloom_strength", settings.bloom_strength);
+        config_setf("client", "bloom_threshold", settings.bloom_threshold);
+        config_seti("client", "dynamic_lights", settings.dynamic_lights);
+        config_seti("client", "flash_lights", settings.flash_lights);
+        config_seti("client", "tracer_lights", settings.tracer_lights);
+        config_setf("client", "dynamic_light_intensity", settings.dynamic_light_intensity);
         config_seti("client", "show_live_player_count", settings.show_live_player_count);
         config_seti("client", "ads_zoom_animation", settings.ads_zoom_animation);
         config_seti("client", "auto_demo_recording", settings.auto_demo_recording);
@@ -370,6 +379,7 @@ void config_save() {
         config_seti("client", "rain", settings.rain);
         config_seti("client", "snow", settings.snow);
         config_seti("client", "rain_snow_3d", settings.rain_snow_3d);
+        config_seti("client", "particle_animations", settings.particle_animations);
         config_setf("client", "rifle_ads_fov", settings.rifle_ads_fov);
         config_setf("client", "shotgun_ads_fov", settings.shotgun_ads_fov);
         config_setf("client", "smg_ads_fov", settings.smg_ads_fov);
@@ -509,7 +519,7 @@ IMPORT_SETTING(settings.camera_movement, camera_movement, atoi(value));
                 IMPORT_SETTING(settings.disable_raw_input, disable_raw_input, atoi(value));
                 IMPORT_SETTING(settings.ui_spacing, ui_spacing, atoi(value));
                 IMPORT_SETTING(settings.ui_padding, ui_padding, atoi(value));
-                IMPORT_SETTING(settings.ao_multiplier, ao_multiplier, fmaxf(0.0F, atof(value)));
+                IMPORT_SETTING(settings.ao_multiplier, ao_multiplier, fmaxf(0.0F, fminf(5.0F, atof(value))));
                 IMPORT_SETTING(settings.shadow_quality, shadow_quality, atoi(value));
                 IMPORT_SETTING(settings.shadow_intensity, shadow_intensity, fmaxf(0.0F, fminf(1.0F, atof(value))));
                 IMPORT_SETTING(settings.sky_gradient, sky_gradient, atoi(value));
@@ -537,6 +547,15 @@ IMPORT_SETTING(settings.camera_movement, camera_movement, atoi(value));
                 IMPORT_SETTING(settings.chromatic_aberration_strength, chromatic_aberration_strength,
                                fmaxf(0.0F, fminf(10.0F, atof(value))));
                 IMPORT_SETTING(settings.filmic_tonemapping, filmic_tonemapping, atoi(value));
+                IMPORT_SETTING(settings.hdr_rendering, hdr_rendering, atoi(value) ? 1 : 0);
+                IMPORT_SETTING(settings.bloom, bloom, atoi(value) ? 1 : 0);
+                IMPORT_SETTING(settings.bloom_strength, bloom_strength, fmaxf(0.0F, fminf(2.0F, atof(value))));
+                IMPORT_SETTING(settings.bloom_threshold, bloom_threshold, fmaxf(0.25F, fminf(4.0F, atof(value))));
+                IMPORT_SETTING(settings.dynamic_lights, dynamic_lights, atoi(value) ? 1 : 0);
+                IMPORT_SETTING(settings.flash_lights, flash_lights, atoi(value) ? 1 : 0);
+                IMPORT_SETTING(settings.tracer_lights, tracer_lights, atoi(value) ? 1 : 0);
+                IMPORT_SETTING(settings.dynamic_light_intensity, dynamic_light_intensity,
+                               fmaxf(1.0F, fminf(10.0F, atof(value))));
                 IMPORT_SETTING(settings.show_live_player_count, show_live_player_count, atoi(value));
                 IMPORT_SETTING(settings.ads_zoom_animation, ads_zoom_animation, atoi(value));
                 IMPORT_SETTING(settings.auto_demo_recording, auto_demo_recording, atoi(value));
@@ -548,6 +567,7 @@ IMPORT_SETTING(settings.camera_movement, camera_movement, atoi(value));
                 IMPORT_SETTING(settings.rain, rain, atoi(value));
                 IMPORT_SETTING(settings.snow, snow, atoi(value));
                 IMPORT_SETTING(settings.rain_snow_3d, rain_snow_3d, atoi(value));
+                IMPORT_SETTING(settings.particle_animations, particle_animations, atoi(value));
                 IMPORT_SETTING(settings.rifle_ads_fov, rifle_ads_fov, fmaxf(5.0F, fminf(atof(value), CAMERA_DEFAULT_FOV)));
                 IMPORT_SETTING(settings.shotgun_ads_fov, shotgun_ads_fov, fmaxf(5.0F, fminf(atof(value), CAMERA_DEFAULT_FOV)));
                 IMPORT_SETTING(settings.smg_ads_fov, smg_ads_fov, fmaxf(5.0F, fminf(atof(value), CAMERA_DEFAULT_FOV)));
@@ -808,12 +828,14 @@ void config_reload() {
         config_register_key(WINDOW_KEY_V, SDLK_v, NULL, 0, NULL, NULL);
         config_register_key(WINDOW_KEY_C, SDLK_c, NULL, 0, NULL, NULL);
         config_register_key(WINDOW_KEY_RELOAD, SDLK_r, "reload", 0, "Reload", "Tools & Weapons");
+        config_register_key(WINDOW_KEY_FLASHLIGHT, SDLK_f, "flashlight", 0, "Flashlight", "Game");
         config_register_key(WINDOW_KEY_CHAT, SDLK_t, "chat_global", 0, "Chat", "Game");
         config_register_key(WINDOW_KEY_FULLSCREEN, SDLK_F11, "fullscreen", 0, "Fullscreen", "Game");
         config_register_key(WINDOW_KEY_SCREENSHOT, SDLK_F5, "screenshot", 0, "Screenshot", "Information");
         config_register_key(WINDOW_KEY_CHANGETEAM, SDLK_COMMA, "change_team", 0, "Team select", "Game");
         config_register_key(WINDOW_KEY_CHANGEWEAPON, SDLK_PERIOD, "change_weapon", 0, "Gun select", "Tools & Weapons");
         config_register_key(WINDOW_KEY_PICKCOLOR, SDLK_e, "cube_color_sample", 0, "Pick color", "Block");
+        config_register_key(WINDOW_KEY_COLORPICKER, SDLK_c, "color_picker", 0, "Color selector", "Block");
         config_register_key(WINDOW_KEY_COMMAND, SDLK_SLASH, "chat_command", 0, "Command", "Game");
         config_register_key(WINDOW_KEY_HIDEHUD, SDLK_F6, "hide_hud", 1, "Hide HUD", "Game");
         config_register_key(WINDOW_KEY_LASTTOOL, SDLK_q, "last_tool", 0, "Last tool", "Tools & Weapons");
@@ -825,7 +847,6 @@ void config_reload() {
         config_register_key(WINDOW_KEY_SELECT4, SDLK_4, NULL, 0, NULL, NULL);
         config_register_key(WINDOW_KEY_HISTORY_PREVIOUS, SDLK_UP, "history_previous", 0, "Previous message", "Chat history");
         config_register_key(WINDOW_KEY_HISTORY_NEXT, SDLK_DOWN, "history_next", 0, "Next message", "Chat history");
-        config_register_key(WINDOW_KEY_YCLAMP, SDLK_c, "y_clamp", 0, "Toggle Y-Clamp", "Spectator");
         config_register_key(WINDOW_KEY_SWITCH_CAMERA, SDLK_v, "switch_camera", 0, "Toggle 1st/3rd person view", "Spectator");
         config_register_key(WINDOW_KEY_NEXT_PLAYER, SDLK_p, "next_player", 0, "Next alive player", "Spectator");
         config_register_key(WINDOW_KEY_ROLL_CW, SDLK_e, "roll_cw", 0, "Roll clockwise", "Spectator");
@@ -882,12 +903,14 @@ void config_reload() {
         config_register_key(WINDOW_KEY_V, GLFW_KEY_V, NULL, 0, NULL, NULL);
         config_register_key(WINDOW_KEY_C, GLFW_KEY_C, NULL, 0, NULL, NULL);
         config_register_key(WINDOW_KEY_RELOAD, GLFW_KEY_R, "reload", 0, "Reload", "Tools & Weapons");
+        config_register_key(WINDOW_KEY_FLASHLIGHT, GLFW_KEY_F, "flashlight", 0, "Flashlight", "Game");
         config_register_key(WINDOW_KEY_CHAT, GLFW_KEY_T, "chat_global", 0, "Chat", "Game");
         config_register_key(WINDOW_KEY_FULLSCREEN, GLFW_KEY_F11, "fullscreen", 0, "Fullscreen", "Game");
         config_register_key(WINDOW_KEY_SCREENSHOT, GLFW_KEY_F5, "screenshot", 0, "Screenshot", "Game");
         config_register_key(WINDOW_KEY_CHANGETEAM, GLFW_KEY_COMMA, "change_team", 0, "Team select", "Game");
         config_register_key(WINDOW_KEY_CHANGEWEAPON, GLFW_KEY_PERIOD, "change_weapon", 0, "Gun select", "Tools & Weapons");
         config_register_key(WINDOW_KEY_PICKCOLOR, GLFW_KEY_E, "cube_color_sample", 0, "Pick color", "Block");
+        config_register_key(WINDOW_KEY_COLORPICKER, GLFW_KEY_C, "color_picker", 0, "Color selector", "Block");
         config_register_key(WINDOW_KEY_COMMAND, GLFW_KEY_SLASH, "chat_command", 0, "Command", "Game");
         config_register_key(WINDOW_KEY_HIDEHUD, GLFW_KEY_F6, "hide_hud", 1, "Hide HUD", "Game");
         config_register_key(WINDOW_KEY_LASTTOOL, GLFW_KEY_Q, "last_tool", 0, "Last tool", "Tools & Weapons");
@@ -899,7 +922,6 @@ void config_reload() {
         config_register_key(WINDOW_KEY_SELECT4, GLFW_KEY_4, NULL, 0, NULL, NULL);
         config_register_key(WINDOW_KEY_HISTORY_PREVIOUS, GLFW_KEY_UP, "history_previous", 0, "Previous message", "Chat history");
         config_register_key(WINDOW_KEY_HISTORY_NEXT, GLFW_KEY_DOWN, "history_next", 0, "Next message", "Chat history");
-        config_register_key(WINDOW_KEY_YCLAMP, GLFW_KEY_C, "y_clamp", 0, "Toggle Y-Clamp", "Spectator");
         config_register_key(WINDOW_KEY_SWITCH_CAMERA, GLFW_KEY_V, "switch_camera", 0, "Toggle 1st/3rd person view", "Spectator");
         config_register_key(WINDOW_KEY_NEXT_PLAYER, GLFW_KEY_P, "next_player", 0, "Next alive player", "Spectator");
         config_register_key(WINDOW_KEY_ROLL_CW, GLFW_KEY_E, "roll_cw", 0, "Roll clockwise", "Spectator");
@@ -1134,7 +1156,7 @@ void config_reload() {
                                  .type = CONFIG_TYPE_INT,
                                  .min = 0,
                                  .max = 1,
-                                  .help = "Reflective water surface",
+                                  .help = "Enhanced reflective water with a safe fallback",
                                   .name = "Water shader",
                                   .category = "Visual Effects",
                                   .subcategory = "Water",
@@ -1167,10 +1189,10 @@ void config_reload() {
                                  .type = CONFIG_TYPE_INT,
                                  .min = 0,
                                  .max = 1,
-                                  .help = "Realistic directional shadows from blocks",
-                                  .name = "Realistic shadows",
+                                  .help = "Cached live terrain shadows on Core; baked fallback elsewhere",
+                                  .name = "Directional shadows",
                                   .category = "Visual Effects",
-                                  .subcategory = "Shadows",
+                                  .subcategory = "Lighting",
                           });
          list_add(&config_settings,
                           &(struct config_setting) {
@@ -1181,7 +1203,18 @@ void config_reload() {
                                   .help = "How dark sun shadows are",
                                   .name = "Shadow intensity",
                                   .category = "Visual Effects",
-                                  .subcategory = "Shadows",
+                                  .subcategory = "Lighting",
+                         });
+        list_add(&config_settings,
+                         &(struct config_setting) {
+                                 .value = &settings_tmp.particle_animations,
+                                 .type = CONFIG_TYPE_INT,
+                                 .min = 0,
+                                 .max = 1,
+                                 .help = "Animated sprite particles when breaking or hitting blocks",
+                                 .name = "Particle animations",
+                                 .category = "Visual Effects",
+                                 .subcategory = "Particles",
                          });
         list_add(&config_settings,
                          &(struct config_setting) {
@@ -1347,6 +1380,94 @@ void config_reload() {
                                  .name = "Filmic tone mapping",
                                  .category = "Visual Effects",
                                  .subcategory = "Post Processing",
+                         });
+        list_add(&config_settings,
+                         &(struct config_setting) {
+                                 .value = &settings_tmp.hdr_rendering,
+                                 .type = CONFIG_TYPE_INT,
+                                 .min = 0,
+                                 .max = 1,
+                                 .help = "Floating-point Core scene rendering with a safe fallback",
+                                 .name = "HDR rendering",
+                                 .category = "Visual Effects",
+                                 .subcategory = "Post Processing",
+                         });
+        list_add(&config_settings,
+                         &(struct config_setting) {
+                                 .value = &settings_tmp.bloom,
+                                 .type = CONFIG_TYPE_INT,
+                                 .min = 0,
+                                 .max = 1,
+                                 .help = "Soft glow around highlights (multipass on OpenGL Core)",
+                                 .name = "Bloom",
+                                 .category = "Visual Effects",
+                                 .subcategory = "Post Processing",
+                         });
+        list_add(&config_settings,
+                         &(struct config_setting) {
+                                 .value = &settings_tmp.bloom_strength,
+                                 .type = CONFIG_TYPE_FLOAT,
+                                 .min = 0,
+                                 .max = 2,
+                                 .help = "Brightness of the bloom glow",
+                                 .name = "Bloom strength",
+                                 .category = "Visual Effects",
+                                 .subcategory = "Post Processing",
+                         });
+        list_add(&config_settings,
+                         &(struct config_setting) {
+                                 .value = &settings_tmp.bloom_threshold,
+                                 .type = CONFIG_TYPE_FLOAT,
+                                 .min = 0.25F,
+                                 .max = 4.0F,
+                                 .help = "Minimum scene brightness that produces bloom",
+                                 .name = "Bloom threshold",
+                                 .category = "Visual Effects",
+                                 .subcategory = "Post Processing",
+                         });
+        list_add(&config_settings,
+                         &(struct config_setting) {
+                                 .value = &settings_tmp.dynamic_lights,
+                                 .type = CONFIG_TYPE_INT,
+                                 .min = 0,
+                                 .max = 1,
+                                 .help = "Enable forward point lighting and material-aware terrain shading",
+                                 .name = "Dynamic lights",
+                                 .category = "Visual Effects",
+                                 .subcategory = "Lighting",
+                         });
+        list_add(&config_settings,
+                         &(struct config_setting) {
+                                 .value = &settings_tmp.flash_lights,
+                                 .type = CONFIG_TYPE_INT,
+                                 .min = 0,
+                                 .max = 1,
+                                 .help = "Muzzle flashes and explosions cast light (needs Dynamic lights)",
+                                 .name = "Flash & explosion lights",
+                                 .category = "Visual Effects",
+                                 .subcategory = "Lighting",
+                         });
+        list_add(&config_settings,
+                         &(struct config_setting) {
+                                 .value = &settings_tmp.tracer_lights,
+                                 .type = CONFIG_TYPE_INT,
+                                 .min = 0,
+                                 .max = 1,
+                                 .help = "Moving projectile tracers cast light (requires Dynamic lights)",
+                                 .name = "Tracer lights",
+                                 .category = "Visual Effects",
+                                 .subcategory = "Lighting",
+                         });
+        list_add(&config_settings,
+                         &(struct config_setting) {
+                                 .value = &settings_tmp.dynamic_light_intensity,
+                                 .type = CONFIG_TYPE_FLOAT,
+                                 .min = 1.0F,
+                                 .max = 10.0F,
+                                 .help = "Scales flash, explosion and tracer brightness from 1x to 10x",
+                                 .name = "Light intensity multiplier",
+                                 .category = "Visual Effects",
+                                 .subcategory = "Lighting",
                          });
         list_add(&config_settings,
                          &(struct config_setting) {

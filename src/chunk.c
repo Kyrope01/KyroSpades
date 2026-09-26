@@ -38,6 +38,8 @@
 #include "channel.h"
 #include "utils.h"
 #include "water.h"
+#include "lighting.h"
+#include "shadow.h"
 /* pthread_spinlock_t is Linux-only. macOS and Android's Bionic lack it.
    Use a mutex on those platforms; the spinlock is a micro-optimisation
    that is only relevant on multi-core Linux anyway. */
@@ -121,102 +123,154 @@ static int chunk_sort(const void* a, const void* b) {
         return (da > db) - (da < db);
 }
 
-void chunk_render(struct chunk_render_call* c) {
-        if(c->chunk->created) {
-                matrix_push(matrix_model);
-                matrix_translate(matrix_model, c->mirror_x * map_size_x, 0.0F, c->mirror_y * map_size_z);
-                matrix_upload();
+struct chunk_transform_state {
+        bool active;
+        int mirror_x;
+        int mirror_y;
+};
 
-                if(c->chunk->display_list.has_texcoord) {
-#if !defined(OPENGL_ES)
-                        glEnable(GL_TEXTURE_2D);
-#endif
-                        glBindTexture(GL_TEXTURE_2D, texture_blocks_atlas()->texture_id);
-                }
+static void chunk_transform_apply(struct chunk_transform_state* state, const struct chunk_render_call* call) {
+        if(!call->chunk->created
+           || (state->active && call->mirror_x == state->mirror_x && call->mirror_y == state->mirror_y))
+                return;
 
-                glx_displaylist_draw(&c->chunk->display_list, GLX_DISPLAYLIST_NORMAL);
-
-                if(c->chunk->display_list.has_texcoord) {
-#if !defined(OPENGL_ES)
-                        glDisable(GL_TEXTURE_2D);
-#endif
-                }
-
+        if(state->active)
                 matrix_pop(matrix_model);
-        }
+        matrix_push(matrix_model);
+        matrix_translate(matrix_model, call->mirror_x * map_size_x, 0.0F, call->mirror_y * map_size_z);
+        matrix_upload();
+#if !defined(OPENGL_ES) && !defined(OPENGL_CORE)
+        /* Compatibility GLSL does not participate in matrix_upload(); keep
+           wrapped chunk copies aligned with their point lights. */
+        lighting_world_update_matrices();
+#endif
+        state->active = true;
+        state->mirror_x = call->mirror_x;
+        state->mirror_y = call->mirror_y;
 }
 
-/* Persistent scratch buffer for the visible-chunk list.  It is allocated
-   once and only ever grows (when the render distance increases); it is never
-   freed per frame.  The previous version malloc()ed ~60-230 KB every single
-   frame, which on Windows contends with the up-to-15 chunk-generation worker
-   threads that are simultaneously allocating and freeing multi-hundred-KB
-   tesselator buffers on the same process heap — heap lock contention and
-   fragmentation that made the main thread's frame time spike (bad FPS on
-   exactly the strong multi-core machines that spawn the most workers).
-   chunk_draw_visible() only ever runs on the main thread, so the static is
-   safe. */
+static void chunk_transform_finish(struct chunk_transform_state* state) {
+        if(state->active)
+                matrix_pop(matrix_model);
+}
+
+static void chunk_render(const struct chunk_render_call* call) {
+        if(call->chunk->created)
+                glx_displaylist_draw(&call->chunk->display_list, GLX_DISPLAYLIST_NORMAL);
+}
+
+/* Persistent scratch buffer shared by the camera and sun-depth terrain passes.
+   It only grows and both consumers run serially on the main thread. */
 static struct chunk_render_call* chunk_draw_buf = NULL;
 static int chunk_draw_buf_cap = 0;
 
-void chunk_draw_visible() {
-        int overshoot = (settings.render_distance + CHUNK_SIZE - 1) / CHUNK_SIZE + 1;
+static int chunk_collect_draw_calls(float render_distance, bool use_camera_frustum) {
+        int overshoot = ((int)render_distance + CHUNK_SIZE - 1) / CHUNK_SIZE + 1;
 
-        // The loop below scans (CHUNKS_PER_DIM + 2*overshoot)^2 candidate
-        // positions.  With a large render distance (the spectator fog
-        // distance setting goes up to 512) that exceeds the old fixed
-        // 2*CHUNKS_PER_DIM^2 stack array, writing past its end and corrupting
-        // nearby stack memory — which showed up as big patches of terrain
-        // never being drawn.  Size the buffer from the actual iteration count.
+        /* The candidate count grows beyond the old fixed map-sized array at
+           large spectator/shadow distances, so size it from the actual scan. */
         int iter = CHUNKS_PER_DIM + 2 * overshoot;
         int cap = iter * iter;
         if(cap > chunk_draw_buf_cap) {
                 struct chunk_render_call* grown = realloc(chunk_draw_buf,
                                                           sizeof(struct chunk_render_call) * (size_t)cap);
                 if(!grown) {
-                        log_error("chunk_draw_visible: out of memory (%i chunk slots)", cap);
-                        return;
+                        log_error("chunk draw list: out of memory (%i chunk slots)", cap);
+                        return -1;
                 }
                 chunk_draw_buf = grown;
                 chunk_draw_buf_cap = cap;
         }
-        struct chunk_render_call* chunks_draw = chunk_draw_buf;
+
         int index = 0;
-
-        // hoisted: was a libm pow() call inside the double loop, every frame
-        float rd = settings.render_distance + 1.414F * CHUNK_SIZE;
+        float rd = render_distance + 1.414F * CHUNK_SIZE;
         float rd_sq = rd * rd;
-
-        // go through all possible chunks and store all in range and view
         for(int y = -overshoot; y < CHUNKS_PER_DIM + overshoot; y++) {
                 for(int x = -overshoot; x < CHUNKS_PER_DIM + overshoot; x++) {
-                        float d = distance2D((x + 0.5F) * CHUNK_SIZE, (y + 0.5F) * CHUNK_SIZE, camera_x, camera_z);
-                        if(d <= rd_sq && index < cap) {
-                                uint32_t tmp_x = ((uint32_t)x) % CHUNKS_PER_DIM;
-                                uint32_t tmp_y = ((uint32_t)y) % CHUNKS_PER_DIM;
+                        float distance_sq = distance2D((x + 0.5F) * CHUNK_SIZE,
+                                                       (y + 0.5F) * CHUNK_SIZE,
+                                                       camera_x, camera_z);
+                        if(distance_sq > rd_sq || index >= cap)
+                                continue;
 
-                                struct chunk* c = chunks + tmp_x + tmp_y * CHUNKS_PER_DIM;
+                        uint32_t tmp_x = ((uint32_t)x) % CHUNKS_PER_DIM;
+                        uint32_t tmp_y = ((uint32_t)y) % CHUNKS_PER_DIM;
+                        struct chunk* c = chunks + tmp_x + tmp_y * CHUNKS_PER_DIM;
+                        if(use_camera_frustum
+                           && !camera_CubeInFrustum((x + 0.5F) * CHUNK_SIZE, 0.0F,
+                                                   (y + 0.5F) * CHUNK_SIZE,
+                                                   CHUNK_SIZE / 2, c->max_height))
+                                continue;
 
-                                if(camera_CubeInFrustum((x + 0.5F) * CHUNK_SIZE, 0.0F, (y + 0.5F) * CHUNK_SIZE, CHUNK_SIZE / 2,
-                                                                                c->max_height))
-                                        chunks_draw[index++] = (struct chunk_render_call) {
-                                                .chunk = c,
-                                                .mirror_x = (x < 0) ? -1 : ((x >= CHUNKS_PER_DIM) ? 1 : 0),
-                                                .mirror_y = (y < 0) ? -1 : ((y >= CHUNKS_PER_DIM) ? 1 : 0),
-                                                .dist_sq = d,
-                                        };
-                        }
+                        chunk_draw_buf[index++] = (struct chunk_render_call) {
+                                .chunk = c,
+                                .mirror_x = (x < 0) ? -1 : ((x >= CHUNKS_PER_DIM) ? 1 : 0),
+                                .mirror_y = (y < 0) ? -1 : ((y >= CHUNKS_PER_DIM) ? 1 : 0),
+                                .dist_sq = distance_sq,
+                        };
                 }
         }
+        return index;
+}
 
-        // sort near→far: chunks are opaque, so drawing front-first lets
-        // early-z reject occluded fragments (correct — do NOT reverse for "transparency",
-        // water is rendered separately)
-        qsort(chunks_draw, index, sizeof(struct chunk_render_call), chunk_sort);
+void chunk_draw_visible(void) {
+        int count = chunk_collect_draw_calls(settings.render_distance, true);
+        if(count < 0)
+                return;
 
-        for(int k = 0; k < index; k++)
-                chunk_render(chunks_draw + k);
-        /* chunks_draw is a persistent buffer; nothing to free here. */
+        /* Near-to-far lets opaque camera rendering benefit from early depth. */
+        qsort(chunk_draw_buf, count, sizeof(struct chunk_render_call), chunk_sort);
+
+        /* Texture coordinates are a chunk-mesh property and normally identical
+           for the whole map. Bind the shared atlas once instead of once per
+           visible chunk. The transition handling preserves correct legacy GL
+           behavior while old/new meshes briefly coexist after a setting change. */
+        bool atlas_bound = false;
+        struct chunk_transform_state transform = {0};
+#if !defined(OPENGL_ES) && !defined(OPENGL_CORE)
+        bool legacy_texturing = false;
+#endif
+        for(int k = 0; k < count; k++) {
+                struct chunk_render_call* call = chunk_draw_buf + k;
+                struct chunk* c = call->chunk;
+                bool textured = c->created && c->display_list.has_texcoord;
+                if(textured && !atlas_bound) {
+                        glActiveTexture(GL_TEXTURE0);
+                        glBindTexture(GL_TEXTURE_2D, texture_blocks_atlas()->texture_id);
+                        atlas_bound = true;
+                }
+#if !defined(OPENGL_ES) && !defined(OPENGL_CORE)
+                if(textured != legacy_texturing) {
+                        if(textured)
+                                glEnable(GL_TEXTURE_2D);
+                        else
+                                glDisable(GL_TEXTURE_2D);
+                        legacy_texturing = textured;
+                }
+#endif
+                chunk_transform_apply(&transform, call);
+                chunk_render(call);
+        }
+        chunk_transform_finish(&transform);
+#if !defined(OPENGL_ES) && !defined(OPENGL_CORE)
+        if(legacy_texturing)
+                glDisable(GL_TEXTURE_2D);
+#endif
+}
+
+void chunk_draw_shadow(float render_distance) {
+        int count = chunk_collect_draw_calls(fmaxf(render_distance, 0.0F), false);
+        if(count < 0)
+                return;
+        /* The depth-only shader does not sample the terrain atlas. Upload its
+           model transform only when a wrapped map copy changes it. */
+        struct chunk_transform_state transform = {0};
+        for(int k = 0; k < count; k++) {
+                struct chunk_render_call* call = chunk_draw_buf + k;
+                chunk_transform_apply(&transform, call);
+                chunk_render(call);
+        }
+        chunk_transform_finish(&transform);
 }
 
 static __attribute__((always_inline)) inline bool solid_array_isair(struct libvxl_chunk_copy* blocks, uint32_t x,
@@ -257,7 +311,10 @@ void* chunk_generate(void* data) {
                 result.chunk = work.chunk;
                 result.gen = work.chunk->gen;
                 result.minimap_data = malloc(CHUNK_SIZE * CHUNK_SIZE * sizeof(uint32_t));
-                tesselator_create(&result.tesselator, VERTEX_INT, 0, settings.textured_blocks);
+                /* Keep flat face normals in terrain VBOs while forward lighting
+                   is active. They are generated automatically by the tesselator
+                   and dropped again when the runtime setting is disabled. */
+                tesselator_create(&result.tesselator, VERTEX_INT, lighting_supported(), settings.textured_blocks);
 
                 struct libvxl_chunk_copy blocks;
                 map_copy_blocks(&blocks, work.chunk_x * CHUNK_SIZE, work.chunk_y * CHUNK_SIZE);
@@ -304,6 +361,8 @@ void* chunk_generate(void* data) {
 void chunk_generate_greedy(struct libvxl_chunk_copy* blocks, size_t start_x, size_t start_z, struct tesselator* tess,
                                                    int* max_height) {
         *max_height = 0;
+        /* Keep one water-mesh policy for the complete worker job. */
+        bool separate_water_surface = water_shader_active();
 
         int checked_voxels[2][CHUNK_SIZE * CHUNK_SIZE];
         int checked_voxels2[2][CHUNK_SIZE * map_size_y];
@@ -319,7 +378,7 @@ void chunk_generate_greedy(struct libvxl_chunk_copy* blocks, size_t start_x, siz
                                                 *max_height = y;
                                         }
 
-                                        if(water_shader_active() && (float)y < WATER_LEVEL)
+                                        if(separate_water_surface && (float)y < WATER_LEVEL)
                                                 continue;
 
                                         uint32_t col = libvxl_copy_chunk_get_color(blocks, x, z, map_size_y - 1 - y);
@@ -645,16 +704,45 @@ static __attribute__((always_inline)) inline int vertexAO_idx(int side1, int sid
         return 4 - (!side1 + !side2 + !corner);
 }
 
+/* Triangulated renderers must choose the quad diagonal that best follows the
+   four AO values. Always splitting vertices 0--2 produces a visible diagonal
+   seam when the opposite corners have very different occlusion. A cyclic
+   rotation preserves winding and switches the generated triangles to 1--3;
+   legacy GL_QUADS remains geometrically identical. */
+static void chunk_add_ao_face(struct tesselator* tess, int16_t coords[12],
+                              const uint32_t clut[5], const float ao_curve[5], int ao[4]) {
+        uint32_t colors[4] = {clut[ao[0]], clut[ao[1]], clut[ao[2]], clut[ao[3]]};
+        if(ao_curve[ao[0]] + ao_curve[ao[2]] > ao_curve[ao[1]] + ao_curve[ao[3]]) {
+                int16_t rotated_coords[12];
+                uint32_t rotated_colors[4];
+                for(int i = 0; i < 4; i++) {
+                        int source = (i + 1) & 3;
+                        memcpy(rotated_coords + i * 3, coords + source * 3, sizeof(int16_t) * 3);
+                        rotated_colors[i] = colors[source];
+                }
+                tesselator_addi(tess, rotated_coords, rotated_colors, NULL);
+        } else {
+                tesselator_addi(tess, coords, colors, NULL);
+        }
+}
+
 void chunk_generate_naive(struct libvxl_chunk_copy* blocks, struct tesselator* tess, int* max_height, int ao) {
         *max_height = 0;
-        float ao_mult = settings.ao_multiplier > 0.0F ? settings.ao_multiplier : 1.0F;
+        bool separate_water_surface = water_shader_active();
+        /* Zero is a valid user setting and means no AO darkening. The old
+           fallback silently treated 0 as 1, making the slider's minimum lie. */
+        float ao_mult = fmaxf(settings.ao_multiplier, 0.0F);
         float ao_curve[5];
         ao_curve[1] = powf(0.25F, ao_mult);
         ao_curve[2] = powf(0.50F, ao_mult);
         ao_curve[3] = powf(0.75F, ao_mult);
         ao_curve[4] = 1.0F;
 
-        if(settings.shadow_quality)
+        /* Snapshot this decision so a settings change cannot unbalance the
+           map lock while a worker is midway through a chunk. */
+        bool baked_shadows = shadow_baked_enabled();
+        float baked_shadow_intensity = settings.shadow_intensity;
+        if(baked_shadows)
                 map_read_lock();
 
         for(size_t k = 0; k < blocks->blocks_sorted_count; k++) {
@@ -666,7 +754,7 @@ void chunk_generate_naive(struct libvxl_chunk_copy* blocks, struct tesselator* t
 
                 *max_height = max(*max_height, y);
 
-                if(water_shader_active() && (float)y < WATER_LEVEL)
+                if(separate_water_surface && (float)y < WATER_LEVEL)
                         continue;
 
                 uint32_t col = blk->color;
@@ -675,9 +763,9 @@ void chunk_generate_naive(struct libvxl_chunk_copy* blocks, struct tesselator* t
                 int b = red(col);
 
                 float shade = solid_sunblock(blocks, x, y, z);
-                if(settings.shadow_quality) {
+                if(baked_shadows) {
                         float dir_shade = map_sun_shadow(x, y, z, 32);
-                        float sf = (1.0F - settings.shadow_intensity) + settings.shadow_intensity * dir_shade;
+                        float sf = (1.0F - baked_shadow_intensity) + baked_shadow_intensity * dir_shade;
                         shade *= sf;
                 }
                 r *= shade;
@@ -726,74 +814,86 @@ void chunk_generate_naive(struct libvxl_chunk_copy* blocks, struct tesselator* t
 
                         if(n[1][1][0]) { // -Z
                                 BUILD_CLUT(0.875F);
-                                tesselator_addi(tess, (int16_t[]) {x, y, z, x, y + 1, z, x + 1, y + 1, z, x + 1, y, z},
-                                                                (uint32_t[]) {
-                                                                        clut[vertexAO_idx(n[0][1][0], n[1][0][0], n[0][0][0])],
-                                                                        clut[vertexAO_idx(n[0][1][0], n[1][2][0], n[0][2][0])],
-                                                                        clut[vertexAO_idx(n[2][1][0], n[1][2][0], n[2][2][0])],
-                                                                        clut[vertexAO_idx(n[2][1][0], n[1][0][0], n[2][0][0])],
-                                                                },
-                                                                NULL);
+                                chunk_add_ao_face(tess,
+                                                  (int16_t[]) {x, y, z, x, y + 1, z,
+                                                               x + 1, y + 1, z, x + 1, y, z},
+                                                  clut, ao_curve,
+                                                  (int[]) {
+                                                          vertexAO_idx(n[0][1][0], n[1][0][0], n[0][0][0]),
+                                                          vertexAO_idx(n[0][1][0], n[1][2][0], n[0][2][0]),
+                                                          vertexAO_idx(n[2][1][0], n[1][2][0], n[2][2][0]),
+                                                          vertexAO_idx(n[2][1][0], n[1][0][0], n[2][0][0]),
+                                                  });
                         }
 
                         if(n[1][1][2]) { // +Z
                                 BUILD_CLUT(0.625F);
-                                tesselator_addi(tess, (int16_t[]) {x, y, z + 1, x + 1, y, z + 1, x + 1, y + 1, z + 1, x, y + 1, z + 1},
-                                                                (uint32_t[]) {
-                                                                        clut[vertexAO_idx(n[0][1][2], n[1][0][2], n[0][0][2])],
-                                                                        clut[vertexAO_idx(n[2][1][2], n[1][0][2], n[2][0][2])],
-                                                                        clut[vertexAO_idx(n[2][1][2], n[1][2][2], n[2][2][2])],
-                                                                        clut[vertexAO_idx(n[0][1][2], n[1][2][2], n[0][2][2])],
-                                                                },
-                                                                NULL);
+                                chunk_add_ao_face(tess,
+                                                  (int16_t[]) {x, y, z + 1, x + 1, y, z + 1,
+                                                               x + 1, y + 1, z + 1, x, y + 1, z + 1},
+                                                  clut, ao_curve,
+                                                  (int[]) {
+                                                          vertexAO_idx(n[0][1][2], n[1][0][2], n[0][0][2]),
+                                                          vertexAO_idx(n[2][1][2], n[1][0][2], n[2][0][2]),
+                                                          vertexAO_idx(n[2][1][2], n[1][2][2], n[2][2][2]),
+                                                          vertexAO_idx(n[0][1][2], n[1][2][2], n[0][2][2]),
+                                                  });
                         }
 
                         if(n[0][1][1]) { // -X
                                 BUILD_CLUT(0.75F);
-                                tesselator_addi(tess, (int16_t[]) {x, y, z, x, y, z + 1, x, y + 1, z + 1, x, y + 1, z},
-                                                                (uint32_t[]) {
-                                                                        clut[vertexAO_idx(n[0][0][1], n[0][1][0], n[0][0][0])],
-                                                                        clut[vertexAO_idx(n[0][0][1], n[0][1][2], n[0][0][2])],
-                                                                        clut[vertexAO_idx(n[0][2][1], n[0][1][2], n[0][2][2])],
-                                                                        clut[vertexAO_idx(n[0][2][1], n[0][1][0], n[0][2][0])],
-                                                                },
-                                                                NULL);
+                                chunk_add_ao_face(tess,
+                                                  (int16_t[]) {x, y, z, x, y, z + 1,
+                                                               x, y + 1, z + 1, x, y + 1, z},
+                                                  clut, ao_curve,
+                                                  (int[]) {
+                                                          vertexAO_idx(n[0][0][1], n[0][1][0], n[0][0][0]),
+                                                          vertexAO_idx(n[0][0][1], n[0][1][2], n[0][0][2]),
+                                                          vertexAO_idx(n[0][2][1], n[0][1][2], n[0][2][2]),
+                                                          vertexAO_idx(n[0][2][1], n[0][1][0], n[0][2][0]),
+                                                  });
                         }
 
                         if(n[2][1][1]) { // +X
                                 BUILD_CLUT(0.75F);
-                                tesselator_addi(tess, (int16_t[]) {x + 1, y, z, x + 1, y + 1, z, x + 1, y + 1, z + 1, x + 1, y, z + 1},
-                                                                (uint32_t[]) {
-                                                                        clut[vertexAO_idx(n[2][0][1], n[2][1][0], n[2][0][0])],
-                                                                        clut[vertexAO_idx(n[2][2][1], n[2][1][0], n[2][2][0])],
-                                                                        clut[vertexAO_idx(n[2][2][1], n[2][1][2], n[2][2][2])],
-                                                                        clut[vertexAO_idx(n[2][0][1], n[2][1][2], n[2][0][2])],
-                                                                },
-                                                                NULL);
+                                chunk_add_ao_face(tess,
+                                                  (int16_t[]) {x + 1, y, z, x + 1, y + 1, z,
+                                                               x + 1, y + 1, z + 1, x + 1, y, z + 1},
+                                                  clut, ao_curve,
+                                                  (int[]) {
+                                                          vertexAO_idx(n[2][0][1], n[2][1][0], n[2][0][0]),
+                                                          vertexAO_idx(n[2][2][1], n[2][1][0], n[2][2][0]),
+                                                          vertexAO_idx(n[2][2][1], n[2][1][2], n[2][2][2]),
+                                                          vertexAO_idx(n[2][0][1], n[2][1][2], n[2][0][2]),
+                                                  });
                         }
 
                         if(n[1][2][1]) { // +Y (n handles y == map_size_y - 1 as air)
                                 BUILD_CLUT(1.0F);
-                                tesselator_addi(tess, (int16_t[]) {x, y + 1, z, x, y + 1, z + 1, x + 1, y + 1, z + 1, x + 1, y + 1, z},
-                                                                (uint32_t[]) {
-                                                                        clut[vertexAO_idx(n[0][2][1], n[1][2][0], n[0][2][0])],
-                                                                        clut[vertexAO_idx(n[0][2][1], n[1][2][2], n[0][2][2])],
-                                                                        clut[vertexAO_idx(n[2][2][1], n[1][2][2], n[2][2][2])],
-                                                                        clut[vertexAO_idx(n[2][2][1], n[1][2][0], n[2][2][0])],
-                                                                },
-                                                                NULL);
+                                chunk_add_ao_face(tess,
+                                                  (int16_t[]) {x, y + 1, z, x, y + 1, z + 1,
+                                                               x + 1, y + 1, z + 1, x + 1, y + 1, z},
+                                                  clut, ao_curve,
+                                                  (int[]) {
+                                                          vertexAO_idx(n[0][2][1], n[1][2][0], n[0][2][0]),
+                                                          vertexAO_idx(n[0][2][1], n[1][2][2], n[0][2][2]),
+                                                          vertexAO_idx(n[2][2][1], n[1][2][2], n[2][2][2]),
+                                                          vertexAO_idx(n[2][2][1], n[1][2][0], n[2][2][0]),
+                                                  });
                         }
 
                         if(y > 0 && n[1][0][1]) { // -Y
                                 BUILD_CLUT(0.5F);
-                                tesselator_addi(tess, (int16_t[]) {x, y, z, x + 1, y, z, x + 1, y, z + 1, x, y, z + 1},
-                                                                (uint32_t[]) {
-                                                                        clut[vertexAO_idx(n[0][0][1], n[1][0][0], n[0][0][0])],
-                                                                        clut[vertexAO_idx(n[2][0][1], n[1][0][0], n[2][0][0])],
-                                                                        clut[vertexAO_idx(n[2][0][1], n[1][0][2], n[2][0][2])],
-                                                                        clut[vertexAO_idx(n[0][0][1], n[1][0][2], n[0][0][2])],
-                                                                },
-                                                                NULL);
+                                chunk_add_ao_face(tess,
+                                                  (int16_t[]) {x, y, z, x + 1, y, z,
+                                                               x + 1, y, z + 1, x, y, z + 1},
+                                                  clut, ao_curve,
+                                                  (int[]) {
+                                                          vertexAO_idx(n[0][0][1], n[1][0][0], n[0][0][0]),
+                                                          vertexAO_idx(n[2][0][1], n[1][0][0], n[2][0][0]),
+                                                          vertexAO_idx(n[2][0][1], n[1][0][2], n[2][0][2]),
+                                                          vertexAO_idx(n[0][0][1], n[1][0][2], n[0][0][2]),
+                                                  });
                         }
 #undef BUILD_CLUT
                 } else {
@@ -829,7 +929,7 @@ void chunk_generate_naive(struct libvxl_chunk_copy* blocks, struct tesselator* t
                 }
         }
 
-        if(settings.shadow_quality)
+        if(baked_shadows)
                 map_read_unlock();
 }
 
@@ -867,7 +967,10 @@ static void emit_textured_face(struct tesselator* tess, enum tesselator_cube_fac
 void chunk_generate_textured(struct libvxl_chunk_copy* blocks, struct tesselator* tess, int* max_height) {
         *max_height = 0;
 
-        if(settings.shadow_quality)
+        bool separate_water_surface = water_shader_active();
+        bool baked_shadows = shadow_baked_enabled();
+        float baked_shadow_intensity = settings.shadow_intensity;
+        if(baked_shadows)
                 map_read_lock();
 
         for(size_t k = 0; k < blocks->blocks_sorted_count; k++) {
@@ -879,7 +982,7 @@ void chunk_generate_textured(struct libvxl_chunk_copy* blocks, struct tesselator
 
                 *max_height = max(*max_height, y);
 
-                if(water_shader_active() && (float)y < WATER_LEVEL)
+                if(separate_water_surface && (float)y < WATER_LEVEL)
                         continue;
 
                 uint32_t col = blk->color;
@@ -890,9 +993,9 @@ void chunk_generate_textured(struct libvxl_chunk_copy* blocks, struct tesselator
                 float shade;
                 {
                         shade = solid_sunblock(blocks, x, y, z);
-                        if(settings.shadow_quality) {
+                        if(baked_shadows) {
                                 float dir_shade = map_sun_shadow(x, y, z, 32);
-                                float sf = (1.0F - settings.shadow_intensity) + settings.shadow_intensity * dir_shade;
+                                float sf = (1.0F - baked_shadow_intensity) + baked_shadow_intensity * dir_shade;
                                 shade *= sf;
                         }
                 }
@@ -993,7 +1096,7 @@ void chunk_generate_textured(struct libvxl_chunk_copy* blocks, struct tesselator
                 }
         }
 
-        if(settings.shadow_quality)
+        if(baked_shadows)
                 map_read_unlock();
 
         (*max_height)++;
@@ -1013,13 +1116,16 @@ void chunk_update_all() {
 
                 if(result.gen == result.chunk->gen) {
                         if(!result.chunk->created) {
-                                glx_displaylist_create(&result.chunk->display_list, true, false);
+                                glx_displaylist_create(&result.chunk->display_list, true, result.tesselator.has_normal);
                                 result.chunk->created = true;
                         }
 
                         result.chunk->max_height = result.max_height;
 
                         tesselator_glx(&result.tesselator, &result.chunk->display_list);
+                        /* The depth map caches terrain-only geometry; rebuild it
+                           after an updated chunk reaches the GPU. */
+                        shadow_invalidate();
 
                         glBindTexture(GL_TEXTURE_2D, texture_minimap.texture_id);
                         glTexSubImage2D(GL_TEXTURE_2D, 0, result.chunk->x * CHUNK_SIZE, result.chunk->y * CHUNK_SIZE,

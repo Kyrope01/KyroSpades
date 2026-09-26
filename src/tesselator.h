@@ -25,7 +25,7 @@
 
 #include "glx.h"
 
-#ifdef OPENGL_ES
+#if defined(OPENGL_ES) || defined(OPENGL_CORE)
 #define TESSELATE_TRIANGLES
 #else
 #define TESSELATE_QUADS
@@ -45,6 +45,9 @@ struct tesselator {
         uint32_t quad_space;
         int has_normal;
         int has_texcoord;
+        /* When false, addi/addf derive a flat face normal from the first three
+         * vertices.  Explicit KV6 normals still use tesselator_set_normal(). */
+        int normal_explicit;
         uint32_t color;
         int8_t normal[3];
         enum tesselator_vertex_type vertex_type;

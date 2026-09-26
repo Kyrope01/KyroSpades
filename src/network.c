@@ -49,6 +49,8 @@
 #include "bloodmarks.h"
 #include "damagenumbers.h"
 #include "damagefx.h"
+#include "lighting.h"
+#include "glowing_blocks.h"
 
 void (*packets[256])(void* data, int len) = {NULL};
 
@@ -260,7 +262,7 @@ void read_PacketBlockAction(void* data, int len) {
                                 int col = map_get(p->x, 63 - p->z, p->y);
                                 map_set(p->x, 63 - p->z, p->y, 0xFFFFFFFF);
                                 map_update_physics(p->x, 63 - p->z, p->y);
-                                if(!demo_mute_effects()) particle_create(col, p->x + 0.5F, 63 - p->z + 0.5F, p->y + 0.5F, 2.5F, 1.0F, 8, 0.1F, 0.25F);
+                                if(!demo_mute_effects()) particle_create_block(col, p->x + 0.5F, 63 - p->z + 0.5F, p->y + 0.5F, 2.5F, 1.0F, 8, 0.1F, 0.25F);
                         }
                         break;
                 case ACTION_GRENADE:
@@ -284,7 +286,7 @@ void read_PacketBlockAction(void* data, int len) {
                                 int col = map_get(p->x, 63 - p->z, p->y);
                                 map_set(p->x, 63 - p->z + 0, p->y, 0xFFFFFFFF);
                                 map_update_physics(p->x, 63 - p->z + 0, p->y);
-                                if(!demo_mute_effects()) particle_create(col, p->x + 0.5F, 63 - p->z + 0.5F, p->y + 0.5F, 2.5F, 1.0F, 8, 0.1F, 0.25F);
+                                if(!demo_mute_effects()) particle_create_block(col, p->x + 0.5F, 63 - p->z + 0.5F, p->y + 0.5F, 2.5F, 1.0F, 8, 0.1F, 0.25F);
                         }
                         if((63 - p->z + 1) > 1) {
                                 map_set(p->x, 63 - p->z + 1, p->y, 0xFFFFFFFF);
@@ -297,10 +299,13 @@ void read_PacketBlockAction(void* data, int len) {
                                         player_stats_blocks_placed++;
                                 }
                                 bool play_sound = map_isair(p->x, 63 - p->z, p->y);
+                                uint32_t color = players[p->player_id].block.red
+                                        | (players[p->player_id].block.green << 8)
+                                        | (players[p->player_id].block.blue << 16);
 
-                                map_set(p->x, 63 - p->z, p->y,
-                                                players[p->player_id].block.red | (players[p->player_id].block.green << 8)
-                                                        | (players[p->player_id].block.blue << 16));
+                                map_set(p->x, 63 - p->z, p->y, color);
+                                if(p->player_id == local_player_id)
+                                        glowing_blocks_confirm_local_build(p->x, 63 - p->z, p->y);
 
                                 if(play_sound)
                                         if(!demo_mute_effects()) sound_create(SOUND_WORLD, &sound_build, p->x + 0.5F, 63 - p->z + 0.5F, p->y + 0.5F);
@@ -327,18 +332,24 @@ void read_PacketBlockLine(void* data, int len) {
                         player_stats_blocks_placed += blen;
                 }
         }
+        uint32_t color = players[p->player_id].block.red
+                | (players[p->player_id].block.green << 8)
+                | (players[p->player_id].block.blue << 16);
         if(p->sx == p->ex && p->sy == p->ey && p->sz == p->ez) {
-                map_set(p->sx, 63 - p->sz, p->sy,
-                                players[p->player_id].block.red | (players[p->player_id].block.green << 8)
-                                        | (players[p->player_id].block.blue << 16));
+                map_set(p->sx, 63 - p->sz, p->sy, color);
+                if(p->player_id == local_player_id)
+                        glowing_blocks_confirm_local_build(p->sx, 63 - p->sz, p->sy);
         } else {
                 struct Point blocks[64];
                 int len = map_cube_line(p->sx, p->sy, p->sz, p->ex, p->ey, p->ez, blocks);
                 while(len > 0) {
-                        if(map_isair(blocks[len - 1].x, 63 - blocks[len - 1].z, blocks[len - 1].y)) {
-                                map_set(blocks[len - 1].x, 63 - blocks[len - 1].z, blocks[len - 1].y,
-                                                players[p->player_id].block.red | (players[p->player_id].block.green << 8)
-                                                        | (players[p->player_id].block.blue << 16));
+                        int x = blocks[len - 1].x;
+                        int y = 63 - blocks[len - 1].z;
+                        int z = blocks[len - 1].y;
+                        if(map_isair(x, y, z)) {
+                                map_set(x, y, z, color);
+                                if(p->player_id == local_player_id)
+                                        glowing_blocks_confirm_local_build(x, y, z);
                         }
                         len--;
                 }
@@ -631,6 +642,7 @@ void read_PacketPlayerLeft(void* data, int len) {
 
 void read_PacketMapStart(void* data, int len) {
         if(demo_is_seeking()) return;
+        lighting_flashlight_reset();
         player_clear_corpses();
         bloodmarks_clear();
         damagenumbers_clear();
@@ -1443,7 +1455,31 @@ static void network_send_flags(int id, void* data, int len, enet_uint32 flags) {
         }
 }
 
+static void network_note_glowing_build(int id, const void* data, int len) {
+        if(!network_connected || demo_is_playing() || !glowing_blocks_placement_enabled())
+                return;
+
+        uint32_t color = players[local_player_id].block.red
+                | (players[local_player_id].block.green << 8)
+                | (players[local_player_id].block.blue << 16);
+        if(id == PACKET_BLOCKACTION_ID && len >= (int)sizeof(struct PacketBlockAction)) {
+                const struct PacketBlockAction* action = data;
+                if(action->player_id == local_player_id && action->action_type == ACTION_BUILD)
+                        glowing_blocks_note_local_build(action->x, 63 - action->z, action->y, color);
+        } else if(id == PACKET_BLOCKLINE_ID && len >= (int)sizeof(struct PacketBlockLine)) {
+                const struct PacketBlockLine* line = data;
+                if(line->player_id != local_player_id)
+                        return;
+                struct Point blocks[64];
+                int count = map_cube_line(line->sx, line->sy, line->sz,
+                                          line->ex, line->ey, line->ez, blocks);
+                for(int i = 0; i < count; i++)
+                        glowing_blocks_note_local_build(blocks[i].x, 63 - blocks[i].z, blocks[i].y, color);
+        }
+}
+
 void network_send(int id, void* data, int len) {
+        network_note_glowing_build(id, data, len);
         network_send_flags(id, data, len, ENET_PACKET_FLAG_RELIABLE);
 }
 
@@ -1452,6 +1488,8 @@ unsigned int network_ping() {
 }
 
 void network_disconnect() {
+        lighting_flashlight_reset();
+        glowing_blocks_clear();
         if(demo_is_playing()) {
                 demo_playback_close();
                 return;
@@ -1528,6 +1566,9 @@ int network_connect(char* ip, int port) {
         if(network_connected) {
                 network_disconnect();
         }
+        /* A connection attempt begins a fresh client-side lighting session,
+           including retries that never get far enough to receive a map. */
+        glowing_blocks_clear();
         if(settings.auto_demo_recording) {
                 demo_start_record();
         }
@@ -1628,6 +1669,8 @@ void network_service(void) {
                                 network_connected = 0;
                                 network_logged_in = 0;
                                 network_map_transfer_end = 0;
+                                lighting_flashlight_reset();
+                                glowing_blocks_clear();
                                 player_clear_corpses();
                                 bloodmarks_clear();
                                 damagenumbers_clear();

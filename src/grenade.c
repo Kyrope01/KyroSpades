@@ -34,6 +34,7 @@
 #include "damagenumbers.h"
 #include "camera.h"
 #include "cameracontroller.h"
+#include "lighting.h"
 
 struct entity_system grenades;
 
@@ -182,8 +183,17 @@ bool grenade_update_single(void* obj, void* user) {
 			float dist = len3D(camera_x - g->pos.x, camera_y - g->pos.y, camera_z - g->pos.z);
 			cameracontroller_add_shake(fminf(9.0F / (dist + 2.0F), 1.0F) * 0.7F);
 		}
-		particle_create(grenade_inwater(g) ? map_get(g->pos.x, 0, g->pos.z) : 0x505050, g->pos.x, g->pos.y + 1.5F,
+		bool exploded_in_water = grenade_inwater(g);
+		particle_create(exploded_in_water ? map_get(g->pos.x, 0, g->pos.z) : 0x505050, g->pos.x, g->pos.y + 1.5F,
 						g->pos.z, 20.0F, 1.5F, 64, 0.1F, 0.5F);
+		/* A decaying point light survives after the grenade entity is removed,
+		   so overlapping explosions can illuminate terrain simultaneously. */
+		if(settings.dynamic_lights && settings.flash_lights)
+			lighting_add_flash(g->pos.x, g->pos.y + 1.0F, g->pos.z,
+						   1.0F, exploded_in_water ? 0.35F : 0.42F,
+						   exploded_in_water ? 0.18F : 0.08F,
+						   exploded_in_water ? 12.0F : 20.0F,
+						   exploded_in_water ? 2.0F : 3.2F, 0.42F);
 
 		/* Blood + damage numbers for anyone caught in the blast, client-side
 		   estimate only (server remains authoritative for actual HP). Only

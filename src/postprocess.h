@@ -1,4 +1,3 @@
-
 /*
         Copyright (c) 2017-2020 ByteBit
 
@@ -18,27 +17,20 @@
         along with KyroSpades.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#ifndef WATER_H
-#define WATER_H
+#ifndef POSTPROCESS_H
+#define POSTPROCESS_H
 
 #include <stdbool.h>
 
-#define WATER_LEVEL 1.0F
+/* The HDR/bloom upgrade is intentionally isolated to strict OpenGL Core.
+ * Compatibility desktop and GLES retain the established single-pass effect. */
+bool postprocess_hdr_supported(void);
 
-/* Initialize/release the optional strict-Core water shader and the shared
- * CPU reflection worker. Legacy desktop and GLES keep the established path. */
-bool water_init(void);
-void water_deinit(void);
-bool water_gpu_supported(void);
-/* Discard cached topology/colors after a whole-map replacement. */
-void water_invalidate(void);
-/* Queue an incremental refresh after an individual terrain edit. */
-void water_map_changed(void);
+/* Build a half-resolution bright pass and four separable Gaussian blur pairs.
+ * Returns the blurred texture, or 0 so the caller can use its safe fallback.
+ * All OpenGL state touched by this function is restored before it returns. */
+unsigned int postprocess_bloom_render(unsigned int scene_texture, int width, int height, float threshold);
 
-bool water_shader_active(void);
-
-void water_reflection_pass(void);
-
-void water_render(void);
+void postprocess_deinit(void);
 
 #endif

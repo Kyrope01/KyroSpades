@@ -46,19 +46,27 @@
 #define glReadBuffer(x) ((void)(x))
 #include "gles_immediate_stubs.h" /* immediate-mode no-ops + ES 2.0 stubs */
 
-/* Color tracking declarations are in glx.h (included by all callers) */
+#define glDepthRange(a, b) glDepthRangef(a, b)
+#define glClearDepth(a) glClearDepthf(a)
+#endif
 
+#if (defined(OPENGL_ES) || defined(OPENGL_CORE)) && !defined(GLX_PROGRAMMABLE)
+#define GLX_PROGRAMMABLE
+#endif
+
+/* Programmable renderers keep legacy call sites source-compatible while
+ * routing their current colour into the default shader.  Unlike the former
+ * Core shim, this replaces real state rather than suppressing removed API. */
+#if defined(OPENGL_ES) || defined(OPENGL_CORE)
+void glx_set_color4f(float r, float g, float b, float a);
 #undef glColor4f
 #undef glColor3f
 #undef glColor3ub
 #undef glColor4ub
-#define glColor4f(r, g, b, a)    glx_set_color4f((r), (g), (b), (a))
-#define glColor3f(r, g, b)       glx_set_color4f((r), (g), (b), 1.0F)
-#define glColor3ub(r, g, b)      glx_set_color4f((r)/255.0F, (g)/255.0F, (b)/255.0F, 1.0F)
-#define glColor4ub(r, g, b, a)   glx_set_color4f((r)/255.0F, (g)/255.0F, (b)/255.0F, (a)/255.0F)
-
-#define glDepthRange(a, b) glDepthRangef(a, b)
-#define glClearDepth(a) glClearDepthf(a)
+#define glColor4f(r, g, b, a)  glx_set_color4f((r), (g), (b), (a))
+#define glColor3f(r, g, b)     glx_set_color4f((r), (g), (b), 1.0F)
+#define glColor3ub(r, g, b)    glx_set_color4f((r) / 255.0F, (g) / 255.0F, (b) / 255.0F, 1.0F)
+#define glColor4ub(r, g, b, a) glx_set_color4f((r) / 255.0F, (g) / 255.0F, (b) / 255.0F, (a) / 255.0F)
 #endif
 
 #ifdef USE_GLFW
@@ -133,7 +141,10 @@ static inline int ks_mkdir(const char* path, int mode) { return mkdir(path, mode
 #define len2D(x, y) sqrt((x) * (x) + (y) * (y))
 #define len3D(x, y, z) sqrt((x) * (x) + (y) * (y) + (z) * (z))
 
-#define rgba(r, g, b, a) (((int)(a) << 24) | ((int)(b) << 16) | ((int)(g) << 8) | (int)(r))
+/* Pack through unsigned values: opaque alpha sets bit 31, which is undefined
+ * when left-shifting a signed int and can miscompile colour/AO calculations. */
+#define rgba(r, g, b, a) ((((unsigned int)(a) & 0xFFU) << 24) | (((unsigned int)(b) & 0xFFU) << 16) \
+                          | (((unsigned int)(g) & 0xFFU) << 8) | ((unsigned int)(r) & 0xFFU))
 #define rgb(r, g, b) (((b) << 16) | ((g) << 8) | (r))
 #define rgb2bgr(col) rgb(blue(col), green(col), red(col))
 #define red(col) ((col)&0xFF)

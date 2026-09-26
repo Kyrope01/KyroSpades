@@ -24,6 +24,7 @@
 
 #include "common.h"
 #include "glx.h"
+#include "lighting.h"
 #include "player.h"
 #include "file.h"
 #include "camera.h"
@@ -59,6 +60,8 @@ struct kv6_t model_shotgun_tracer;
 struct kv6_t model_semi_casing;
 struct kv6_t model_smg_casing;
 struct kv6_t model_shotgun_casing;
+
+static float kv6_light_scale = 1.0F;
 
 static void kv6_load_file(struct kv6_t* kv6, char* filename, float scale) {
 	void* data = file_load(filename);
@@ -278,11 +281,16 @@ void kv6_calclight(int x, int y, int z) {
 	if(x >= 0 && y >= 0 && z >= 0)
 		f = map_sunblock(x, y, z);
 
+#ifdef OPENGL_CORE
+	kv6_light_scale = f;
+	glx_default_shader_set_light_scale(f);
+#endif
+#ifndef OPENGL_CORE
 	float lambient[4] = {0.5F * f, 0.5F * f, 0.5F * f, 1.0F};
 	float ldiffuse[4] = {0.5F * f, 0.5F * f, 0.5F * f, 1.0F};
-
 	glLightfv(GL_LIGHT0, GL_AMBIENT, lambient);
 	glLightfv(GL_LIGHT0, GL_DIFFUSE, ldiffuse);
+#endif
 }
 
 static int kv6_voxel_cmp(const void* a, const void* b) {
@@ -377,8 +385,15 @@ static void greedy_mesh(struct kv6_t* kv6, struct kv6_voxel* voxel, uint8_t* mar
 }
 
 static int kv6_program = -1;
-#if defined(OPENGL_ES)
-static int kv6_program_es2 = -1;
+#if defined(GLX_PROGRAMMABLE)
+static int kv6_program_explicit = -1;
+static bool model_programmable_active(void) {
+#ifdef OPENGL_ES
+	return gles_version >= 2;
+#else
+	return true;
+#endif
+}
 #endif
 void kv6_render(struct kv6_t* kv6, unsigned char team) {
 	if(!kv6)
@@ -414,7 +429,7 @@ void kv6_render(struct kv6_t* kv6, unsigned char team) {
 					r = g = b = 255;
 				}
 
-				tesselator_set_normal(tess, kv6_normals[a][0] * 128, -kv6_normals[a][2] * 128, kv6_normals[a][1] * 128);
+				tesselator_set_normal(tess, kv6_normals[a][0] * 127, -kv6_normals[a][2] * 127, kv6_normals[a][1] * 127);
 
 				if(voxel->visfaces & KV6_VIS_POS_Y) {
 					size_t max_x, max_z;
@@ -477,6 +492,11 @@ void kv6_render(struct kv6_t* kv6, unsigned char team) {
 
 			kv6->has_display_list = true;
 		} else {
+#if defined(GLX_PROGRAMMABLE)
+			if(model_programmable_active())
+				glx_use_default_shader();
+#endif
+#ifndef OPENGL_CORE
 			glEnable(GL_LIGHTING);
 			glEnable(GL_LIGHT0);
 			glEnable(GL_COLOR_MATERIAL);
@@ -497,10 +517,11 @@ void kv6_render(struct kv6_t* kv6, unsigned char team) {
 			glTexEnvi(GL_TEXTURE_ENV, GL_OPERAND1_RGB, GL_SRC_COLOR);
 			glTexEnvi(GL_TEXTURE_ENV, GL_OPERAND1_ALPHA, GL_SRC_ALPHA);
 			glBindTexture(GL_TEXTURE_2D, texture_dummy.texture_id);
+#endif
 
 		if(kv6->colorize) {
-#if defined(OPENGL_ES)
-			if(gles_version >= 2) {
+#if defined(GLX_PROGRAMMABLE)
+			if(model_programmable_active()) {
 				/* This (mesh, !voxlap_models) is the DEFAULT render path. The held
 				   block model's voxels are baked WHITE here with per-vertex colour,
 				   and the ES2 default shader computes a_Color * u_TeamColor. On ES2
@@ -511,8 +532,10 @@ void kv6_render(struct kv6_t* kv6, unsigned char team) {
 				   reset to white at the end of the function, so nothing else is
 				   affected. Only model_block sets colorize. */
 				glx_set_team_color(kv6->red, kv6->green, kv6->blue);
+#ifndef OPENGL_CORE
 			} else {
 				glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, (float[]) {kv6->red, kv6->green, kv6->blue, 1.0F});
+#endif
 			}
 #else
 			glEnable(GL_TEXTURE_2D);
@@ -527,32 +550,38 @@ void kv6_render(struct kv6_t* kv6, unsigned char team) {
 
 			glx_displaylist_draw(kv6->display_list + 0, GLX_DISPLAYLIST_NORMAL);
 
-		if(!kv6->colorize)
-#if !defined(OPENGL_ES)
-			glEnable(GL_TEXTURE_2D);
+#if !defined(OPENGL_ES) && !defined(OPENGL_CORE)
+			if(!kv6->colorize)
+				glEnable(GL_TEXTURE_2D);
 #endif
 
 			switch(team) {
 				case TEAM_1:
+#ifndef OPENGL_CORE
 					glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR,
 							   (float[]) {gamestate.team_1.red * 0.75F / 255.0F,
 										  gamestate.team_1.green * 0.75F / 255.0F,
 										  gamestate.team_1.blue * 0.75F / 255.0F, 1.0F});
+#endif
 					glx_set_team_color(gamestate.team_1.red * 0.75F / 255.0F,
 									   gamestate.team_1.green * 0.75F / 255.0F,
 									   gamestate.team_1.blue * 0.75F / 255.0F);
 					break;
 				case TEAM_2:
+#ifndef OPENGL_CORE
 					glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR,
 							   (float[]) {gamestate.team_2.red * 0.75F / 255.0F,
 										  gamestate.team_2.green * 0.75F / 255.0F,
 										  gamestate.team_2.blue * 0.75F / 255.0F, 1.0F});
+#endif
 					glx_set_team_color(gamestate.team_2.red * 0.75F / 255.0F,
 									   gamestate.team_2.green * 0.75F / 255.0F,
 									   gamestate.team_2.blue * 0.75F / 255.0F);
 					break;
 				default:
+#ifndef OPENGL_CORE
 					glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, (float[]) {0, 0, 0, 1});
+#endif
 					glx_set_team_color(0.0F, 0.0F, 0.0F);
 			}
 
@@ -563,6 +592,7 @@ void kv6_render(struct kv6_t* kv6, unsigned char team) {
 			matrix_pop(matrix_model);
 
 		glBindTexture(GL_TEXTURE_2D, 0);
+#ifndef OPENGL_CORE
 		glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
 #if !defined(OPENGL_ES)
 		glDisable(GL_TEXTURE_2D);
@@ -572,6 +602,7 @@ void kv6_render(struct kv6_t* kv6, unsigned char team) {
 			glDisable(GL_COLOR_MATERIAL);
 			glDisable(GL_LIGHT0);
 			glDisable(GL_LIGHTING);
+#endif
 		}
 	} else {
 		// render like on voxlap
@@ -599,9 +630,9 @@ void kv6_render(struct kv6_t* kv6, unsigned char team) {
 				colors[ind][cnt[ind] * 4 + 2] = b;
 				colors[ind][cnt[ind] * 4 + 3] = 255;
 
-				normals[ind][cnt[ind] * 3 + 0] = kv6_normals[a][0] * 128;
-				normals[ind][cnt[ind] * 3 + 1] = -kv6_normals[a][2] * 128;
-				normals[ind][cnt[ind] * 3 + 2] = kv6_normals[a][1] * 128;
+				normals[ind][cnt[ind] * 3 + 0] = kv6_normals[a][0] * 127;
+				normals[ind][cnt[ind] * 3 + 1] = -kv6_normals[a][2] * 127;
+				normals[ind][cnt[ind] * 3 + 2] = kv6_normals[a][1] * 127;
 
 				vertices[ind][cnt[ind] * 3 + 0] = (kv6->voxels[i].x - kv6->xpiv + 0.5F) * kv6->scale;
 				vertices[ind][cnt[ind] * 3 + 1] = (kv6->voxels[i].z - kv6->zpiv + 0.5F) * kv6->scale;
@@ -617,10 +648,10 @@ void kv6_render(struct kv6_t* kv6, unsigned char team) {
 								   normals[1], NULL);
 
 			if(kv6_program < 0) {
-#if defined(OPENGL_ES)
-				if(gles_version >= 2) {
-					/* ES 2.0 KV6 shader: replace gl_ built-in attributes with user attributes */
-					kv6_program_es2
+#if defined(GLX_PROGRAMMABLE)
+				if(model_programmable_active()) {
+					/* Portable KV6 point shader with explicit vertex attributes. */
+					kv6_program_explicit
 						= glx_shader("attribute vec3 a_Position;\n"
 									 "attribute vec4 a_Color;\n"
 									 "attribute vec3 a_Normal;\n"
@@ -630,15 +661,53 @@ void kv6_render(struct kv6_t* kv6, unsigned char team) {
 									 "uniform mat4 model;\n"
 									 "uniform mat4 u_MVP;\n"
 									 "uniform float dist_factor;\n"
+									 "uniform float light_scale;\n"
 									 "uniform vec4 u_TeamColor;\n"
+									 "uniform vec3 u_SunDirection;\n"
+									 "uniform vec4 u_LightPositionRadius[4];\n"
+									 "uniform vec4 u_LightColorIntensity[4];\n"
+									 "uniform vec4 u_FlashlightDirection;\n"
 									 "varying vec4 v_Color;\n"
 									 "void main(void) {\n"
 									 "    gl_Position = u_MVP * vec4(a_Position, 1.0);\n"
-									 "    float dist = length((model * vec4(a_Position, 1.0)).xz - camera.xz) * dist_factor;\n"
-									 "    vec3 N = normalize(model * vec4(a_Normal, 0.0)).xyz;\n"
-									 "    vec3 L = normalize(vec3(0.0, -1.0, 1.0));\n"
+									 "    vec3 world = (model * vec4(a_Position, 1.0)).xyz;\n"
+									 "    float dist = length(world.xz - camera.xz) * dist_factor;\n"
+									 "    vec3 N = normalize((model * vec4(a_Normal, 0.0)).xyz);\n"
+									 "    vec3 L = normalize(u_SunDirection);\n"
 									 "    float d = clamp(dot(N, L), 0.0, 1.0) * 0.5 + 0.5;\n"
-									 "    v_Color = mix(vec4(d, d, d, 1.0) * a_Color * u_TeamColor, vec4(fog, 1.0), min(dist, 1.0));\n"
+									 "    vec3 light = vec3(d * light_scale);\n"
+					 "    bool flashlight_active = u_FlashlightDirection.w >= 0.0;\n"
+					 "    for(int i = 0; i < 4; ++i) {\n"
+					 "        vec4 pr = u_LightPositionRadius[i];\n"
+					 "        vec4 ci = u_LightColorIntensity[i];\n"
+					 "        if(ci.a > 0.0 && (i != 3 || !flashlight_active)) {\n"
+					 "            vec3 delta = pr.xyz - world;\n"
+					 "            float distance_to_light = length(delta);\n"
+					 "            float ratio = distance_to_light / max(pr.w, 0.0001);\n"
+					 "            float attenuation = clamp(1.0 - ratio, 0.0, 1.0);\n"
+					 "            attenuation *= attenuation;\n"
+					 "            vec3 light_direction = delta / max(distance_to_light, 0.0001);\n"
+					 "            float diffuse = max(dot(N, light_direction), 0.0);\n"
+					 "            light += ci.rgb * ci.a * attenuation * (0.18 + 0.82 * diffuse);\n"
+					 "        }\n"
+					 "    }\n"
+					 "    if(flashlight_active) {\n"
+					 "        vec4 pr = u_LightPositionRadius[3];\n"
+					 "        vec4 ci = u_LightColorIntensity[3];\n"
+					 "        vec3 from_light = world - pr.xyz;\n"
+					 "        float light_distance = length(from_light);\n"
+					 "        vec3 ray_direction = from_light / max(light_distance, 0.0001);\n"
+					 "        float cone = smoothstep(u_FlashlightDirection.w, min(u_FlashlightDirection.w + 0.12, 0.999),\n"
+					 "                                dot(ray_direction, normalize(u_FlashlightDirection.xyz)));\n"
+					 "        float range = clamp(1.0 - light_distance / max(pr.w, 0.0001), 0.0, 1.0);\n"
+					 "        range *= range;\n"
+					 "        float diffuse = max(dot(N, -ray_direction), 0.0);\n"
+					 "        float fill = clamp(1.0 - light_distance / 10.0, 0.0, 1.0);\n"
+					 "        fill = 0.30 * fill * fill;\n"
+					 "        light += ci.rgb * ci.a * (cone * range + fill) * (0.18 + 0.82 * diffuse);\n"
+					 "    }\n"
+					 "    vec4 lit = vec4(light, 1.0) * a_Color * u_TeamColor;\n"
+									 "    v_Color = mix(lit, vec4(fog, 1.0), min(dist, 1.0));\n"
 									 "    gl_PointSize = size / gl_Position.w;\n"
 									 "}\n",
 									 "precision mediump float;\n"
@@ -646,31 +715,63 @@ void kv6_render(struct kv6_t* kv6, unsigned char team) {
 									 "void main(void) {\n"
 									 "    gl_FragColor = v_Color;\n"
 									 "}\n");
-				if(kv6_program_es2) {
-					log_info("KV6 ES 2.0 shader compiled (program %u)", kv6_program_es2);
-					glUseProgram(kv6_program_es2);
-					GLint loc = glGetUniformLocation(kv6_program_es2, "u_TeamColor");
+				if(kv6_program_explicit) {
+					log_info("KV6 explicit-attribute shader compiled (program %u)", kv6_program_explicit);
+					glx_use_program(kv6_program_explicit);
+					GLint loc = glx_uniform_location(kv6_program_explicit, "u_TeamColor");
 					if(loc >= 0)
 						glUniform4f(loc, 1.0F, 1.0F, 1.0F, 1.0F);
-					glUseProgram(0);
+					glx_use_program(0);
 				}
 				kv6_program = 0;
 				}
 #endif
-#ifndef OPENGL_ES
+#if !defined(GLX_PROGRAMMABLE)
 				kv6_program
 					= glx_shader("uniform float size;\n"
 								 "uniform vec3 fog;\n"
 								 "uniform vec3 camera;\n"
 								 "uniform mat4 model;\n"
 								 "uniform float dist_factor;\n"
+								 "uniform vec3 u_SunDirection;\n"
+								 "uniform vec4 u_LightPositionRadius[4];\n"
+								 "uniform vec4 u_LightColorIntensity[4];\n"
+								 "uniform vec4 u_FlashlightDirection;\n"
 								 "void main(void) {\n"
 								 "	gl_Position = gl_ModelViewProjectionMatrix*gl_Vertex;\n"
-								 "	float dist = length((model*gl_Vertex).xz-camera.xz)*dist_factor;\n"
-								 "	vec3 N = normalize(model*vec4(gl_Normal,0)).xyz;\n"
-								 "	vec3 L = normalize(vec3(0,-1,1));\n"
+								 "	vec3 world = (model*gl_Vertex).xyz;\n"
+								 "	float dist = length(world.xz-camera.xz)*dist_factor;\n"
+								 "	vec3 N = normalize((model*vec4(gl_Normal,0)).xyz);\n"
+								 "	vec3 L = normalize(u_SunDirection);\n"
 								 "	float d = clamp(dot(N,L),0.0,1.0)*0.5+0.5;\n"
-								 "	gl_FrontColor = mix(vec4(d,d,d,1.0)*gl_Color,vec4(fog,1.0),min(dist,1.0));\n"
+								 "	vec3 light = vec3(d);\n"
+								 "	bool flashlight_active=u_FlashlightDirection.w>=0.0;\n"
+								 "	for(int i=0;i<4;++i){\n"
+								 "		vec4 pr=u_LightPositionRadius[i];\n"
+								 "		vec4 ci=u_LightColorIntensity[i];\n"
+								 "		if(ci.a>0.0&&(i!=3||!flashlight_active)){\n"
+								 "			vec3 delta=pr.xyz-world;\n"
+								 "			float distance_to_light=length(delta);\n"
+								 "			float ratio=distance_to_light/max(pr.w,0.0001);\n"
+								 "			float attenuation=clamp(1.0-ratio,0.0,1.0);\n"
+								 "			attenuation*=attenuation;\n"
+								 "			vec3 light_direction=delta/max(distance_to_light,0.0001);\n"
+								 "			float diffuse=max(dot(N,light_direction),0.0);\n"
+								 "			light+=ci.rgb*ci.a*attenuation*(0.18+0.82*diffuse);\n"
+								 "		}\n"
+								 "	}\n"
+								 "	if(flashlight_active){\n"
+								 "		vec4 pr=u_LightPositionRadius[3],ci=u_LightColorIntensity[3];\n"
+								 "		vec3 from_light=world-pr.xyz;\n"
+								 "		float light_distance=length(from_light);\n"
+								 "		vec3 ray_direction=from_light/max(light_distance,0.0001);\n"
+								 "		float cone=smoothstep(u_FlashlightDirection.w,min(u_FlashlightDirection.w+0.12,0.999),dot(ray_direction,normalize(u_FlashlightDirection.xyz)));\n"
+								 "		float range=clamp(1.0-light_distance/max(pr.w,0.0001),0.0,1.0);range*=range;\n"
+								 "		float diffuse=max(dot(N,-ray_direction),0.0);\n"
+								 "		float fill=clamp(1.0-light_distance/10.0,0.0,1.0);fill=0.30*fill*fill;\n"
+								 "		light+=ci.rgb*ci.a*(cone*range+fill)*(0.18+0.82*diffuse);\n"
+								 "	}\n"
+								 "	gl_FrontColor = mix(vec4(light,1.0)*gl_Color,vec4(fog,1.0),min(dist,1.0));\n"
 								 "	gl_PointSize = size/gl_Position.w;\n"
 								 "}\n",
 								 "void main(void) {\n"
@@ -687,26 +788,44 @@ void kv6_render(struct kv6_t* kv6, unsigned char team) {
 		float len_y = len3D(matrix_model[0][1], matrix_model[1][1], matrix_model[2][1]);
 		float len_z = len3D(matrix_model[0][2], matrix_model[1][2], matrix_model[2][2]);
 
-#if defined(OPENGL_ES)
-		if(gles_version >= 2) {
-			/* ES 2.0: use KV6 shader with vertex attributes */
-			int prog = kv6_program_es2;
+#if defined(GLX_PROGRAMMABLE)
+		if(model_programmable_active()) {
+			/* Programmable renderer: use the explicit-attribute KV6 shader. */
+			int prog = kv6_program_explicit;
 			if(prog) {
 				mat4 mv, mvp;
 				glmc_mat4_mul(matrix_view, matrix_model, mv);
 				glmc_mat4_mul(matrix_projection, mv, mvp);
-				glUseProgram(prog);
-				glUniform1f(glGetUniformLocation(prog, "dist_factor"),
-							glx_fog ? 1.0F / settings.render_distance : 0.0F);
-				glUniform1f(glGetUniformLocation(prog, "size"),
-							1.414F * near_plane_height * kv6->scale * (len_x + len_y + len_z) / 3.0F);
-				glUniform3f(glGetUniformLocation(prog, "fog"), fog_color[0], fog_color[1], fog_color[2]);
-				glUniform3f(glGetUniformLocation(prog, "camera"), camera_x, camera_y, camera_z);
-				glUniformMatrix4fv(glGetUniformLocation(prog, "model"), 1, 0, (float*)matrix_model);
-				glUniformMatrix4fv(glGetUniformLocation(prog, "u_MVP"), 1, GL_FALSE, (float*)mvp);
-			}
-		} else {
+				glx_use_program(prog);
+#ifdef OPENGL_CORE
+				glEnable(GL_PROGRAM_POINT_SIZE);
 #endif
+				glUniform1f(glx_uniform_location(prog, "dist_factor"),
+							glx_fog ? 1.0F / settings.render_distance : 0.0F);
+				glUniform1f(glx_uniform_location(prog, "size"),
+							1.414F * near_plane_height * kv6->scale * (len_x + len_y + len_z) / 3.0F);
+				glUniform1f(glx_uniform_location(prog, "light_scale"), kv6_light_scale);
+				glUniform3f(glx_uniform_location(prog, "fog"), fog_color[0], fog_color[1], fog_color[2]);
+				glUniform3f(glx_uniform_location(prog, "camera"), camera_x, camera_y, camera_z);
+				glUniformMatrix4fv(glx_uniform_location(prog, "model"), 1, 0, (float*)matrix_model);
+				glUniformMatrix4fv(glx_uniform_location(prog, "u_MVP"), 1, GL_FALSE, (float*)mvp);
+				lighting_apply_program((unsigned int)prog);
+			}
+#ifdef OPENGL_CORE
+			else {
+				/* Keep optional point models renderable if their specialized
+				   shader fails: the mandatory default Core shader is a safe,
+				   one-pixel point fallback. */
+				glx_use_default_shader();
+				matrix_upload();
+			}
+#endif
+		}
+#ifndef OPENGL_CORE
+		else {
+#endif
+#endif
+#ifndef OPENGL_CORE
 		if(!glx_version) {
 			glPointParameterfv(GL_POINT_DISTANCE_ATTENUATION, (float[]) {0.0F, 0.0F, 1.0F});
 			glPointSize(1.414F * near_plane_height * kv6->scale * (len_x + len_y + len_z) / 3.0F);
@@ -721,23 +840,30 @@ void kv6_render(struct kv6_t* kv6, unsigned char team) {
 
 		if(glx_version) {
 			glEnable(GL_PROGRAM_POINT_SIZE);
-			glUseProgram(kv6_program);
-			glUniform1f(glGetUniformLocation(kv6_program, "dist_factor"),
+			glx_use_program(kv6_program);
+			glUniform1f(glx_uniform_location(kv6_program, "dist_factor"),
 						glx_fog ? 1.0F / settings.render_distance : 0.0F);
-			glUniform1f(glGetUniformLocation(kv6_program, "size"),
+			glUniform1f(glx_uniform_location(kv6_program, "size"),
 						1.414F * near_plane_height * kv6->scale * (len_x + len_y + len_z) / 3.0F);
-			glUniform3f(glGetUniformLocation(kv6_program, "fog"), fog_color[0], fog_color[1], fog_color[2]);
-			glUniform3f(glGetUniformLocation(kv6_program, "camera"), camera_x, camera_y, camera_z);
-			glUniformMatrix4fv(glGetUniformLocation(kv6_program, "model"), 1, 0, (float*)matrix_model);
+			glUniform3f(glx_uniform_location(kv6_program, "fog"), fog_color[0], fog_color[1], fog_color[2]);
+			glUniform3f(glx_uniform_location(kv6_program, "camera"), camera_x, camera_y, camera_z);
+			glUniformMatrix4fv(glx_uniform_location(kv6_program, "model"), 1, 0, (float*)matrix_model);
+			lighting_apply_program((unsigned int)kv6_program);
 		}
-#if defined(OPENGL_ES)
+#if defined(GLX_PROGRAMMABLE)
 		}
 #endif
+#endif /* !OPENGL_CORE */
 		if(settings.multisamples)
 			glDisable(GL_MULTISAMPLE);
 
-		if(kv6->colorize)
+		if(kv6->colorize) {
 			glColor3f(kv6->red, kv6->green, kv6->blue);
+#ifdef OPENGL_CORE
+			if(model_programmable_active())
+				glx_set_team_color(kv6->red, kv6->green, kv6->blue);
+#endif
+		}
 
 		glx_displaylist_draw(kv6->display_list + 0, GLX_DISPLAYLIST_POINTS);
 
@@ -765,20 +891,30 @@ void kv6_render(struct kv6_t* kv6, unsigned char team) {
 
 		if(settings.multisamples)
 			glEnable(GL_MULTISAMPLE);
-#if defined(OPENGL_ES)
-		if(gles_version >= 2) {
-			if(kv6_program_es2)
-				glUseProgram(0);
-		} else {
+#if defined(GLX_PROGRAMMABLE)
+		if(model_programmable_active()) {
+			if(kv6_program_explicit) {
+				glx_use_program(0);
+#ifdef OPENGL_CORE
+				glDisable(GL_PROGRAM_POINT_SIZE);
 #endif
+			}
+		}
+#ifndef OPENGL_CORE
+		else {
+#endif
+#endif
+#ifndef OPENGL_CORE
 		if(glx_version) {
-			glUseProgram(0);
+			glx_use_program(0);
 			glDisable(GL_PROGRAM_POINT_SIZE);
 		}
-#if defined(OPENGL_ES)
+#if defined(GLX_PROGRAMMABLE)
 		}
 #endif
+#endif
 
+#ifndef OPENGL_CORE
 #if defined(OPENGL_ES)
 		if(gles_version < 2) {
 #endif
@@ -788,6 +924,7 @@ void kv6_render(struct kv6_t* kv6, unsigned char team) {
 		glDisable(GL_LIGHTING);
 #if defined(OPENGL_ES)
 		}
+#endif
 #endif
 	}
 }

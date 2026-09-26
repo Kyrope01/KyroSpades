@@ -32,6 +32,7 @@
 #include "config.h"
 #include "sound.h"
 #include "entitysystem.h"
+#include "lighting.h"
 
 struct entity_system tracers;
 
@@ -102,6 +103,7 @@ void tracer_add(int type, float x, float y, float z, float dx, float dy, float d
 }
 
 static bool tracer_render_single(void* obj, void* user) {
+	(void)user;
 	struct Tracer* t = (struct Tracer*)obj;
 
 	matrix_push(matrix_model);
@@ -123,6 +125,43 @@ static bool tracer_render_single(void* obj, void* user) {
 
 void tracer_render() {
 	entitysys_iterate(&tracers, NULL, tracer_render_single);
+}
+
+struct tracer_light_profile {
+	float red, green, blue;
+	float radius;
+	float intensity;
+};
+
+static bool tracer_submit_light_single(void* obj, void* user) {
+	(void)user;
+	struct Tracer* t = (struct Tracer*)obj;
+	static const struct tracer_light_profile profiles[] = {
+		/* Rifle, SMG, shotgun. Fast tracers advance several blocks per
+		   rendered frame, so their radii overlap successive positions and
+		   produce a continuous, visible moving glow rather than faint spots. */
+		{1.00F, 0.58F, 0.18F, 8.0F, 1.60F},
+		{1.00F, 0.48F, 0.12F, 7.0F, 1.35F},
+		/* Shotgun emits several tracers per shot; keep each pellet lower so
+		   overlapping lights stay comparable to one bright projectile. */
+		{1.00F, 0.42F, 0.10F, 10.0F, 1.00F},
+	};
+
+	if(t->type < 0 || t->type >= (int)(sizeof(profiles) / sizeof(profiles[0])))
+		return false;
+	const struct tracer_light_profile* profile = &profiles[t->type];
+	lighting_submit_point(t->r.origin.x, t->r.origin.y, t->r.origin.z,
+					   profile->red, profile->green, profile->blue,
+					   profile->radius, profile->intensity);
+	return false;
+}
+
+void tracer_submit_lights(void) {
+	/* Keep the disabled path at one branch: no entity walk and no light-queue
+	   work, preserving the established tracer rendering cost and appearance. */
+	if(!settings.tracer_lights || !lighting_supported())
+		return;
+	entitysys_iterate(&tracers, NULL, tracer_submit_light_single);
 }
 
 static bool tracer_update_single(void* obj, void* user) {

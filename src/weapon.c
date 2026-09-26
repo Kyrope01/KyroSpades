@@ -31,9 +31,21 @@
 #include "hud.h"
 #include "bloodmarks.h"
 #include "damagenumbers.h"
+#include "lighting.h"
 
 float weapon_reload_start, weapon_last_shot;
 unsigned char weapon_reload_inprogress = 0;
+
+static void weapon_muzzle_light(struct Player* player) {
+	if(!settings.dynamic_lights || !settings.flash_lights)
+		return;
+	float radius = player->weapon == WEAPON_SHOTGUN ? 10.0F : 7.0F;
+	float intensity = player->weapon == WEAPON_SHOTGUN ? 2.2F : 1.5F;
+	float x = player->physics.eye.x + player->orientation.x * 0.9F;
+	float y = player->physics.eye.y + player_height(player) + player->orientation.y * 0.9F;
+	float z = player->physics.eye.z + player->orientation.z * 0.9F;
+	lighting_add_flash(x, y, z, 1.0F, 0.48F, 0.14F, radius, intensity, 0.085F);
+}
 
 void weapon_update() {
 	float t, delay = weapon_delay(players[local_player_id].weapon);
@@ -349,7 +361,7 @@ void weapon_shoot() {
 					network_send(PACKET_BLOCKACTION_ID, &blk, sizeof(blk));
 					// read_PacketBlockAction(&blk,sizeof(blk));
 				} else {
-					particle_create(map_get(hit.x, hit.y, hit.z), hit.xb + 0.5F, hit.yb + 0.5F, hit.zb + 0.5F, 2.5F,
+					particle_create_block(map_get(hit.x, hit.y, hit.z), hit.xb + 0.5F, hit.yb + 0.5F, hit.zb + 0.5F, 2.5F,
 									1.0F, 4, 0.1F, 0.25F);
 				}
 				break;
@@ -409,6 +421,7 @@ void weapon_shoot() {
 	}
 
 	sound_create(SOUND_LOCAL, weapon_sound(players[local_player_id].weapon), players[local_player_id].pos.x,
-				 players[local_player_id].pos.y, players[local_player_id].pos.z);
+					 players[local_player_id].pos.y, players[local_player_id].pos.z);
 	particle_create_casing(&players[local_player_id]);
+	weapon_muzzle_light(&players[local_player_id]);
 }

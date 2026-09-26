@@ -112,6 +112,7 @@ extern struct RENDER_OPTIONS {
         int rain;
         int snow;
         int rain_snow_3d;
+        int particle_animations;
         float exposure;
         float saturation;
         float contrast;
@@ -125,6 +126,14 @@ extern struct RENDER_OPTIONS {
         int   chromatic_aberration;           /* 0 = off, 1 = on */
         float chromatic_aberration_strength;  /* 0..10 — pixel offset at screen edge */
         int   filmic_tonemapping;             /* 0 = off, 1 = ACES filmic curve */
+        int   hdr_rendering;                   /* floating-point scene target on OpenGL Core */
+        int   bloom;                           /* multipass Core bloom; compatibility fallback elsewhere */
+        float bloom_strength;
+        float bloom_threshold;
+        int dynamic_lights;                   /* forward point lights and terrain material shading */
+        int flash_lights;                     /* muzzle-flash and grenade-explosion point lights */
+        int tracer_lights;                    /* moving projectile-tracer point lights */
+        float dynamic_light_intensity;        /* global dynamic-light intensity multiplier, 1..10 */
         int disable_dynamic_fov;
         int textured_blocks;
         int minimap_zoom;

@@ -32,7 +32,6 @@
 
 int cameracontroller_bodyview_mode = 0;
 int cameracontroller_bodyview_player = 0;
-int cameracontroller_yclamp = 0;
 float cameracontroller_bodyview_zoom = 0.0F;
 
 // Smooth crouch interpolation for local player

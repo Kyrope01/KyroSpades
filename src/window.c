@@ -227,8 +227,15 @@ static void window_impl_mouse(GLFWwindow* window, double x, double y) {
 static void window_impl_mousescroll(GLFWwindow* window, double xoffset, double yoffset) {
 	mouse_scroll(hud_window, xoffset, yoffset);
 }
+static int window_creating_context = 0;
+
 static void window_impl_error(int i, const char* s) {
-	on_error(i, s);
+	/* A failed preferred-context attempt is recoverable; do not route it to
+	   on_error(), whose interactive pause would prevent the fallback retry. */
+	if(window_creating_context)
+		log_warn("GLFW context creation error [%i]: %s", i, s);
+	else
+		on_error(i, s);
 }
 static void window_impl_reshape(GLFWwindow* window, int width, int height) {
 	reshape(hud_window, width, height);
@@ -396,20 +403,40 @@ void window_init() {
 	static struct window_instance i;
 	hud_window = &i;
 
-	glfwWindowHint(GLFW_VISIBLE, 0);
-	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 1);
-	glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
-#ifdef OPENGL_ES
-	glfwWindowHint(GLFW_CLIENT_API, GLFW_OPENGL_ES_API);
-	glfwWindowHint(GLFW_CONTEXT_CREATION_API, GLFW_EGL_CONTEXT_API);
-#endif
-
 	glfwSetErrorCallback(window_impl_error);
 
 	if(!glfwInit()) {
 		log_fatal("GLFW3 init failed");
 		exit(1);
 	}
+
+	/* Core builds require a real OpenGL 3.3 Core context: silently falling back
+	   to compatibility mode would hide removed-API regressions. Builds with
+	   ENABLE_OPENGL_CORE=OFF retain the established compatibility ladder. */
+	glfwDefaultWindowHints();
+	glfwWindowHint(GLFW_VISIBLE, 0);
+#ifndef OPENGL_ES
+#ifdef OPENGL_CORE
+	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+	glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+	glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+#ifdef OS_APPLE
+	glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
+#endif
+#elif defined(OS_APPLE)
+	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 2);
+	glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
+#else
+	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+	glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+	glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_COMPAT_PROFILE);
+#endif
+#else
+	glfwWindowHint(GLFW_CLIENT_API, GLFW_OPENGL_ES_API);
+	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 2);
+	glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
+	glfwWindowHint(GLFW_CONTEXT_CREATION_API, GLFW_EGL_CONTEXT_API);
+#endif
 
 	/* GLFW key tokens are positional: on AZERTY and other layouts the
 	   physical key that prints '/' is NOT GLFW_KEY_SLASH, so the command
@@ -453,11 +480,39 @@ void window_init() {
 	   is enough to take the compositor session down (blank screen, back to GDM).
 	   The SDL backend below already worked this way: it creates a windowed window
 	   and only ever asks for SDL_WINDOW_FULLSCREEN_DESKTOP. */
+	window_creating_context = 1;
 	hud_window->impl
 		= glfwCreateWindow(settings.window_width, settings.window_height, "KyroSpades " KYROSPADES_VERSION,
 						   NULL, NULL);
+#if !defined(OPENGL_ES) && !defined(OPENGL_CORE)
+#ifndef OS_APPLE
 	if(!hud_window->impl) {
+		log_warn("OpenGL 3.3 compatibility context failed; trying OpenGL 2.1");
+		glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 2);
+		glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
+		glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_ANY_PROFILE);
+		hud_window->impl
+			= glfwCreateWindow(settings.window_width, settings.window_height, "KyroSpades " KYROSPADES_VERSION,
+							   NULL, NULL);
+	}
+#endif
+	if(!hud_window->impl) {
+		log_warn("OpenGL 2.1 context failed; trying the legacy OpenGL 1.1 renderer");
+		glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 1);
+		glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
+		glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_ANY_PROFILE);
+		hud_window->impl
+			= glfwCreateWindow(settings.window_width, settings.window_height, "KyroSpades " KYROSPADES_VERSION,
+							   NULL, NULL);
+	}
+#endif
+	window_creating_context = 0;
+	if(!hud_window->impl) {
+#ifdef OPENGL_CORE
+		log_fatal("Could not create the required OpenGL 3.3 Core context");
+#else
 		log_fatal("Could not open window");
+#endif
 		glfwTerminate();
 		exit(1);
 	}
@@ -873,17 +928,24 @@ void window_init() {
 
 	SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_TIMER);
 
-	/* GL attributes MUST be set before SDL_CreateWindow: the EGLConfig /
-	   pixel format (color sizes, depth size and, crucially, the renderable
-	   type ES1 vs ES2) is chosen at window creation time. Setting them after
-	   the window exists makes the context/config pairing driver-dependent.
-	   Try ES 2.0 first; fall back to ES 1.1 if context creation fails. */
-	int es_major = 2, es_minor = 0;
+	/* GL attributes MUST be set before SDL_CreateWindow. Core builds require a
+	   strict 3.3 Core context; legacy desktop and mobile builds retain their
+	   compatibility fallback ladders. */
 #ifdef OPENGL_ES
+	int context_major = 2, context_minor = 0;
+#elif defined(OPENGL_CORE)
+	int context_major = 3, context_minor = 3;
+#elif defined(OS_APPLE)
+	int context_major = 2, context_minor = 1;
+#else
+	int context_major = 3, context_minor = 3;
+#endif
+	SDL_GLContext ctx = NULL;
+#ifndef OPENGL_CORE
 retry_context:
 #endif
-	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, es_major);
-	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, es_minor);
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, context_major);
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, context_minor);
 	SDL_GL_SetAttribute(SDL_GL_RED_SIZE, 8);
 	SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, 8);
 	SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE, 8);
@@ -891,6 +953,16 @@ retry_context:
 	SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 #ifdef OPENGL_ES
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+#else
+#ifdef OPENGL_CORE
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+#ifdef OS_APPLE
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG);
+#endif
+#else
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,
+						context_major >= 3 ? SDL_GL_CONTEXT_PROFILE_COMPATIBILITY : 0);
+#endif
 #endif
 
 	/* ALLOW_HIGHDPI is needed on iOS/Android where the native pixel density is
@@ -907,22 +979,44 @@ retry_context:
 						   settings.window_width, settings.window_height,
 						   win_flags);
 
-	SDL_GLContext ctx = SDL_GL_CreateContext(hud_window->impl);
+	ctx = SDL_GL_CreateContext(hud_window->impl);
 	if(!ctx) {
 #ifdef OPENGL_ES
-		if(es_major == 2) {
+		if(context_major == 2) {
 			log_warn("GLES 2.0 context failed (%s), trying GLES 1.1 fallback", SDL_GetError());
 			SDL_DestroyWindow(hud_window->impl);
-			es_major = 1;
-			es_minor = 1;
+			context_major = 1;
+			context_minor = 1;
+			goto retry_context;
+		}
+#elif !defined(OPENGL_CORE)
+		if(context_major == 3) {
+			log_warn("OpenGL 3.3 compatibility context failed (%s), trying OpenGL 2.1", SDL_GetError());
+			SDL_DestroyWindow(hud_window->impl);
+			context_major = 2;
+			context_minor = 1;
+			goto retry_context;
+		}
+		if(context_major == 2) {
+			log_warn("OpenGL 2.1 context failed (%s), trying OpenGL 1.1 fallback", SDL_GetError());
+			SDL_DestroyWindow(hud_window->impl);
+			context_major = 1;
+			context_minor = 1;
 			goto retry_context;
 		}
 #endif
-		log_error("SDL_GL_CreateContext failed: %s", SDL_GetError());
+#ifdef OPENGL_CORE
+		log_fatal("Required OpenGL 3.3 Core context creation failed: %s", SDL_GetError());
+#else
+		log_fatal("SDL_GL_CreateContext failed: %s", SDL_GetError());
+#endif
+		SDL_DestroyWindow(hud_window->impl);
+		SDL_Quit();
+		exit(1);
 	}
 #ifdef OPENGL_ES
-	gles_version = es_major;
-	log_info("OpenGL ES context: %d.%d", es_major, es_minor);
+	gles_version = context_major;
+	log_info("OpenGL ES context: %d.%d", context_major, context_minor);
 #endif
 
 	/* The actual drawable size can differ from the requested window size

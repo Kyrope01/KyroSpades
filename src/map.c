@@ -39,6 +39,8 @@
 #include "tesselator.h"
 #include "utils.h"
 #include "config.h"
+#include "water.h"
+#include "glowing_blocks.h"
 #include "channel.h"
 #include "entitysystem.h"
 
@@ -119,6 +121,19 @@ int map_damage_get(int x, int y, int z) {
         return voxel ? voxel->damage : 0;
 }
 
+static int map_nearest_wrapped_coordinate(int coordinate, float view, int size) {
+        if(size <= 0)
+                return coordinate;
+        return coordinate + (int)roundf((view - coordinate) / size) * size;
+}
+
+static unsigned int damaged_voxel_tint(int damage) {
+        /* Damage above 67 sets bit 31. Shift unsigned data so darker tint
+           stages stay well-defined instead of invoking signed-shift UB. */
+        unsigned int alpha = (unsigned int)fminf(fmaxf(damage * 1.9125F, 0.0F), 255.0F);
+        return alpha << 24;
+}
+
 static bool damaged_voxel_update(void* key, void* value, void* user) {
         uint32_t pos = *(uint32_t*)key;
         struct damaged_voxel* voxel = (struct damaged_voxel*)value;
@@ -130,14 +145,20 @@ static bool damaged_voxel_update(void* key, void* value, void* user) {
         if(window_time() - voxel->timer > 10.0F || map_isair(x, y, z))
                 return true;
 
-        tesselator_set_color(tess, rgba(0, 0, 0, voxel->damage * 1.9125F));
+        /* Terrain chunks wrap around the map near its X/Z seams. Draw the
+           damage overlay on the same nearest copy, otherwise the tint vanishes
+           while the wrapped terrain remains visible. */
+        int draw_x = map_nearest_wrapped_coordinate(x, camera_x, map_size_x);
+        int draw_z = map_nearest_wrapped_coordinate(z, camera_z, map_size_z);
 
-        tesselator_addi_cube_face(tess, CUBE_FACE_Z_N, x, y, z);
-        tesselator_addi_cube_face(tess, CUBE_FACE_Z_P, x, y, z);
-        tesselator_addi_cube_face(tess, CUBE_FACE_X_N, x, y, z);
-        tesselator_addi_cube_face(tess, CUBE_FACE_X_P, x, y, z);
-        tesselator_addi_cube_face(tess, CUBE_FACE_Y_P, x, y, z);
-        tesselator_addi_cube_face(tess, CUBE_FACE_Y_N, x, y, z);
+        tesselator_set_color(tess, damaged_voxel_tint(voxel->damage));
+
+        tesselator_addi_cube_face(tess, CUBE_FACE_Z_N, draw_x, y, draw_z);
+        tesselator_addi_cube_face(tess, CUBE_FACE_Z_P, draw_x, y, draw_z);
+        tesselator_addi_cube_face(tess, CUBE_FACE_X_N, draw_x, y, draw_z);
+        tesselator_addi_cube_face(tess, CUBE_FACE_X_P, draw_x, y, draw_z);
+        tesselator_addi_cube_face(tess, CUBE_FACE_Y_P, draw_x, y, draw_z);
+        tesselator_addi_cube_face(tess, CUBE_FACE_Y_N, draw_x, y, draw_z);
 
         return false;
 }
@@ -145,9 +166,14 @@ static bool damaged_voxel_update(void* key, void* value, void* user) {
 void map_damaged_voxels_render() {
         matrix_identity(matrix_model);
         matrix_upload();
-        // glEnable(GL_POLYGON_OFFSET_FILL);
-        // glPolygonOffset(0.0F,-100.0F);
-        glDepthFunc(GL_EQUAL);
+        /* The terrain and overlay can use different vertex shaders. Exact
+           GL_EQUAL depth matching is therefore not invariant across drivers
+           and made the dark damage tint flicker. Pull the coplanar overlay a
+           tiny, deterministic amount toward the camera instead. */
+        glEnable(GL_POLYGON_OFFSET_FILL);
+        glPolygonOffset(-1.0F, -1.0F);
+        glDepthFunc(GL_LEQUAL);
+        glDepthMask(GL_FALSE);
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
@@ -157,10 +183,10 @@ void map_damaged_voxels_render() {
 
         tesselator_draw(&map_damaged_tesselator, 1);
 
-        glDepthFunc(GL_LEQUAL);
         glDisable(GL_BLEND);
-        // glPolygonOffset(0.0F,0.0F);
-        // glDisable(GL_POLYGON_OFFSET_FILL);
+        glDepthMask(GL_TRUE);
+        glPolygonOffset(0.0F, 0.0F);
+        glDisable(GL_POLYGON_OFFSET_FILL);
 }
 
 struct map_work_packet {
@@ -410,7 +436,7 @@ static bool falling_blocks_particles(void* key, void* value, void* user) {
         vec4 v = {pos_keyx(pos) - collapsing->p2.x + 0.5F, pos_keyy(pos) - collapsing->p2.y + 0.5F,
                           pos_keyz(pos) - collapsing->p2.z + 0.5F, 1.0F};
         matrix_vector(matrix_model, v);
-        particle_create(color, v[0], v[1], v[2], 2.5F, 1.0F, 2, 0.25F, 0.4F);
+        particle_create_block(color, v[0], v[1], v[2], 2.5F, 1.0F, 2, 0.25F, 0.4F);
 
         return true;
 }
@@ -521,6 +547,7 @@ void* falling_blocks_worker(void* user) {
 }
 
 void map_init() {
+        glowing_blocks_clear();
         libvxl_create(&map, 512, 512, 64, NULL, 0);
         tesselator_create(&map_damaged_tesselator, VERTEX_INT, 0, 0);
         pthread_rwlock_init(&map_lock, NULL);
@@ -584,6 +611,36 @@ unsigned int map_get_nolock(int x, int y, int z) {
         return rgb2bgr(libvxl_map_get(&map, x, z, map_size_y - 1 - y));
 }
 
+static void map_queue_block_updates(int x, int y, int z) {
+        int update_x[2] = {x, x};
+        int update_z[2] = {z, z};
+        int update_x_count = 1;
+        int update_z_count = 1;
+        int x_off = x % CHUNK_SIZE;
+        int z_off = z % CHUNK_SIZE;
+
+        /* A block on a chunk edge contributes faces to the neighboring chunk.
+           Wrap these coordinates at the map seam as terrain rendering does. */
+        if(x_off == 0)
+                update_x[update_x_count++] = x > 0 ? x - 1 : map_size_x - 1;
+        else if(x_off == CHUNK_SIZE - 1)
+                update_x[update_x_count++] = x + 1 < map_size_x ? x + 1 : 0;
+        if(z_off == 0)
+                update_z[update_z_count++] = z > 0 ? z - 1 : map_size_z - 1;
+        else if(z_off == CHUNK_SIZE - 1)
+                update_z[update_z_count++] = z + 1 < map_size_z ? z + 1 : 0;
+
+        for(int xi = 0; xi < update_x_count; xi++) {
+                for(int zi = 0; zi < update_z_count; zi++) {
+                        /* Cardinal neighbors always need their shared face
+                           rebuilt. AO also samples the diagonal chunk at a
+                           corner, including corners that wrap across the map. */
+                        if(xi == 0 || zi == 0 || settings.ambient_occlusion)
+                                chunk_block_update(update_x[xi], y, update_z[zi]);
+                }
+        }
+}
+
 void map_set(int x, int y, int z, unsigned int color) {
         if(x < 0 || y < 0 || z < 0 || x >= map_size_x || y >= map_size_y || z >= map_size_z)
                 return;
@@ -599,39 +656,9 @@ void map_set(int x, int y, int z, unsigned int color) {
 
         pthread_rwlock_unlock(&map_lock);
 
-        chunk_block_update(x, y, z);
-
-        int x_off = x % CHUNK_SIZE;
-        int z_off = z % CHUNK_SIZE;
-
-        if(x > 0 && x_off == 0)
-                chunk_block_update(x - 1, y, z);
-        if(z > 0 && z_off == 0)
-                chunk_block_update(x, y, z - 1);
-        if(x < map_size_x - 1 && x_off == CHUNK_SIZE - 1)
-                chunk_block_update(x + 1, y, z);
-        if(z < map_size_z - 1 && z_off == CHUNK_SIZE - 1)
-                chunk_block_update(x, y, z + 1);
-
-        if(settings.ambient_occlusion) {
-                if(x > 0 && z > 0 && x_off == 0 && z_off == 0)
-                        chunk_block_update(x - 1, y, z - 1);
-                if(x < map_size_x - 1 && z < map_size_z - 1 && x_off == CHUNK_SIZE - 1 && z_off == CHUNK_SIZE - 1)
-                        chunk_block_update(x + 1, y, z + 1);
-                if(x > 0 && z < map_size_z - 1 && x_off == 0 && z_off == CHUNK_SIZE - 1)
-                        chunk_block_update(x - 1, y, z + 1);
-                if(x < map_size_x - 1 && z > 0 && x_off == CHUNK_SIZE - 1 && z_off == 0)
-                        chunk_block_update(x + 1, y, z - 1);
-        }
-
-        if(x == 0)
-                chunk_block_update(map_size_x - 1, y, z);
-        if(x == map_size_x - 1)
-                chunk_block_update(0, y, z);
-        if(z == 0)
-                chunk_block_update(x, y, map_size_z - 1);
-        if(z == map_size_z - 1)
-                chunk_block_update(x, y, 0);
+        map_queue_block_updates(x, y, z);
+        water_map_changed();
+        glowing_blocks_map_changed(x, y, z, color);
 }
 
 // Copyright (c) Mathias Kaerlev 2011-2012 (but might be original code by Ben himself)
@@ -761,6 +788,8 @@ void map_vxl_load(void* v, size_t size) {
         libvxl_free(&map);
         libvxl_create(&map, 512, 512, 64, v, size);
         pthread_rwlock_unlock(&map_lock);
+        glowing_blocks_clear();
+        water_invalidate();
 }
 
 void map_save_file(const char* filename) {

@@ -64,6 +64,14 @@ void camera_hit_mask(struct Camera_HitType* hit, int exclude_player, float x, fl
 					 float ray_y, float ray_z, float range);
 
 float camera_fov_scaled(float dt);
+
+/* ADS (aim down sights) transition, 0 = hip, 1 = fully aimed, already
+   smoothstepped.  Animates both into and out of ADS over 150 ms when the
+   "ADS zoom animation" setting is on; snaps otherwise.  Updated once per
+   frame by camera_ads_update(). */
+extern float camera_ads_progress;       // camera zoom (not while sprinting)
+extern float camera_ads_scope_progress; // scope overlay image
+void camera_ads_update(float dt);
 void camera_ExtractFrustum(void);
 unsigned char camera_PointInFrustum(float x, float y, float z);
 int camera_CubeInFrustum(float x, float y, float z, float size, float size_y);

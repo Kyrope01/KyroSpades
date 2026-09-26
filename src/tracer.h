@@ -38,6 +38,8 @@ void tracer_pvelocity(float* o, struct Player* p);
 void tracer_add(int type, float x, float y, float z, float dx, float dy, float dz);
 void tracer_update(float dt);
 void tracer_render(void);
+/* Submit current tracer positions to the bounded per-frame lighting queue. */
+void tracer_submit_lights(void);
 void tracer_init(void);
 
 #endif

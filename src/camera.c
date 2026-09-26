@@ -47,6 +47,62 @@ float camera_eye_height = 0.0F;
 float camera_movement_x = 0.0F, camera_movement_y = 0.0F, camera_movement_z = 0.0F;
 float camera_speed = 32.0F;
 
+#define CAMERA_ADS_ANIM_TIME 0.15F
+
+float camera_ads_progress = 0.0F;
+float camera_ads_scope_progress = 0.0F;
+
+static float camera_smoothstep(float x) {
+	x = fmaxf(0.0F, fminf(1.0F, x));
+	return x * x * (3.0F - 2.0F * x);
+}
+
+/* Moves a linear 0..1 value towards 1 while `active` and back to 0 after
+   release.  While active it only starts rising once rmb_start is reached,
+   which keeps the existing "ADS delayed after item switch/reload" behaviour
+   (rmb_start is pushed into the future there).  Because it continues from its
+   current value, re-aiming halfway through the zoom-out never jumps. */
+static float camera_ads_step(float value, int active, float rmb_start, float dt) {
+	if(!settings.ads_zoom_animation)
+		return active ? 1.0F : 0.0F;
+	if(active) {
+		if(window_time() >= rmb_start)
+			value += dt / CAMERA_ADS_ANIM_TIME;
+	} else {
+		value -= dt / CAMERA_ADS_ANIM_TIME;
+	}
+	return fmaxf(0.0F, fminf(1.0F, value));
+}
+
+void camera_ads_update(float dt) {
+	static float cam_linear = 0.0F;
+	static float scope_linear = 0.0F;
+
+	int render_fpv = (camera_mode == CAMERAMODE_FPS)
+		|| ((camera_mode == CAMERAMODE_BODYVIEW || camera_mode == CAMERAMODE_SPECTATOR)
+			&& cameracontroller_bodyview_mode);
+	int local_id = (camera_mode == CAMERAMODE_FPS) ? local_player_id : cameracontroller_bodyview_player;
+
+	/* No gun, dead, not first person, or invalid player: drop ADS instantly
+	   (nothing to animate out of, e.g. switching to the spade). */
+	if(!render_fpv || local_id < 0 || local_id >= PLAYERS_MAX || !players[local_id].alive
+	   || players[local_id].held_item != TOOL_GUN || dt < 0.0F) {
+		cam_linear = scope_linear = 0.0F;
+		camera_ads_progress = camera_ads_scope_progress = 0.0F;
+		return;
+	}
+
+	struct Player* p = &players[local_id];
+	int rmb = p->input.buttons.rmb;
+	int cam_active = rmb && (!p->input.keys.sprint || p->input.keys.crouch);
+
+	cam_linear = camera_ads_step(cam_linear, cam_active, p->input.buttons.rmb_start, dt);
+	scope_linear = camera_ads_step(scope_linear, rmb, p->input.buttons.rmb_start, dt);
+
+	camera_ads_progress = camera_smoothstep(cam_linear);
+	camera_ads_scope_progress = camera_smoothstep(scope_linear);
+}
+
 float camera_fov_scaled(float dt) {
 	int render_fpv = (camera_mode == CAMERAMODE_FPS)
 		|| ((camera_mode == CAMERAMODE_BODYVIEW || camera_mode == CAMERAMODE_SPECTATOR)
@@ -76,10 +132,11 @@ float camera_fov_scaled(float dt) {
 	current_fov_offset = current_fov_offset + (target_fov_offset - current_fov_offset) * fminf(lerp_speed, 1.0F);
 
 	float normal_fov = settings.camera_fov + current_fov_offset;
+	/* camera_ads_progress is > 0 while aiming AND while animating back out
+	   after release, so the zoom-out is as smooth as the zoom-in. */
 	if(render_fpv && local_id >= 0 && local_id < PLAYERS_MAX
-	   && players[local_id].held_item == TOOL_GUN && players[local_id].input.buttons.rmb
-	   && (!players[local_id].input.keys.sprint || players[local_id].input.keys.crouch)
-	   && players[local_id].alive) {
+	   && players[local_id].held_item == TOOL_GUN && players[local_id].alive
+	   && camera_ads_progress > 0.0F) {
 		float ads_fov = CAMERA_DEFAULT_FOV;
 		switch(players[local_id].weapon) {
 			case WEAPON_RIFLE: ads_fov = settings.rifle_ads_fov; break;
@@ -89,18 +146,9 @@ float camera_fov_scaled(float dt) {
 		}
 		float target_ads_fov = ads_fov * atan(tan((ads_fov / 180.0F * PI) / 2) / 2.0F) * 2.0F;
 
-		/* Use the same 150 ms smoothstep as the scope PNG. This keeps the
-		   optical zoom and image size synchronized instead of snapping the
-		   camera FOV while the scope is still growing into place. It also
-		   relies on rmb_start representing the initial press (not being reset
-		   each held frame; see cameracontroller_fps). */
-		if(settings.ads_zoom_animation) {
-			float progress = (window_time() - players[local_id].input.buttons.rmb_start) / 0.15F;
-			progress = fmaxf(0.0F, fminf(1.0F, progress));
-			progress = progress * progress * (3.0F - 2.0F * progress);
-			return normal_fov + (target_ads_fov - normal_fov) * progress;
-		}
-		return target_ads_fov;
+		/* Same 150 ms smoothstep as the scope PNG (see camera_ads_update), in
+		   both directions.  Progress is 1 when the animation setting is off. */
+		return normal_fov + (target_ads_fov - normal_fov) * camera_ads_progress;
 	}
 	return normal_fov;
 }
@@ -485,7 +533,9 @@ void camera_inside_block_render(void) {
 	GLboolean blend_was_on = glIsEnabled(GL_BLEND);
 	glDisable(GL_CULL_FACE);
 	glDisable(GL_BLEND);
+#ifndef OPENGL_CORE
 	glDisable(GL_TEXTURE_2D);
+#endif
 	glDepthFunc(GL_LEQUAL);
 	glDepthMask(GL_TRUE);
 

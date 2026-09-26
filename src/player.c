@@ -41,6 +41,7 @@
 #include "hud.h"
 #include "bloodmarks.h"
 #include "damagenumbers.h"
+#include "lighting.h"
 #include <math.h>
 #include "cameracontroller.h"
 static float os_sprint_state=0, os_sprint_smooth=0, os_raise_state=1, os_last_time=0, os_aim_state=0, os_aim_smooth=0;
@@ -664,17 +665,14 @@ void player_local_correct(float nx, float ny, float nz) {
 }
 
 void player_update(float dt, int locked) {
-	/* dt is identical for every player in this call, so the smoothing
-	   exponents below are loop-invariant -- compute them once instead of
-	   twice per axis (6 pow() calls) for every one of the up to 256
-	   player slots, every physics tick. Also use powf() (float) instead
-	   of pow() (double) since all operands here are float anyway. */
-	const float smooth_decay = powf(0.9F, dt * 60.0F);
-	const float smooth_gain = powf(0.1F, dt * 60.0F);
-
-	/* Correction-blend decay rate (adaptive to measured WorldUpdate
-	   cadence). exp() composes exactly across the small fast-loop steps. */
-	float off_decay = expf(-dt * network_correction_rate());
+	/* The fixed-step call only advances authoritative movement.  Smoothing
+	   and correction decay belong to the render-rate call, so calculating
+	   their transcendental factors for the fixed-step call was pure waste
+	   (and happened once per tick even when nobody was connected remotely). */
+	float smooth_decay = 1.0F;
+	float smooth_gain = 1.0F;
+	float off_decay = 1.0F;
+	int smoothing_ready = 0;
 
 	for(int k = 0; k < PLAYERS_MAX; k++) {
 		if(players[k].connected) {
@@ -682,6 +680,16 @@ void player_update(float dt, int locked) {
 				player_move(&players[k], dt, k);
 			} else {
 				if(k != local_player_id) {
+					if(!smoothing_ready) {
+						/* dt is identical for every player in this call, so these
+						   loop-invariant factors are only needed when a remote
+						   player actually exists. */
+						smooth_decay = powf(0.9F, dt * 60.0F);
+						smooth_gain = powf(0.1F, dt * 60.0F);
+						off_decay = expf(-dt * network_correction_rate());
+						smoothing_ready = 1;
+					}
+
 					// smooth out player orientation
 					players[k].orientation_smooth.x = players[k].orientation_smooth.x * smooth_decay
 						+ players[k].orientation.x * smooth_gain;
@@ -704,7 +712,11 @@ void player_update(float dt, int locked) {
 			}
 		}
 	}
-	player_update_corpses(dt);
+	/* Corpses are render-rate entities. Updating them from both the fixed
+	   simulation call and the fast call advanced them twice per frame and
+	   doubled their collision work. */
+	if(!locked)
+		player_update_corpses(dt);
 }
 
 void player_render_all() {
@@ -763,7 +775,7 @@ void player_render_all() {
 							local_player_blocks = min(local_player_blocks + 1, 50);
 							// read_PacketBlockAction(&blk,sizeof(blk));
 						} else {
-							particle_create(map_get(hit.x, hit.y, hit.z), hit.xb + 0.5F, hit.yb + 0.5F, hit.zb + 0.5F,
+							particle_create_block(map_get(hit.x, hit.y, hit.z), hit.xb + 0.5F, hit.yb + 0.5F, hit.zb + 0.5F,
 											2.5F, 1.0F, 4, 0.1F, 0.25F);
 						}
 						break;
@@ -858,6 +870,16 @@ void player_render_all() {
 							   players[k].physics.eye.y + player_height(&players[k]), players[k].physics.eye.z, o[0],
 							   o[1], o[2]);
 					particle_create_casing(&players[k]);
+					if(settings.dynamic_lights && settings.flash_lights) {
+						float radius = players[k].weapon == WEAPON_SHOTGUN ? 10.0F : 7.0F;
+						float intensity = players[k].weapon == WEAPON_SHOTGUN ? 2.2F : 1.5F;
+						float mx = players[k].physics.eye.x + players[k].orientation.x * 0.9F;
+						float my = players[k].physics.eye.y + player_height(&players[k])
+							+ players[k].orientation.y * 0.9F;
+						float mz = players[k].physics.eye.z + players[k].orientation.z * 0.9F;
+						lighting_add_flash(mx, my, mz, 1.0F, 0.48F, 0.14F,
+						                   radius, intensity, 0.085F);
+					}
 					switch(hit.type) {
 						case CAMERA_HITTYPE_PLAYER: {
 							if(k == local_player_id) {
@@ -882,7 +904,7 @@ void player_render_all() {
 							break;
 						}
 						case CAMERA_HITTYPE_BLOCK:
-							particle_create(map_get(hit.x, hit.y, hit.z), hit.xb + 0.5F, hit.yb + 0.5F, hit.zb + 0.5F,
+							particle_create_block(map_get(hit.x, hit.y, hit.z), hit.xb + 0.5F, hit.yb + 0.5F, hit.zb + 0.5F,
 											2.5F, 1.0F, 4, 0.1F, 0.25F);
 							break;
 					}
@@ -980,8 +1002,7 @@ static void player_esp_draw_cuboid_lines(float x0, float y0, float z0, float x1,
 		x0,y1,z0, x1,y1,z0,  x1,y1,z0, x1,y1,z1,  x1,y1,z1, x0,y1,z1,  x0,y1,z1, x0,y1,z0,
 		x0,y0,z0, x0,y1,z0,  x1,y0,z0, x1,y1,z0,  x1,y0,z1, x1,y1,z1,  x0,y0,z1, x0,y1,z1,
 	};
-	glVertexPointer(3, GL_FLOAT, 0, vertices);
-	glDrawArrays(GL_LINES, 0, 24);
+	glx_draw_vertices_3d(vertices, 24, GL_LINES);
 }
 
 static void player_esp_draw_cuboid_fill(float x0, float y0, float z0, float x1, float y1, float z1) {
@@ -993,8 +1014,7 @@ static void player_esp_draw_cuboid_fill(float x0, float y0, float z0, float x1, 
 		/* -z     */ x0,y0,z0, x1,y1,z0, x0,y1,z0,  x0,y0,z0, x1,y0,z0, x1,y1,z0,
 		/* +z     */ x0,y0,z1, x0,y1,z1, x1,y1,z1,  x0,y0,z1, x1,y1,z1, x1,y0,z1,
 	};
-	glVertexPointer(3, GL_FLOAT, 0, vertices);
-	glDrawArrays(GL_TRIANGLES, 0, 36);
+	glx_draw_vertices_3d(vertices, 36, GL_TRIANGLES);
 }
 
 static void player_esp_draw_hitbox(const struct hitbox* box, int fill) {
@@ -1169,14 +1189,17 @@ static void player_draw_esp_box(struct Player* p) {
 	a /= 0.25F;
 	b /= 0.25F;
 
-	glLineWidth(1.0F);
+	glx_set_line_width(1.0F);
 	player_esp_color(p->team);
 	/* ESP outlines are informational overlays, not world geometry: disable fog,
 	   lighting and texturing so the line color is exactly the team color.  The
 	   previous version only disabled the spherical fog texture unit; if texture0
 	   or lighting was left enabled by nearby model rendering, the lines could be
 	   blended/modulated into the map fog color. */
-#ifndef OPENGL_ES
+#ifdef OPENGL_CORE
+	GLboolean cull_was_on = glIsEnabled(GL_CULL_FACE);
+	if(cull_was_on) glDisable(GL_CULL_FACE);
+#elif !defined(OPENGL_ES)
 	GLboolean fog_was_on = glIsEnabled(GL_FOG);
 	GLboolean tex_was_on = glIsEnabled(GL_TEXTURE_2D);
 	GLboolean lighting_was_on = glIsEnabled(GL_LIGHTING);
@@ -1191,7 +1214,6 @@ static void player_draw_esp_box(struct Player* p) {
 	glx_disable_sphericalfog();
 	glDisable(GL_DEPTH_TEST);
 	glDepthMask(GL_FALSE);
-	glEnableClientState(GL_VERTEX_ARRAY);
 
 	matrix_push(matrix_model);
 	matrix_identity(matrix_model);
@@ -1247,11 +1269,12 @@ static void player_draw_esp_box(struct Player* p) {
 	player_esp_draw_part(&box_arm_right, p->team);
 
 	matrix_pop(matrix_model);
-	glDisableClientState(GL_VERTEX_ARRAY);
 	glDepthMask(GL_TRUE);
 	glEnable(GL_DEPTH_TEST);
 	glx_enable_sphericalfog();
-#ifndef OPENGL_ES
+#ifdef OPENGL_CORE
+	if(cull_was_on) glEnable(GL_CULL_FACE);
+#elif !defined(OPENGL_ES)
 	if(cull_was_on) glEnable(GL_CULL_FACE);
 	if(color_material_was_on) glEnable(GL_COLOR_MATERIAL);
 	if(lighting_was_on) glEnable(GL_LIGHTING);
@@ -1285,8 +1308,7 @@ void player_render(struct Player* p, int id) {
 		}
 
 		font_select(FONT_FIXEDSYS);
-		glEnable(GL_ALPHA_TEST);
-		glAlphaFunc(GL_GREATER, 0.5F);
+		glx_set_alpha_test(true, 0.5F);
 		if(esp_active) {
 			glDisable(GL_DEPTH_TEST);
 		}
@@ -1294,7 +1316,7 @@ void player_render(struct Player* p, int id) {
 		if(esp_active) {
 			glEnable(GL_DEPTH_TEST);
 		}
-		glDisable(GL_ALPHA_TEST);
+		glx_set_alpha_test(false, 0.0F);
 		matrix_pop(matrix_model);
 		matrix_upload();
 	}
@@ -1579,7 +1601,10 @@ void player_render(struct Player* p, int id) {
 			if(timeSinceShot >= 0 && timeSinceShot < 0.40f) {
 				float delay = weapon_delay(p->weapon);
 				float t = 1.0f - timeSinceShot / delay;
-				if(t < 0) t = 0; if(t > 1) t = 1;
+				if(t < 0)
+					t = 0;
+				if(t > 1)
+					t = 1;
 				float kick = t * t * (3.0f - 2.0f * t);
 				float pitch=0, yaw=0, roll=0, back=0, up=0;
 				/* Pick recoil variation once per shot, deterministically from the
@@ -1897,23 +1922,32 @@ int player_move(struct Player* p, float fsynctics, int id) {
 	if((p->input.keys.up || p->input.keys.down) && (p->input.keys.left || p->input.keys.right))
 		f *= SQRT; // if strafe + forward/backwards then limit diagonal velocity
 
-	float len = sqrtf(p->orientation.x * p->orientation.x + p->orientation.y * p->orientation.y);
-	float sx = -p->orientation.y / len;
-	float sy = p->orientation.x / len;
+	/* Do not normalize the view vector for idle players.  Most connected
+	   players are stationary at any given tick, and this sqrt/divide pair
+	   used to run for every one of them regardless of input. */
+	if(p->input.keys.up || p->input.keys.down || p->input.keys.left || p->input.keys.right) {
+		float len = sqrtf(p->orientation.x * p->orientation.x + p->orientation.y * p->orientation.y);
+		/* A malformed/early packet can contain a zero horizontal orientation;
+		   retain the old no-movement result instead of producing NaNs. */
+		if(len > 0.000001F) {
+			float sx = -p->orientation.y / len;
+			float sy = p->orientation.x / len;
 
-	if(p->input.keys.up) {
-		p->physics.velocity.x += p->orientation.x * f;
-		p->physics.velocity.y += p->orientation.y * f;
-	} else if(p->input.keys.down) {
-		p->physics.velocity.x -= p->orientation.x * f;
-		p->physics.velocity.y -= p->orientation.y * f;
-	}
-	if(p->input.keys.left) {
-		p->physics.velocity.x -= sx * f;
-		p->physics.velocity.y -= sy * f;
-	} else if(p->input.keys.right) {
-		p->physics.velocity.x += sx * f;
-		p->physics.velocity.y += sy * f;
+			if(p->input.keys.up) {
+				p->physics.velocity.x += p->orientation.x * f;
+				p->physics.velocity.y += p->orientation.y * f;
+			} else if(p->input.keys.down) {
+				p->physics.velocity.x -= p->orientation.x * f;
+				p->physics.velocity.y -= p->orientation.y * f;
+			}
+			if(p->input.keys.left) {
+				p->physics.velocity.x -= sx * f;
+				p->physics.velocity.y -= sy * f;
+			} else if(p->input.keys.right) {
+				p->physics.velocity.x += sx * f;
+				p->physics.velocity.y += sy * f;
+			}
+		}
 	}
 
 	f = fsynctics + 1;
@@ -1955,13 +1989,17 @@ int player_move(struct Player* p, float fsynctics, int id) {
 	player_coordsystem_adjust2(p);
 
 	if(p->input.keys.up || p->input.keys.down || p->input.keys.left || p->input.keys.right) {
-		if(game_time() - p->sound.feet_started > (p->input.keys.sprint ? (0.5F / 1.3F) : 0.5F)
+		/* One clock sample is enough for both footstep timers. Besides being
+		   cheaper, this keeps the two decisions consistent within a tick. */
+		float now = game_time();
+		float footstep_period = p->input.keys.sprint ? (0.5F / 1.3F) : 0.5F;
+		if(now - p->sound.feet_started > footstep_period
 		   && (!p->input.keys.crouch && !p->input.keys.sneak) && !p->physics.airborne
 		   && p->physics.velocity.x * p->physics.velocity.x + p->physics.velocity.z * p->physics.velocity.z
 		           > 0.125F * 0.125F) {
 			struct Sound_wav* footstep = (struct Sound_wav*[]) {
 				&sound_footstep1, &sound_footstep2, &sound_footstep3, &sound_footstep4,
-				&sound_wade1,	  &sound_wade2,		&sound_wade3,	  &sound_wade4,
+				&sound_wade1,	  &sound_wade2,		&sound_wade3,	&sound_wade4,
 			}[(rand() % 4) + (p->physics.wade ? 4 : 0)];
 
 			if(local) {
@@ -1970,10 +2008,10 @@ int player_move(struct Player* p, float fsynctics, int id) {
 				sound_create_sticky(footstep, p, id);
 			}
 
-			p->sound.feet_started = game_time();
+			p->sound.feet_started = now;
 		}
-		if(game_time() - p->sound.feet_started_cycle > (p->input.keys.sprint ? (0.5F / 1.3F) : 0.5F)) {
-			p->sound.feet_started_cycle = game_time();
+		if(now - p->sound.feet_started_cycle > footstep_period) {
+			p->sound.feet_started_cycle = now;
 			p->sound.feet_cylce = !p->sound.feet_cylce;
 		}
 	}

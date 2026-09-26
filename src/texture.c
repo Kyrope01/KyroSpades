@@ -27,7 +27,9 @@
 #include <sys/stat.h>
 
 #include "common.h"
+#include "config.h"
 #include "glx.h"
+#include "lighting.h"
 #include "texture.h"
 #include "map.h"
 #include "log.h"
@@ -46,7 +48,10 @@ struct texture texture_health;
 struct texture texture_block;
 struct texture texture_blocks;
 struct texture texture_blocks_custom;
+struct texture texture_blocks_normal;
+struct texture texture_blocks_material;
 int texture_blocks_custom_loaded = 0;
+int texture_blocks_materials_ready = 0;
 
 /* Colour lookup table granularity for custom block textures. Each axis of the
    8-bit RGB colour space is quantised into CUSTOM_LUT_DIM steps; the table maps
@@ -96,6 +101,7 @@ struct texture texture_ui_knob;
 struct texture texture_rain1;
 struct texture texture_rain2;
 struct texture texture_rain3;
+struct texture texture_particle_anim;
 
 static char* texture_flags[251]
         = {"AD",  "AE", "AF", "AG", "AI", "AL", "AM", "AN", "AO", "AQ", "AR", "AS", "AT", "AU", "AW", "AX", "AZ", "BA",
@@ -204,40 +210,59 @@ void texture_delete(struct texture* t) {
 
 #define texture_emit_rotated(tx, ty, x, y, a) cos(a) * (x)-sin(a) * (y) + (tx), sin(a) * (x) + cos(a) * (y) + (ty)
 
-#if defined(OPENGL_ES)
-static void es2_emit_quad(const float* vertices, const float* texcoords, float tex_enabled) {
+#if defined(GLX_PROGRAMMABLE)
+static bool texture_programmable_active(void) {
+#ifdef OPENGL_ES
+        return gles_version >= 2;
+#else
+        return true;
+#endif
+}
+
+static void programmable_emit_quad(const float* vertices, const float* texcoords, float tex_enabled) {
+        static GLuint quad_stream_vbo = 0;
         int prog = glx_default_shader_program();
         glx_use_default_shader();
-        glUniform4fv(glGetUniformLocation(prog, "u_Color"), 1, gles_current_color);
-        glUniform1f(glGetUniformLocation(prog, "u_HasVertexColor"), 0.0F);
-        glUniform1f(glGetUniformLocation(prog, "u_TextureEnabled"), tex_enabled);
-        glUniform1f(glGetUniformLocation(prog, "u_TexCoordScale"), 1.0F);
+        glUniform4fv(glx_uniform_location(prog, "u_Color"), 1, gles_current_color);
+        glUniform1f(glx_uniform_location(prog, "u_HasVertexColor"), 0.0F);
+        glUniform1f(glx_uniform_location(prog, "u_TextureEnabled"), tex_enabled);
+        glUniform1f(glx_uniform_location(prog, "u_LightingEnabled"), 0.0F);
+        glUniform1f(glx_uniform_location(prog, "u_TexCoordScale"), 1.0F);
         if(tex_enabled > 0.5F)
-                glUniform1i(glGetUniformLocation(prog, "u_Texture"), 0);
+                glUniform1i(glx_uniform_location(prog, "u_Texture"), 0);
 
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, vertices);
+        if(!quad_stream_vbo)
+                glGenBuffers(1, &quad_stream_vbo);
+        glBindBuffer(GL_ARRAY_BUFFER, quad_stream_vbo);
+        glBufferData(GL_ARRAY_BUFFER, 24 * sizeof(float), NULL, GL_STREAM_DRAW);
+        glBufferSubData(GL_ARRAY_BUFFER, 0, 12 * sizeof(float), vertices);
+        glBufferSubData(GL_ARRAY_BUFFER, 12 * sizeof(float), 12 * sizeof(float), texcoords);
+
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, (void*)0);
         glEnableVertexAttribArray(0);
-        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 0, texcoords);
+        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 0, (void*)(12 * sizeof(float)));
         glEnableVertexAttribArray(2);
 
         glDrawArrays(GL_TRIANGLES, 0, 6);
 
         glDisableVertexAttribArray(0);
         glDisableVertexAttribArray(2);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 #endif
 
 void texture_draw_sector(struct texture* t, float x, float y, float w, float h, float u, float v, float us, float vs) {
-#if defined(OPENGL_ES)
-        if(gles_version >= 2) {
+#if defined(GLX_PROGRAMMABLE)
+        if(texture_programmable_active()) {
                 glActiveTexture(GL_TEXTURE0);
                 glBindTexture(GL_TEXTURE_2D, t->texture_id);
                 float vertices[12] = {x, y, x, y - h, x + w, y - h, x, y, x + w, y - h, x + w, y};
                 float texcoords[12] = {u, v, u, v + vs, u + us, v + vs, u, v, u + us, v + vs, u + us, v};
-                es2_emit_quad(vertices, texcoords, 1.0F);
+                programmable_emit_quad(vertices, texcoords, 1.0F);
                 return;
         }
 #endif
+#ifndef OPENGL_CORE
         glDisableClientState(GL_COLOR_ARRAY);
         glDisableClientState(GL_NORMAL_ARRAY);
         glActiveTexture(GL_TEXTURE0);
@@ -261,11 +286,12 @@ void texture_draw_sector(struct texture* t, float x, float y, float w, float h, 
         glBindTexture(GL_TEXTURE_2D, 0);
         glDisable(GL_BLEND);
         glDisable(GL_TEXTURE_2D);
+#endif
 }
 
 void texture_draw(struct texture* t, float x, float y, float w, float h) {
-#if defined(OPENGL_ES)
-        if(gles_version >= 2) {
+#if defined(GLX_PROGRAMMABLE)
+        if(texture_programmable_active()) {
                 glEnable(GL_BLEND);
                 glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
                 texture_draw_sector(t, x, y, w, h, 0.0F, 0.0F, 1.0F, 1.0F);
@@ -274,6 +300,7 @@ void texture_draw(struct texture* t, float x, float y, float w, float h) {
                 return;
         }
 #endif
+#ifndef OPENGL_CORE
         glEnable(GL_TEXTURE_2D);
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -282,6 +309,7 @@ void texture_draw(struct texture* t, float x, float y, float w, float h) {
         glBindTexture(GL_TEXTURE_2D, 0);
         glDisable(GL_BLEND);
         glDisable(GL_TEXTURE_2D);
+#endif
 }
 
 void texture_draw_shadow(struct texture* t, float x, float y, float w, float h) {
@@ -297,8 +325,8 @@ void texture_draw_shadow(struct texture* t, float x, float y, float w, float h) 
 }
 
 void texture_draw_rotated(struct texture* t, float x, float y, float w, float h, float angle) {
-#if defined(OPENGL_ES)
-        if(gles_version >= 2) {
+#if defined(GLX_PROGRAMMABLE)
+        if(texture_programmable_active()) {
                 glEnable(GL_BLEND);
                 glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
                 glActiveTexture(GL_TEXTURE0);
@@ -308,12 +336,13 @@ void texture_draw_rotated(struct texture* t, float x, float y, float w, float h,
                            texture_emit_rotated(x, y, w / 2, -h / 2, angle), texture_emit_rotated(x, y, -w / 2, h / 2, angle),
                            texture_emit_rotated(x, y, w / 2, -h / 2, angle), texture_emit_rotated(x, y, w / 2, h / 2, angle)};
                 float texcoords[12] = {0.0F, 0.0F, 0.0F, 1.0F, 1.0F, 1.0F, 0.0F, 0.0F, 1.0F, 1.0F, 1.0F, 0.0F};
-                es2_emit_quad(vertices, texcoords, 1.0F);
+                programmable_emit_quad(vertices, texcoords, 1.0F);
                 glBindTexture(GL_TEXTURE_2D, 0);
                 glDisable(GL_BLEND);
                 return;
         }
 #endif
+#ifndef OPENGL_CORE
         glEnable(GL_TEXTURE_2D);
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -322,17 +351,19 @@ void texture_draw_rotated(struct texture* t, float x, float y, float w, float h,
         glBindTexture(GL_TEXTURE_2D, 0);
         glDisable(GL_BLEND);
         glDisable(GL_TEXTURE_2D);
+#endif
 }
 
 void texture_draw_empty(float x, float y, float w, float h) {
-#if defined(OPENGL_ES)
-        if(gles_version >= 2) {
+#if defined(GLX_PROGRAMMABLE)
+        if(texture_programmable_active()) {
                 float vertices[12] = {x, y, x, y - h, x + w, y - h, x, y, x + w, y - h, x + w, y};
                 float texcoords[12] = {0.0F, 0.0F, 0.0F, 1.0F, 1.0F, 1.0F, 0.0F, 0.0F, 1.0F, 1.0F, 1.0F, 0.0F};
-                es2_emit_quad(vertices, texcoords, 0.0F);
+                programmable_emit_quad(vertices, texcoords, 0.0F);
                 return;
         }
 #endif
+#ifndef OPENGL_CORE
         glDisableClientState(GL_COLOR_ARRAY);
         glDisableClientState(GL_NORMAL_ARRAY);
         glActiveTexture(GL_TEXTURE0);
@@ -347,20 +378,22 @@ void texture_draw_empty(float x, float y, float w, float h) {
         glDrawArrays(GL_TRIANGLES, 0, 6);
         glDisableClientState(GL_TEXTURE_COORD_ARRAY);
         glDisableClientState(GL_VERTEX_ARRAY);
+#endif
 }
 
 void texture_draw_empty_rotated(float x, float y, float w, float h, float angle) {
-#if defined(OPENGL_ES)
-        if(gles_version >= 2) {
+#if defined(GLX_PROGRAMMABLE)
+        if(texture_programmable_active()) {
                 float vertices[12]
                         = {texture_emit_rotated(x, y, -w / 2, h / 2, angle), texture_emit_rotated(x, y, -w / 2, -h / 2, angle),
                            texture_emit_rotated(x, y, w / 2, -h / 2, angle), texture_emit_rotated(x, y, -w / 2, h / 2, angle),
                            texture_emit_rotated(x, y, w / 2, -h / 2, angle), texture_emit_rotated(x, y, w / 2, h / 2, angle)};
                 float texcoords[12] = {0.0F, 0.0F, 0.0F, 1.0F, 1.0F, 1.0F, 0.0F, 0.0F, 1.0F, 1.0F, 1.0F, 0.0F};
-                es2_emit_quad(vertices, texcoords, 0.0F);
+                programmable_emit_quad(vertices, texcoords, 0.0F);
                 return;
         }
 #endif
+#ifndef OPENGL_CORE
         glDisableClientState(GL_COLOR_ARRAY);
         glDisableClientState(GL_NORMAL_ARRAY);
         glActiveTexture(GL_TEXTURE0);
@@ -378,6 +411,7 @@ void texture_draw_empty_rotated(float x, float y, float w, float h, float angle)
         glDrawArrays(GL_TRIANGLES, 0, 6);
         glDisableClientState(GL_TEXTURE_COORD_ARRAY);
         glDisableClientState(GL_VERTEX_ARRAY);
+#endif
 }
 
 void texture_resize_pow2(struct texture* t, int min_size) {
@@ -392,8 +426,15 @@ void texture_resize_pow2(struct texture* t, int min_size) {
         max_size = max(max_size, min_size);
 
         int w = 1, h = 1;
+#ifdef OPENGL_CORE
+        /* NPOT textures are core functionality; GL_EXTENSIONS is not a valid
+           glGetString query in a 3.3 Core context. */
+        const bool has_npot = true;
+#else
         const char* exts = (const char*)glGetString(GL_EXTENSIONS);
-        if(exts != NULL && strstr(exts, "ARB_texture_non_power_of_two") != NULL) {
+        const bool has_npot = exts != NULL && strstr(exts, "ARB_texture_non_power_of_two") != NULL;
+#endif
+        if(has_npot) {
                 if(t->width <= max_size && t->height <= max_size)
                         return;
                 w = t->width;
@@ -794,6 +835,96 @@ int texture_blocks_custom_grid(void) {
         return g_custom_grid;
 }
 
+static float texture_luminance(const unsigned char* pixel) {
+        return pixel[0] * 0.2126F + pixel[1] * 0.7152F + pixel[2] * 0.0722F;
+}
+
+/* Build material maps for any block atlas, including user-provided atlases.
+   Alpha stores height, RGB in the normal map stores a tangent-space normal;
+   the material map stores roughness/specular/emission. This gives old texture
+   packs a useful modern material response without requiring extra files. */
+bool texture_blocks_prepare_materials(void) {
+        if(texture_blocks_materials_ready)
+                return true;
+        struct texture* atlas = texture_blocks_atlas();
+        if(!atlas || !atlas->pixels || atlas->width < 1 || atlas->height < 1)
+                return false;
+
+        int w = atlas->width;
+        int h = atlas->height;
+        if((size_t)w > SIZE_MAX / 4U / (size_t)h)
+                return false;
+        size_t bytes = (size_t)w * (size_t)h * 4U;
+        unsigned char* normals = malloc(bytes);
+        unsigned char* materials = malloc(bytes);
+        CHECK_ALLOCATION_ERROR(normals)
+        CHECK_ALLOCATION_ERROR(materials)
+
+        int tile = (w >= CUSTOM_BLOCK_TILE && h >= CUSTOM_BLOCK_TILE) ? CUSTOM_BLOCK_TILE : max(w, h);
+        for(int y = 0; y < h; y++) {
+                for(int x = 0; x < w; x++) {
+                        int tile_x = (x / tile) * tile;
+                        int tile_y = (y / tile) * tile;
+                        int left = max(x - 1, tile_x);
+                        int right = min(x + 1, min(tile_x + tile - 1, w - 1));
+                        int up = max(y - 1, tile_y);
+                        int down = min(y + 1, min(tile_y + tile - 1, h - 1));
+                        const unsigned char* px_l = atlas->pixels + ((size_t)y * w + left) * 4;
+                        const unsigned char* px_r = atlas->pixels + ((size_t)y * w + right) * 4;
+                        const unsigned char* px_u = atlas->pixels + ((size_t)up * w + x) * 4;
+                        const unsigned char* px_d = atlas->pixels + ((size_t)down * w + x) * 4;
+                        const unsigned char* px = atlas->pixels + ((size_t)y * w + x) * 4;
+
+                        float dx = (texture_luminance(px_r) - texture_luminance(px_l)) / 255.0F;
+                        float dy = (texture_luminance(px_d) - texture_luminance(px_u)) / 255.0F;
+                        float nx = -dx * 1.8F;
+                        float ny = -dy * 1.8F;
+                        float nz = 1.0F;
+                        float inv_len = 1.0F / sqrtf(nx * nx + ny * ny + nz * nz);
+                        nx *= inv_len;
+                        ny *= inv_len;
+                        nz *= inv_len;
+
+                        size_t o = ((size_t)y * w + x) * 4;
+                        float luminance = texture_luminance(px) / 255.0F;
+                        float local_contrast = fminf((fabsf(dx) + fabsf(dy)) * 0.5F, 1.0F);
+                        normals[o + 0] = (unsigned char)((nx * 0.5F + 0.5F) * 255.0F);
+                        normals[o + 1] = (unsigned char)((ny * 0.5F + 0.5F) * 255.0F);
+                        normals[o + 2] = (unsigned char)((nz * 0.5F + 0.5F) * 255.0F);
+                        normals[o + 3] = (unsigned char)(luminance * 255.0F);
+                        materials[o + 0] = (unsigned char)((0.82F - 0.35F * local_contrast) * 255.0F); /* roughness */
+                        materials[o + 1] = (unsigned char)((0.05F + 0.20F * luminance) * 255.0F);      /* specular */
+                        materials[o + 2] = 0;                                                           /* emission */
+                        materials[o + 3] = 255;
+                }
+        }
+
+        GLint previous_active_texture = GL_TEXTURE0;
+        GLint previous_texture0 = 0;
+        glGetIntegerv(GL_ACTIVE_TEXTURE, &previous_active_texture);
+        glActiveTexture(GL_TEXTURE0);
+        glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous_texture0);
+        texture_create_buffer(&texture_blocks_normal, w, h, normals, 1);
+        texture_create_buffer(&texture_blocks_material, w, h, materials, 1);
+        texture_filter(&texture_blocks_normal, TEXTURE_WRAP_CLAMP);
+        texture_filter(&texture_blocks_material, TEXTURE_WRAP_CLAMP);
+        glBindTexture(GL_TEXTURE_2D, (GLuint)previous_texture0);
+        glActiveTexture((GLenum)previous_active_texture);
+        texture_blocks_materials_ready = 1;
+        log_info("Generated normal/material maps for the %ix%i block atlas", w, h);
+        return true;
+}
+
+void texture_blocks_release_materials(void) {
+        if(!texture_blocks_materials_ready)
+                return;
+        texture_delete(&texture_blocks_normal);
+        texture_delete(&texture_blocks_material);
+        memset(&texture_blocks_normal, 0, sizeof(texture_blocks_normal));
+        memset(&texture_blocks_material, 0, sizeof(texture_blocks_material));
+        texture_blocks_materials_ready = 0;
+}
+
 int texture_blocks_custom_tile(uint32_t color) {
         if(!texture_blocks_custom_loaded || !g_custom_lut)
                 return 0;
@@ -866,6 +997,90 @@ void texture_init() {
         texture_create(&texture_rain3, "png/weather_pack_rain_raindrop_3.png");
         texture_filter(&texture_rain3, TEXTURE_FILTER_LINEAR);
 
+        /* Animated block-debris sprite sheet ("Particle animations" setting).
+           Pre-process once at load so the sheet can be tinted per block colour:
+           1. Sheets saved without transparency (opaque white background) get the
+              near-white background keyed out, with a soft edge.
+           2. RGB is rescaled so the brightest pixel becomes 255; with GL_MODULATE
+              the particle then shows the block's own colour on its lit face
+              instead of a darkened version of it. */
+        if(texture_create(&texture_particle_anim, "png/particle_block_anim.png") && texture_particle_anim.pixels) {
+                struct texture* t = &texture_particle_anim;
+                size_t count = (size_t)t->width * (size_t)t->height;
+                unsigned char* px = t->pixels;
+
+                int has_alpha = 0;
+                for(size_t i = 0; i < count; i++) {
+                        if(px[i * 4 + 3] < 255) {
+                                has_alpha = 1;
+                                break;
+                        }
+                }
+
+                /* Only near-white pixels connected to the sheet border (the
+                   background between frames) are removed.  A plain "white ->
+                   transparent" pass would also punch holes in the light, lit
+                   faces of the cubes. */
+                if(!has_alpha) {
+                        int w = t->width, h = t->height;
+                        int* stack = malloc(sizeof(int) * (size_t)w * (size_t)h);
+                        if(stack) {
+                                int sp = 0;
+#define PANIM_BG(idx) (px[(idx) * 4 + 3] == 255 && min(px[(idx) * 4], min(px[(idx) * 4 + 1], px[(idx) * 4 + 2])) >= 235)
+#define PANIM_PUSH(idx)                          \
+        do {                                     \
+                int _i = (idx);                  \
+                if(PANIM_BG(_i)) {               \
+                        px[_i * 4 + 3] = 0;      \
+                        stack[sp++] = _i;        \
+                }                                \
+        } while(0)
+                                for(int x = 0; x < w; x++) {
+                                        PANIM_PUSH(x);
+                                        PANIM_PUSH((h - 1) * w + x);
+                                }
+                                for(int y = 0; y < h; y++) {
+                                        PANIM_PUSH(y * w);
+                                        PANIM_PUSH(y * w + w - 1);
+                                }
+                                while(sp > 0) {
+                                        int i = stack[--sp];
+                                        int x = i % w, y = i / w;
+                                        if(x > 0) PANIM_PUSH(i - 1);
+                                        if(x < w - 1) PANIM_PUSH(i + 1);
+                                        if(y > 0) PANIM_PUSH(i - w);
+                                        if(y < h - 1) PANIM_PUSH(i + w);
+                                }
+#undef PANIM_PUSH
+#undef PANIM_BG
+                                free(stack);
+                        }
+                }
+
+                int brightest = 0;
+                for(size_t i = 0; i < count; i++) {
+                        unsigned char* c = px + i * 4;
+                        if(c[3] > 128)
+                                brightest = max(brightest, max(c[0], max(c[1], c[2])));
+                }
+
+                for(size_t i = 0; i < count; i++) {
+                        unsigned char* c = px + i * 4;
+                        if(c[3] == 0) {
+                                c[0] = c[1] = c[2] = 0;
+                        } else if(brightest > 0 && brightest < 255) {
+                                for(int k = 0; k < 3; k++)
+                                        c[k] = (unsigned char)min(255, c[k] * 255 / brightest);
+                        }
+                }
+
+                glBindTexture(GL_TEXTURE_2D, t->texture_id);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, t->width, t->height, 0, GL_RGBA, GL_UNSIGNED_BYTE, t->pixels);
+                glBindTexture(GL_TEXTURE_2D, 0);
+                texture_filter(t, TEXTURE_FILTER_LINEAR);
+                texture_filter(t, TEXTURE_WRAP_CLAMP);
+        }
+
         unsigned int pixels[64 * 64];
         memset(pixels, 0, sizeof(pixels));
 
@@ -895,4 +1110,7 @@ void texture_init() {
         /* Textured Blocks: load any user PNGs from png/textures/ into a custom
            atlas. When present they replace the built-in block atlas. */
         texture_load_custom_blocks();
+        /* Skip their CPU/GPU cost when lighting is disabled or unavailable. */
+        if(lighting_supported())
+                texture_blocks_prepare_materials();
 }

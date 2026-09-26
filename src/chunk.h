@@ -55,6 +55,8 @@ void chunk_generate_naive(struct libvxl_chunk_copy* blocks, struct tesselator* t
 void chunk_generate_textured(struct libvxl_chunk_copy* blocks, struct tesselator* tess, int* max_height);
 void chunk_rebuild_all(void);
 void chunk_draw_visible(void);
+/* Depth-only terrain pass around the camera, without camera-frustum culling. */
+void chunk_draw_shadow(float render_distance);
 void chunk_queue_blocks();
 
 #endif

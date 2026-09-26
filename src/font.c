@@ -185,7 +185,7 @@ static struct font_backed_data* font_find(float h) {
 
 	glGenTextures(1, &f.texture_id);
 	glBindTexture(GL_TEXTURE_2D, f.texture_id);
-#ifdef OPENGL_ES
+#ifdef GLX_PROGRAMMABLE
 	size_t texel_count = (size_t)f.w * (size_t)f.h;
 	unsigned char* rgba = malloc(texel_count * 4);
 	CHECK_ALLOCATION_ERROR(rgba)
@@ -297,10 +297,18 @@ void font_render(float x, float y, float h, char* text) {
 		k += 12;
 	}
 
-#if defined(OPENGL_ES)
+	if(k == 0)
+		return;
+
+#if defined(GLX_PROGRAMMABLE)
+#ifdef OPENGL_ES
 	if(gles_version >= 2) {
+#else
+	{
+#endif
+		static GLuint font_stream_vbo = 0;
 		glx_use_default_shader();
-		glx_default_shader_set_draw_state(0, 1);
+		glx_default_shader_set_draw_state(0, 1, 0);
 		/* Font texcoords are baked as 8192x8192; scale down by 1/8192 */
 		glx_default_shader_set_texcoord_scale(1.0F / 8192.0F);
 
@@ -313,20 +321,29 @@ void font_render(float x, float y, float h, char* text) {
 		glEnable(GL_BLEND);
 		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-		glVertexAttribPointer(0, 2, GL_SHORT, GL_FALSE, 0, font_vertex_buffer);
+		if(!font_stream_vbo)
+			glGenBuffers(1, &font_stream_vbo);
+		glBindBuffer(GL_ARRAY_BUFFER, font_stream_vbo);
+		size_t array_bytes = (size_t)k * sizeof(GLshort);
+		glBufferData(GL_ARRAY_BUFFER, array_bytes * 2, NULL, GL_STREAM_DRAW);
+		glBufferSubData(GL_ARRAY_BUFFER, 0, array_bytes, font_vertex_buffer);
+		glBufferSubData(GL_ARRAY_BUFFER, array_bytes, array_bytes, font_coords_buffer);
+		glVertexAttribPointer(0, 2, GL_SHORT, GL_FALSE, 0, (void*)0);
 		glEnableVertexAttribArray(0);
-		glVertexAttribPointer(2, 2, GL_SHORT, GL_FALSE, 0, font_coords_buffer);
+		glVertexAttribPointer(2, 2, GL_SHORT, GL_FALSE, 0, (void*)array_bytes);
 		glEnableVertexAttribArray(2);
 
 		glDrawArrays(GL_TRIANGLES, 0, k / 2);
 
 		glDisableVertexAttribArray(0);
 		glDisableVertexAttribArray(2);
+		glBindBuffer(GL_ARRAY_BUFFER, 0);
 		glDisable(GL_BLEND);
 		glBindTexture(GL_TEXTURE_2D, 0);
 		return;
 	}
 #endif
+#ifndef OPENGL_CORE
 	glMatrixMode(GL_TEXTURE);
 	glLoadIdentity();
 	{
@@ -370,6 +387,7 @@ void font_render(float x, float y, float h, char* text) {
 	glMatrixMode(GL_TEXTURE);
 	glLoadIdentity();
 	glMatrixMode(GL_MODELVIEW);
+#endif
 }
 
 void font_render_shadow(float x, float y, float h, char* text, float a) {

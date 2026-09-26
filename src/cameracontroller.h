@@ -23,7 +23,6 @@
 
 extern int cameracontroller_bodyview_mode;
 extern int cameracontroller_bodyview_player;
-extern int cameracontroller_yclamp;
 extern float cameracontroller_bodyview_zoom;
 extern float cameracontroller_gunlag_y; // last_cy minus rendered camera base (viewmodel anchor)
 

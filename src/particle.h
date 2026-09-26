@@ -35,6 +35,8 @@ struct Particle {
         unsigned int color;
         float lifetime; // remaining life for rain particles (Mineclonia-style, 1-4 seconds)
         int texture_id; // which raindrop texture to use (0, 1, or 2) — matches Mineclonia's 3-texture rain
+        unsigned char block; // 1 = block debris (break/hit/collapse); drawn as animated sprite when "Particle animations" is on
+        float anim_phase;    // random start offset into the sprite-sheet animation, in frames
 };
 
 extern int particle_stats_count;
@@ -49,6 +51,8 @@ void particle_render(void);
 void particle_create_casing(struct Player* p);
 void particle_create(unsigned int color, float x, float y, float z, float velocity, float velocity_y, int amount,
                                          float min_size, float max_size);
+void particle_create_block(unsigned int color, float x, float y, float z, float velocity, float velocity_y, int amount,
+                                                   float min_size, float max_size);
 void particle_create_rain(void);
 void particle_create_snow(void);
 
