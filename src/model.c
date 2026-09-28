@@ -281,13 +281,14 @@ void kv6_calclight(int x, int y, int z) {
 	if(x >= 0 && y >= 0 && z >= 0)
 		f = map_sunblock(x, y, z);
 
-#ifdef OPENGL_CORE
 	kv6_light_scale = f;
+#ifdef OPENGL_CORE
 	glx_default_shader_set_light_scale(f);
 #endif
 #ifndef OPENGL_CORE
-	float lambient[4] = {0.5F * f, 0.5F * f, 0.5F * f, 1.0F};
-	float ldiffuse[4] = {0.5F * f, 0.5F * f, 0.5F * f, 1.0F};
+	float daylight = 0.5F * f * lighting_sunlight_scale();
+	float lambient[4] = {daylight, daylight, daylight, 1.0F};
+	float ldiffuse[4] = {daylight, daylight, daylight, 1.0F};
 	glLightfv(GL_LIGHT0, GL_AMBIENT, lambient);
 	glLightfv(GL_LIGHT0, GL_DIFFUSE, ldiffuse);
 #endif
@@ -548,6 +549,14 @@ void kv6_render(struct kv6_t* kv6, unsigned char team) {
 			matrix_translate(matrix_model, -kv6->xpiv, -kv6->zpiv, -kv6->ypiv);
 			matrix_upload();
 
+#ifndef GLX_PROGRAMMABLE
+			/* Compatibility meshes otherwise use only GL_LIGHT0, which has no
+			   flashlight/point lights and is black at 0% sunlight. The GLSL 120
+			   path consumes the same frame lights as terrain and KV6 points. */
+			bool dynamic_model = lighting_model_begin(kv6_light_scale);
+			if(dynamic_model && kv6->colorize)
+				lighting_model_tint(kv6->red, kv6->green, kv6->blue);
+#endif
 			glx_displaylist_draw(kv6->display_list + 0, GLX_DISPLAYLIST_NORMAL);
 
 #if !defined(OPENGL_ES) && !defined(OPENGL_CORE)
@@ -585,10 +594,27 @@ void kv6_render(struct kv6_t* kv6, unsigned char team) {
 					glx_set_team_color(0.0F, 0.0F, 0.0F);
 			}
 
+#ifndef GLX_PROGRAMMABLE
+			if(dynamic_model) {
+				if(team == TEAM_1)
+					lighting_model_tint(gamestate.team_1.red * 0.75F / 255.0F,
+										gamestate.team_1.green * 0.75F / 255.0F,
+										gamestate.team_1.blue * 0.75F / 255.0F);
+				else if(team == TEAM_2)
+					lighting_model_tint(gamestate.team_2.red * 0.75F / 255.0F,
+										gamestate.team_2.green * 0.75F / 255.0F,
+										gamestate.team_2.blue * 0.75F / 255.0F);
+				else
+					lighting_model_tint(0.0F, 0.0F, 0.0F);
+			}
+#endif
 			glx_displaylist_draw(kv6->display_list + 1, GLX_DISPLAYLIST_NORMAL);
 
 			glx_set_team_color(1.0F, 1.0F, 1.0F);
-
+#ifndef GLX_PROGRAMMABLE
+			if(dynamic_model)
+				lighting_model_end();
+#endif
 			matrix_pop(matrix_model);
 
 		glBindTexture(GL_TEXTURE_2D, 0);
@@ -664,6 +690,7 @@ void kv6_render(struct kv6_t* kv6, unsigned char team) {
 									 "uniform float light_scale;\n"
 									 "uniform vec4 u_TeamColor;\n"
 									 "uniform vec3 u_SunDirection;\n"
+									 "uniform float u_SunIntensity;\n"
 									 "uniform vec4 u_LightPositionRadius[4];\n"
 									 "uniform vec4 u_LightColorIntensity[4];\n"
 									 "uniform vec4 u_FlashlightDirection;\n"
@@ -674,7 +701,7 @@ void kv6_render(struct kv6_t* kv6, unsigned char team) {
 									 "    float dist = length(world.xz - camera.xz) * dist_factor;\n"
 									 "    vec3 N = normalize((model * vec4(a_Normal, 0.0)).xyz);\n"
 									 "    vec3 L = normalize(u_SunDirection);\n"
-									 "    float d = clamp(dot(N, L), 0.0, 1.0) * 0.5 + 0.5;\n"
+									 "    float d = (0.5 + 0.5 * clamp(dot(N, L), 0.0, 1.0)) * u_SunIntensity;\n"
 									 "    vec3 light = vec3(d * light_scale);\n"
 					 "    bool flashlight_active = u_FlashlightDirection.w >= 0.0;\n"
 					 "    for(int i = 0; i < 4; ++i) {\n"
@@ -683,12 +710,21 @@ void kv6_render(struct kv6_t* kv6, unsigned char team) {
 					 "        if(ci.a > 0.0 && (i != 3 || !flashlight_active)) {\n"
 					 "            vec3 delta = pr.xyz - world;\n"
 					 "            float distance_to_light = length(delta);\n"
-					 "            float ratio = distance_to_light / max(pr.w, 0.0001);\n"
+					 "            float ratio = distance_to_light / max(abs(pr.w), 0.0001);\n"
 					 "            float attenuation = clamp(1.0 - ratio, 0.0, 1.0);\n"
 					 "            attenuation *= attenuation;\n"
 					 "            vec3 light_direction = delta / max(distance_to_light, 0.0001);\n"
 					 "            float diffuse = max(dot(N, light_direction), 0.0);\n"
-					 "            light += ci.rgb * ci.a * attenuation * (0.18 + 0.82 * diffuse);\n"
+					 "            float facing = 0.18 + 0.82 * diffuse;\n"
+					 "            if(pr.w < 0.0) {\n"
+					 "                float cone = smoothstep(0.70710678, 0.82710678,\n"
+					 "                                        dot(-light_direction, normalize(ci.rgb)));\n"
+					 "                float fill = clamp(1.0 - distance_to_light / 10.0, 0.0, 1.0);\n"
+					 "                fill = 0.30 * fill * fill;\n"
+					 "                light += vec3(1.0, 0.70, 0.50) * ci.a * (cone * attenuation + fill) * facing;\n"
+					 "            } else {\n"
+					 "                light += ci.rgb * ci.a * attenuation * facing;\n"
+					 "            }\n"
 					 "        }\n"
 					 "    }\n"
 					 "    if(flashlight_active) {\n"
@@ -734,6 +770,7 @@ void kv6_render(struct kv6_t* kv6, unsigned char team) {
 								 "uniform mat4 model;\n"
 								 "uniform float dist_factor;\n"
 								 "uniform vec3 u_SunDirection;\n"
+								 "uniform float u_SunIntensity;\n"
 								 "uniform vec4 u_LightPositionRadius[4];\n"
 								 "uniform vec4 u_LightColorIntensity[4];\n"
 								 "uniform vec4 u_FlashlightDirection;\n"
@@ -743,7 +780,7 @@ void kv6_render(struct kv6_t* kv6, unsigned char team) {
 								 "	float dist = length(world.xz-camera.xz)*dist_factor;\n"
 								 "	vec3 N = normalize((model*vec4(gl_Normal,0)).xyz);\n"
 								 "	vec3 L = normalize(u_SunDirection);\n"
-								 "	float d = clamp(dot(N,L),0.0,1.0)*0.5+0.5;\n"
+								 "	float d = (0.5+0.5*clamp(dot(N,L),0.0,1.0))*u_SunIntensity;\n"
 								 "	vec3 light = vec3(d);\n"
 								 "	bool flashlight_active=u_FlashlightDirection.w>=0.0;\n"
 								 "	for(int i=0;i<4;++i){\n"
@@ -752,12 +789,19 @@ void kv6_render(struct kv6_t* kv6, unsigned char team) {
 								 "		if(ci.a>0.0&&(i!=3||!flashlight_active)){\n"
 								 "			vec3 delta=pr.xyz-world;\n"
 								 "			float distance_to_light=length(delta);\n"
-								 "			float ratio=distance_to_light/max(pr.w,0.0001);\n"
+								 "			float ratio=distance_to_light/max(abs(pr.w),0.0001);\n"
 								 "			float attenuation=clamp(1.0-ratio,0.0,1.0);\n"
 								 "			attenuation*=attenuation;\n"
 								 "			vec3 light_direction=delta/max(distance_to_light,0.0001);\n"
 								 "			float diffuse=max(dot(N,light_direction),0.0);\n"
-								 "			light+=ci.rgb*ci.a*attenuation*(0.18+0.82*diffuse);\n"
+								 "			float facing=0.18+0.82*diffuse;\n"
+								 "			if(pr.w<0.0){\n"
+								 "				float cone=smoothstep(0.70710678,0.82710678,dot(-light_direction,normalize(ci.rgb)));\n"
+								 "				float fill=clamp(1.0-distance_to_light/10.0,0.0,1.0);fill=0.30*fill*fill;\n"
+								 "				light+=vec3(1.0,0.70,0.50)*ci.a*(cone*attenuation+fill)*facing;\n"
+								 "			}else{\n"
+								 "				light+=ci.rgb*ci.a*attenuation*facing;\n"
+								 "			}\n"
 								 "		}\n"
 								 "	}\n"
 								 "	if(flashlight_active){\n"
@@ -805,7 +849,9 @@ void kv6_render(struct kv6_t* kv6, unsigned char team) {
 				glUniform1f(glx_uniform_location(prog, "size"),
 							1.414F * near_plane_height * kv6->scale * (len_x + len_y + len_z) / 3.0F);
 				glUniform1f(glx_uniform_location(prog, "light_scale"), kv6_light_scale);
-				glUniform3f(glx_uniform_location(prog, "fog"), fog_color[0], fog_color[1], fog_color[2]);
+				float fog[3];
+				fog_color_render(fog);
+				glUniform3f(glx_uniform_location(prog, "fog"), fog[0], fog[1], fog[2]);
 				glUniform3f(glx_uniform_location(prog, "camera"), camera_x, camera_y, camera_z);
 				glUniformMatrix4fv(glx_uniform_location(prog, "model"), 1, 0, (float*)matrix_model);
 				glUniformMatrix4fv(glx_uniform_location(prog, "u_MVP"), 1, GL_FALSE, (float*)mvp);
@@ -845,7 +891,9 @@ void kv6_render(struct kv6_t* kv6, unsigned char team) {
 						glx_fog ? 1.0F / settings.render_distance : 0.0F);
 			glUniform1f(glx_uniform_location(kv6_program, "size"),
 						1.414F * near_plane_height * kv6->scale * (len_x + len_y + len_z) / 3.0F);
-			glUniform3f(glx_uniform_location(kv6_program, "fog"), fog_color[0], fog_color[1], fog_color[2]);
+			float fog[3];
+			fog_color_render(fog);
+			glUniform3f(glx_uniform_location(kv6_program, "fog"), fog[0], fog[1], fog[2]);
 			glUniform3f(glx_uniform_location(kv6_program, "camera"), camera_x, camera_y, camera_z);
 			glUniformMatrix4fv(glx_uniform_location(kv6_program, "model"), 1, 0, (float*)matrix_model);
 			lighting_apply_program((unsigned int)kv6_program);

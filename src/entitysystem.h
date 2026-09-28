@@ -45,6 +45,7 @@ struct entity_system {
 };
 
 void entitysys_create(struct entity_system* es, size_t object_size, size_t initial_size);
+void entitysys_destroy(struct entity_system* es);
 
 void entitysys_add(struct entity_system* es, void* object);
 

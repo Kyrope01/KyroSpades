@@ -19,6 +19,7 @@
 */
 
 #include <stdlib.h>
+#include <string.h>
 #include "demo.h"
 #include <math.h>
 #include <limits.h>
@@ -461,7 +462,7 @@ bool player_intersection_exists(struct player_intersection* s) {
 }
 
 int player_intersection_choose(struct player_intersection* s, float* dist) {
-	int type;
+	int type = -1; /* No hit: callers compare the returned distance first. */
 	*dist = FLT_MAX;
 
 	if(s->arms && s->distance.arms < *dist) {
@@ -1067,9 +1068,9 @@ void player_collision(const struct Player* p, Ray* ray, struct player_intersecti
 		return;
 
 	float l = sqrt(distance3D(p->orientation_smooth.x, p->orientation_smooth.y, p->orientation_smooth.z, 0, 0, 0));
-	float ox = p->orientation_smooth.x / l;
-	float oy = p->orientation_smooth.y / l;
-	float oz = p->orientation_smooth.z / l;
+	float ox = l > 0.0001F ? p->orientation_smooth.x / l : 1.0F;
+	float oy = l > 0.0001F ? p->orientation_smooth.y / l : 0.0F;
+	float oz = l > 0.0001F ? p->orientation_smooth.z / l : 0.0F;
 
 	const struct hitbox* torso = p->input.keys.crouch ? &box_torsoc : &box_torso;
 	const struct hitbox* leg = p->input.keys.crouch ? &box_legc : &box_leg;
@@ -1077,13 +1078,12 @@ void player_collision(const struct Player* p, Ray* ray, struct player_intersecti
 	float height = player_height(p) - 0.25F;
 
 	float len = sqrtf(p->orientation.x * p->orientation.x + p->orientation.z * p->orientation.z);
-	float fx = p->orientation.x / len;
-	float fy = p->orientation.z / len;
+	float fx = len > 0.0001F ? p->orientation.x / len : 1.0F;
+	float fy = len > 0.0001F ? p->orientation.z / len : 0.0F;
 
-	float a = (p->physics.velocity.x * fx + fy * p->physics.velocity.z) / (fx * fx + fy * fy);
-	float b = (p->physics.velocity.z - fy * a) / fx;
-	a /= 0.25F;
-	b /= 0.25F;
+	/* Project motion onto an orthonormal forward/sideways basis; fx can be 0. */
+	float a = (p->physics.velocity.x * fx + p->physics.velocity.z * fy) / 0.25F;
+	float b = (-p->physics.velocity.x * fy + p->physics.velocity.z * fx) / 0.25F;
 
 	float dist; // distance
 
@@ -1285,6 +1285,69 @@ static void player_draw_esp_box(struct Player* p) {
 	matrix_upload();
 }
 
+/* An unlit lamp tip makes every synthetic remote flashlight visible, even
+ * when that player's projected light isn't among the four nearest shader
+ * sources this frame. Draw it depth-tested so walls still hide the player. */
+static void player_render_flashlight_tip(int id) {
+	float pos[3];
+	if(!lighting_remote_flashlight_position(id, pos))
+		return;
+
+	float dx = camera_x - pos[0], dz = camera_z - pos[2];
+	float length = sqrtf(dx * dx + dz * dz);
+	float right_x = length > 0.0001F ? dz / length : 1.0F;
+	float right_z = length > 0.0001F ? -dx / length : 0.0F;
+	const int order[6] = {0, 1, 2, 0, 2, 3};
+	float previous_color[4];
+#ifdef GLX_PROGRAMMABLE
+	glx_get_current_color(previous_color);
+#else
+	glGetFloatv(GL_CURRENT_COLOR, previous_color);
+#endif
+	unsigned int previous_program = glx_current_program();
+#if !defined(OPENGL_ES) && !defined(OPENGL_CORE)
+	GLboolean texture_enabled = glIsEnabled(GL_TEXTURE_2D);
+	GLboolean lighting_enabled = glIsEnabled(GL_LIGHTING);
+	if(texture_enabled)
+		glDisable(GL_TEXTURE_2D);
+	if(lighting_enabled)
+		glDisable(GL_LIGHTING);
+#endif
+
+	matrix_push(matrix_model);
+	matrix_identity(matrix_model);
+#ifdef GLX_PROGRAMMABLE
+	glx_use_default_shader();
+#else
+	glx_use_program(0);
+#endif
+	matrix_upload();
+	for(int pass = 0; pass < 2; pass++) {
+		float size = pass ? 0.025F : 0.065F;
+		float corners[4][3] = {
+			{pos[0], pos[1] + size, pos[2]},
+			{pos[0] + right_x * size, pos[1], pos[2] + right_z * size},
+			{pos[0], pos[1] - size, pos[2]},
+			{pos[0] - right_x * size, pos[1], pos[2] - right_z * size}
+		};
+		float vertices[18];
+		for(int i = 0; i < 6; i++)
+			memcpy(&vertices[i * 3], corners[order[i]], 3 * sizeof(float));
+		glColor3f(1.0F, pass ? 0.95F : 0.70F, pass ? 0.80F : 0.45F);
+		glx_draw_vertices_3d(vertices, 6, GL_TRIANGLES);
+	}
+	glColor4f(previous_color[0], previous_color[1], previous_color[2], previous_color[3]);
+	matrix_pop(matrix_model);
+	glx_use_program(previous_program);
+	matrix_upload();
+#if !defined(OPENGL_ES) && !defined(OPENGL_CORE)
+	if(texture_enabled)
+		glEnable(GL_TEXTURE_2D);
+	if(lighting_enabled)
+		glEnable(GL_LIGHTING);
+#endif
+}
+
 void player_render(struct Player* p, int id) {
 	kv6_calclight(p->pos.x, p->pos.y, p->pos.z);
 
@@ -1322,9 +1385,9 @@ void player_render(struct Player* p, int id) {
 	}
 
 	float l = sqrt(distance3D(p->orientation_smooth.x, p->orientation_smooth.y, p->orientation_smooth.z, 0, 0, 0));
-	float ox = p->orientation_smooth.x / l;
-	float oy = p->orientation_smooth.y / l;
-	float oz = p->orientation_smooth.z / l;
+	float ox = l > 0.0001F ? p->orientation_smooth.x / l : 1.0F;
+	float oy = l > 0.0001F ? p->orientation_smooth.y / l : 0.0F;
+	float oz = l > 0.0001F ? p->orientation_smooth.z / l : 0.0F;
 
 	if(!p->alive) {
 		if(id != local_player_id || camera_mode != CAMERAMODE_DEATH) {
@@ -1360,13 +1423,12 @@ void player_render(struct Player* p, int id) {
 		height -= 0.25F;
 
 	float len = sqrtf(p->orientation.x * p->orientation.x + p->orientation.z * p->orientation.z);
-	float fx = p->orientation.x / len;
-	float fy = p->orientation.z / len;
+	float fx = len > 0.0001F ? p->orientation.x / len : 1.0F;
+	float fy = len > 0.0001F ? p->orientation.z / len : 0.0F;
 
-	float a = (p->physics.velocity.x * fx + fy * p->physics.velocity.z) / (fx * fx + fy * fy);
-	float b = (p->physics.velocity.z - fy * a) / fx;
-	a /= 0.25F;
-	b /= 0.25F;
+	/* Project motion onto an orthonormal forward/sideways basis; fx can be 0. */
+	float a = (p->physics.velocity.x * fx + p->physics.velocity.z * fy) / 0.25F;
+	float b = (-p->physics.velocity.x * fy + p->physics.velocity.z * fx) / 0.25F;
 
 	int render_body = (id != local_player_id || !p->alive || camera_mode != CAMERAMODE_FPS)
 		&& !((camera_mode == CAMERAMODE_BODYVIEW || camera_mode == CAMERAMODE_SPECTATOR)
@@ -1710,6 +1772,10 @@ void player_render(struct Player* p, int id) {
 	p->casing_dir.z = v[2] - v2[2];
 
 	matrix_pop(matrix_model);
+	/* A bodyview camera is at that player's eyes; don't put its lamp tip
+	   directly in front of the spectator's lens. */
+	if(!render_fpv)
+		player_render_flashlight_tip(id);
 }
 
 int player_clipbox(float x, float y, float z) {

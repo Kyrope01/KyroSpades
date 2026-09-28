@@ -37,6 +37,7 @@
 struct channel ping_queue;
 ENetSocket sock, lan;
 pthread_t ping_thread;
+static int ping_thread_started = 0;
 void (*ping_result)(void*, float time_delta, char* aos);
 
 void ping_init() {
@@ -49,12 +50,21 @@ void ping_init() {
 	enet_socket_set_option(lan, ENET_SOCKOPT_NONBLOCK, 1);
 	enet_socket_set_option(lan, ENET_SOCKOPT_BROADCAST, 1);
 
-	pthread_create(&ping_thread, NULL, ping_update, NULL);
+	ping_thread_started = pthread_create(&ping_thread, NULL, ping_update, NULL) == 0;
+	if(!ping_thread_started) log_warn("Could not start ping worker");
 }
 
 void ping_deinit() {
+	if(ping_thread_started) {
+		channel_clear(&ping_queue);
+		struct ping_entry stop = {0}; /* Port zero is the worker's shutdown sentinel. */
+		channel_put(&ping_queue, &stop);
+		pthread_join(ping_thread, NULL);
+		ping_thread_started = 0;
+	}
 	enet_socket_destroy(sock);
 	enet_socket_destroy(lan);
+	channel_destroy(&ping_queue);
 }
 
 static void ping_lan() {
@@ -90,8 +100,6 @@ static bool pings_retry(void* key, void* value, void* user) {
 #define IP_KEY(addr) (((uint64_t)addr.host << 16) | (addr.port));
 
 void* ping_update(void* data) {
-	pthread_detach(pthread_self());
-
 	float ping_start = window_time();
 
 	HashTable pings;
@@ -102,6 +110,10 @@ void* ping_update(void* data) {
 		for(size_t k = 0; (k < drain) || (!pings.size && window_time() - ping_start >= 8.0F); k++) {
 			struct ping_entry entry;
 			channel_await(&ping_queue, &entry);
+			if(entry.addr.port == 0) {
+				ht_destroy(&pings);
+				return NULL;
+			}
 
 			uint64_t ID = IP_KEY(entry.addr);
 			ht_insert(&pings, &ID, &entry);
@@ -117,15 +129,14 @@ void* ping_update(void* data) {
 
 		while(1) {
 			int recvLength = enet_socket_receive(sock, &from, &buf, 1);
-			uint64_t ID = IP_KEY(from);
-
-			if(recvLength != 0) {
+			if(recvLength > 0) {
+				uint64_t ID = IP_KEY(from);
 				struct ping_entry* entry = ht_lookup(&pings, &ID);
 
 				if(entry) {
 					if(recvLength > 0) { // received something!
-						if(!strncmp(buf.data, "HI", recvLength)) {
-							ping_result(NULL, window_time() - entry->time_start, entry->aos);
+						if(recvLength >= 2 && !memcmp(buf.data, "HI", 2)) {
+							if(ping_result) ping_result(NULL, window_time() - entry->time_start, entry->aos);
 							ht_erase(&pings, &ID);
 						} else {
 							entry->trycount++;
@@ -142,8 +153,9 @@ void* ping_update(void* data) {
 		ht_iterate_remove(&pings, NULL, pings_retry);
 
 		int length = enet_socket_receive(lan, &from, &buf, 1);
-		if(length) {
-			JSON_Value* js = json_parse_string(buf.data);
+		if(length > 0 && length < (int)sizeof(tmp)) {
+			tmp[length] = 0;
+			JSON_Value* js = json_parse_string(tmp);
 			if(js) {
 				JSON_Object* root = json_value_get_object(js);
 
@@ -153,15 +165,18 @@ void* ping_update(void* data) {
 				e.ping = ceil((window_time() - ping_start) * 1000.0F);
 				snprintf(e.identifier, sizeof(e.identifier) - 1, "aos://%u:%u", from.host, from.port);
 
-				strncpy(e.name, json_object_get_string(root, "name"), sizeof(e.name) - 1);
+				const char* name = json_object_get_string(root, "name");
+				const char* mode = json_object_get_string(root, "game_mode");
+				const char* map_name = json_object_get_string(root, "map");
+				strncpy(e.name, name ? name : "", sizeof(e.name) - 1);
 				e.name[sizeof(e.name) - 1] = 0;
-				strncpy(e.gamemode, json_object_get_string(root, "game_mode"), sizeof(e.gamemode) - 1);
+				strncpy(e.gamemode, mode ? mode : "", sizeof(e.gamemode) - 1);
 				e.gamemode[sizeof(e.gamemode) - 1] = 0;
-				strncpy(e.map, json_object_get_string(root, "map"), sizeof(e.map) - 1);
+				strncpy(e.map, map_name ? map_name : "", sizeof(e.map) - 1);
 				e.map[sizeof(e.map) - 1] = 0;
 				e.current = json_object_get_number(root, "players_current");
 				e.max = json_object_get_number(root, "players_max");
-				ping_result(&e, window_time() - ping_start, NULL);
+				if(ping_result) ping_result(&e, window_time() - ping_start, NULL);
 
 				json_value_free(js);
 			}

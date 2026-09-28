@@ -39,6 +39,7 @@
 #include "tesselator.h"
 #include "utils.h"
 #include "config.h"
+#include "lighting.h"
 #include "water.h"
 #include "glowing_blocks.h"
 #include "channel.h"
@@ -60,7 +61,9 @@ void fog_color_render(float out[3]) {
            make distant fog read brighter than intended.  Darken the fog
            color by 10% at render time so the visible fog stays at the same
            perceived brightness the user picked in the color picker. */
-        float scale = settings.filmic_tonemapping ? 0.9F : 1.0F;
+        /* The server's fog color is the daylight sky. Scale only its render
+           value, not fog_color itself (used by the color picker and packets). */
+        float scale = (settings.filmic_tonemapping ? 0.9F : 1.0F) * lighting_sunlight_scale();
         out[0] = fog_color[0] * scale;
         out[1] = fog_color[1] * scale;
         out[2] = fog_color[2] * scale;
@@ -195,6 +198,8 @@ struct map_work_packet {
 
 struct channel map_work_queue;
 struct channel map_result_queue;
+static pthread_t map_worker;
+static int map_worker_started = 0;
 
 struct map_collapsing {
         HashTable voxels;
@@ -506,6 +511,7 @@ void map_collapsing_update(float dt) {
 }
 
 void map_update_physics(int x, int y, int z) {
+        if(!map_worker_started) return;
         if(x + 1 < map_size_x && !map_isair(x + 1, y, z))
                 channel_put(&map_work_queue, &(struct map_work_packet) {.x = x + 1, .y = y, .z = z});
         if(x >= 1 && !map_isair(x - 1, y, z))
@@ -537,6 +543,7 @@ void* falling_blocks_worker(void* user) {
         while(1) {
                 struct map_work_packet work;
                 channel_await(&map_work_queue, &work);
+                if(work.x < 0) break; /* Shutdown sentinel, after any in-flight work. */
 
                 struct map_collapsing collapsing;
                 if(map_update_physics_sub(&collapsing, work.x, work.y, work.z))
@@ -548,7 +555,10 @@ void* falling_blocks_worker(void* user) {
 
 void map_init() {
         glowing_blocks_clear();
-        libvxl_create(&map, 512, 512, 64, NULL, 0);
+        if(!libvxl_create(&map, 512, 512, 64, NULL, 0)) {
+                log_fatal("Could not allocate initial map");
+                exit(1);
+        }
         tesselator_create(&map_damaged_tesselator, VERTEX_INT, 0, 0);
         pthread_rwlock_init(&map_lock, NULL);
 
@@ -558,17 +568,55 @@ void map_init() {
 
         entitysys_create(&map_collapsing_structures, sizeof(struct map_collapsing), 32);
 
-        channel_create(&map_work_queue, sizeof(struct map_work_packet), 16);
-        channel_create(&map_result_queue, sizeof(struct map_collapsing), 16);
+        if(!channel_create(&map_work_queue, sizeof(struct map_work_packet), 16)
+           || !channel_create(&map_result_queue, sizeof(struct map_collapsing), 16)) {
+                log_fatal("Could not allocate map-collapse queues");
+                exit(1);
+        }
 
-        pthread_t worker;
-        pthread_create(&worker, NULL, falling_blocks_worker, NULL);
+        map_worker_started = pthread_create(&map_worker, NULL, falling_blocks_worker, NULL) == 0;
+        if(!map_worker_started) log_warn("Could not start map-collapse worker");
+}
+
+static void map_collapsing_release(struct map_collapsing* c) {
+        ht_destroy(&c->voxels);
+        if(c->has_displaylist)
+                glx_displaylist_destroy(&c->displaylist);
+        else
+                tesselator_free(&c->mesh_geometry);
+}
+
+void map_deinit(void) {
+        if(map_worker_started) {
+                channel_clear(&map_work_queue);
+                struct map_work_packet stop = {.x = -1};
+                channel_put(&map_work_queue, &stop);
+                pthread_join(map_worker, NULL);
+                map_worker_started = 0;
+        }
+        while(channel_size(&map_result_queue)) {
+                struct map_collapsing result;
+                channel_await(&map_result_queue, &result);
+                map_collapsing_release(&result);
+        }
+        for(size_t k = 0; k < map_collapsing_structures.count; k++)
+                map_collapsing_release((struct map_collapsing*)map_collapsing_structures.buffer + k);
+        entitysys_destroy(&map_collapsing_structures);
+        channel_destroy(&map_work_queue);
+        channel_destroy(&map_result_queue);
+        tesselator_free(&map_damaged_tesselator);
+        ht_destroy(&map_damaged_voxels);
+        pthread_rwlock_wrlock(&map_lock);
+        libvxl_free(&map);
+        pthread_rwlock_unlock(&map_lock);
+        pthread_rwlock_destroy(&map_lock);
 }
 
 int map_height_at(int x, int z) {
-        int result[2];
-        libvxl_map_gettop(&map, x, z, result);
-        return map_size_y - 1 - result[1];
+        uint32_t result[2];
+        if(!libvxl_map_gettop(&map, x, z, result))
+                return map_size_y - 1; /* Empty column: ground-height fallback. */
+        return map_size_y - 1 - (int)result[1];
 }
 
 /* map_isair / map_get are the engine's hottest map probes — player physics,
@@ -783,10 +831,15 @@ int map_placedblock_color(int color) {
 }
 
 void map_vxl_load(void* v, size_t size) {
+        struct libvxl_map next = {0};
+        if(!libvxl_create(&next, 512, 512, 64, v, size)) {
+                log_warn("Rejected malformed or unallocatable VXL map (%zu bytes)", size);
+                return; /* Keep the old, valid map. */
+        }
         pthread_rwlock_wrlock(&map_lock);
         total_blocks_cache = -1;
         libvxl_free(&map);
-        libvxl_create(&map, 512, 512, 64, v, size);
+        map = next;
         pthread_rwlock_unlock(&map_lock);
         glowing_blocks_clear();
         water_invalidate();

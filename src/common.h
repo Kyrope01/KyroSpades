@@ -152,7 +152,7 @@ static inline int ks_mkdir(const char* path, int mode) { return mkdir(path, mode
 #define blue(col) (((col) >> 16) & 0xFF)
 #define alpha(col) (((col) >> 24) & 0xFF)
 
-#define PI 3.1415F
+#define PI 3.14159265358979323846F
 #define DOUBLEPI (PI * 2.0F)
 #define HALFPI (PI * 0.5F)
 #define EPSILON 0.005F

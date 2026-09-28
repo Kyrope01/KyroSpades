@@ -33,9 +33,8 @@ extern int map_size_z;
 extern float fog_color[4];
 extern float sun_dir[3];
 
-/* fog_color_render: fills out[3] with the effective fog color for rendering.
-   When filmic tone mapping is enabled, the result is darkened by 10% to
-   compensate for ACES lifting shadows and keeping distant fog readable. */
+/* fog_color_render: effective render-time sky/fog color (sunlight intensity
+   and filmic correction applied). The stored fog_color remains unchanged. */
 void fog_color_render(float out[3]);
 
 struct Point {
@@ -43,6 +42,7 @@ struct Point {
 };
 
 void map_init();
+void map_deinit(void);
 int map_object_visible(float x, float y, float z);
 int map_damage(int x, int y, int z, int damage);
 int map_damage_get(int x, int y, int z);

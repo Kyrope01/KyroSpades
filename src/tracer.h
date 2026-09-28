@@ -41,5 +41,6 @@ void tracer_render(void);
 /* Submit current tracer positions to the bounded per-frame lighting queue. */
 void tracer_submit_lights(void);
 void tracer_init(void);
+void tracer_deinit(void);
 
 #endif

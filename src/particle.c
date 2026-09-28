@@ -56,6 +56,13 @@ int particle_stats_count = 0;
 int particle_stats_total_created = 0;
 int particle_stats_vertices = 0;
 
+void particle_deinit(void) {
+	entitysys_destroy(&particles);
+	tesselator_free(&particle_tesselator);
+	for(int i = 0; i < 3; i++) tesselator_free(&rain_tesselator[i]);
+	tesselator_free(&anim_tesselator);
+}
+
 void particle_init() {
         entitysys_create(&particles, sizeof(struct Particle), 256);
         tesselator_create(&particle_tesselator, VERTEX_FLOAT, 0, 0);
@@ -493,6 +500,12 @@ void particle_create(unsigned int color, float x, float y, float z, float veloci
                 float vy = (((float)rand() / (float)RAND_MAX) * 2.0F - 1.0F);
                 float vz = (((float)rand() / (float)RAND_MAX) * 2.0F - 1.0F);
                 float len = len3D(vx, vy, vz);
+                if(len < 0.0001F) {
+                        vx = 0.0F;
+                        vy = 1.0F;
+                        vz = 0.0F;
+                        len = 1.0F;
+                }
 
                 vx = (vx / len) * velocity;
                 vy = (vy / len) * velocity * velocity_y;

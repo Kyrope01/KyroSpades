@@ -69,6 +69,8 @@ struct serverlist_entry {
 extern int screen_current;
 extern int show_exit;
 
+void hud_deinit(void);
+
 extern struct hud hud_ingame;
 extern struct hud hud_mapload;
 extern struct hud hud_serverlist;

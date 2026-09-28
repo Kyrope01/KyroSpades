@@ -22,6 +22,7 @@
 #include <dirent.h>
 #include <time.h>
 #include <stdlib.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -35,7 +36,7 @@
 #include "log.h"
 #include "file.h"
 
-#include "lodepng/lodepng.c"
+#include "lodepng/lodepng.h"
 
 struct texture texture_splash;
 struct texture texture_splash_icon;
@@ -140,6 +141,7 @@ void texture_flag_offset(int index, float* u, float* v) {
 }
 
 void texture_filter(struct texture* t, int filter) {
+        if(!t || !t->texture_id) return; /* Optional asset was not loaded. */
         glBindTexture(GL_TEXTURE_2D, t->texture_id);
         switch(filter) {
                 case TEXTURE_FILTER_NEAREST:
@@ -160,14 +162,22 @@ void texture_filter(struct texture* t, int filter) {
 
 int texture_create(struct texture* t, char* filename) {
         int sz = file_size(filename);
-        void* data = file_load(filename);
-        int error = lodepng_decode32(&t->pixels, &t->width, &t->height, data, sz);
-        free(data);
-
-        if(error) {
-                log_warn("Could not load texture (%u): %s", error, lodepng_error_text(error));
+        void* data = sz > 0 ? file_load(filename) : NULL;
+        if(!data) {
+                log_warn("Could not read texture %s", filename);
                 return 0;
         }
+        unsigned width = 0, height = 0;
+        unsigned error = lodepng_decode32(&t->pixels, &width, &height, data, (size_t)sz);
+        free(data);
+        if(error || !width || !height || width > INT_MAX || height > INT_MAX) {
+                log_warn("Could not load texture %s (%u): %s", filename, error, lodepng_error_text(error));
+                free(t->pixels);
+                t->pixels = NULL;
+                return 0;
+        }
+        t->width = (int)width;
+        t->height = (int)height;
 
         log_debug("Loaded texture: %s (%ix%i)", filename, t->width, t->height);
 
@@ -819,6 +829,7 @@ void texture_load_custom_blocks(void) {
                 }
         }
         free(texs_avg);
+        free(g_custom_lut);
         g_custom_lut = lut;
         g_custom_lut_dim = dim;
 
@@ -916,6 +927,13 @@ bool texture_blocks_prepare_materials(void) {
 }
 
 void texture_blocks_release_materials(void) {
+        free(g_custom_lut);
+        g_custom_lut = NULL;
+        if(texture_blocks_custom_loaded) {
+                texture_delete(&texture_blocks_custom);
+                memset(&texture_blocks_custom, 0, sizeof(texture_blocks_custom));
+                texture_blocks_custom_loaded = 0;
+        }
         if(!texture_blocks_materials_ready)
                 return;
         texture_delete(&texture_blocks_normal);
@@ -942,7 +960,10 @@ void texture_init() {
 
         texture_create(&texture_health, "png/health.png");
         texture_create(&texture_block, "png/block.png");
-        texture_create(&texture_blocks, "png/multimapblock.png");
+        if(!texture_create(&texture_blocks, "png/multimapblock.png")) {
+                log_fatal("Required block atlas png/multimapblock.png is missing or invalid");
+                exit(1);
+        }
         glBindTexture(GL_TEXTURE_2D, texture_blocks.texture_id);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);

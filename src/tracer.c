@@ -189,6 +189,10 @@ void tracer_update(float dt) {
 	entitysys_iterate(&tracers, &dt, tracer_update_single);
 }
 
+void tracer_deinit(void) {
+	entitysys_destroy(&tracers);
+}
+
 void tracer_init() {
 	entitysys_create(&tracers, sizeof(struct Tracer), PLAYERS_MAX);
 }

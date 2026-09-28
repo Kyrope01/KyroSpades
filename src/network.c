@@ -216,9 +216,9 @@ void read_PacketChatMessage(void* data, int len) {
                                 char color = team_color_char(players[p->player_id].team);
 
                                 if(p->chat_type == CHAT_ALL) {
-                                        sprintf(m, "[Global] %c%s\6: ", color, n);
+                                        snprintf(m, sizeof(m), "[Global] %c%s\6: ", color, n);
                                 } else {
-                                        sprintf(m, "%c%s\6: ", color, n);
+                                        snprintf(m, sizeof(m), "%c%s\6: ", color, n);
                                 }
                         } else {
                                 m[0] = 0;
@@ -409,10 +409,11 @@ void read_PacketStateData(void* data, int len) {
 
         gamestate.gamemode_type = p->gamemode;
 
+        /* Unknown modes were rejected before copying any team/fog/state fields. */
         switch(p->gamemode) {
                 case GAMEMODE_CTF: memcpy(&gamestate.gamemode, &p->gamemode_data, sizeof(struct GM_CTF)); break;
                 case GAMEMODE_TC: memcpy(&gamestate.gamemode, &p->gamemode_data, sizeof(struct GM_TC)); break;
-                default: log_error("Unknown gamemode!");
+                default: return; /* Guarded by the validation above. */
         }
 
         if(!demo_mute_effects())
@@ -479,7 +480,7 @@ void read_PacketStateData(void* data, int len) {
                                         map_vxl_load(decompressed, decompressed_size);
 /*#ifndef USE_TOUCH
                                 char filename[128];
-                                sprintf(filename, "cache/%08X.vxl", libdeflate_crc32(0, decompressed, decompressed_size));
+                                snprintf(filename, sizeof(filename), "cache/%08X.vxl", libdeflate_crc32(0, decompressed, decompressed_size));
                                 log_info("%s", filename);
                                 FILE* f = fopen(filename, "wb");
                                 fwrite(decompressed, 1, decompressed_size, f);
@@ -635,7 +636,7 @@ void read_PacketPlayerLeft(void* data, int len) {
                 char s[32];
                 char team_color = team_color_char(players[p->player_id].team);
 
-                sprintf(s, "%c%s\6 disconnected", team_color, players[p->player_id].name);
+                snprintf(s, sizeof(s), "%c%s\6 disconnected", team_color, players[p->player_id].name);
                 chat_add(0, hud_accent_color(), s);
         }
 }
@@ -669,7 +670,7 @@ void read_PacketMapStart(void* data, int len) {
                 log_info("map crc32: 0x%08X", p->crc32);
                 log_debug("Map transfer started: name=%s, crc=0x%08X, size=%i", p->map_name, p->crc32, p->map_size);
                 char filename[128];
-                sprintf(filename, "cache/%02X%02X%02X%02X.vxl", red(p->crc32), green(p->crc32), blue(p->crc32),
+                snprintf(filename, sizeof(filename), "cache/%02X%02X%02X%02X.vxl", red(p->crc32), green(p->crc32), blue(p->crc32),
                                 alpha(p->crc32));
                 log_info("%s", filename);
                 if(file_exists(filename)) {
@@ -722,6 +723,8 @@ void read_PacketWorldUpdate(void* data, int len) {
                 int is_076 = (len % sizeof(struct PacketWorldUpdate076) == 0);
 
                 if(is_075) {
+                        if(len / (int)sizeof(struct PacketWorldUpdate075) > PLAYERS_MAX)
+                                return;
                         for(int k = 0; k < (len / sizeof(struct PacketWorldUpdate075)); k++) { // supports up to 256 players
                                 struct PacketWorldUpdate075* p
                                         = (struct PacketWorldUpdate075*)(data + k * sizeof(struct PacketWorldUpdate075));
@@ -914,22 +917,22 @@ void read_PacketKillAction(void* data, int len) {
                 char color_kill   = '\4';
                 switch(p->kill_type) {
                         case KILLTYPE_WEAPON:
-                                sprintf(m, "%c%s%c killed %c%s%c (%s)", color_killer, players[p->killer_id].name, color_kill, color_dead, players[p->player_id].name,
+                                snprintf(m, sizeof(m), "%c%s%c killed %c%s%c (%s)", color_killer, players[p->killer_id].name, color_kill, color_dead, players[p->player_id].name,
                                                 color_kill, gun_name[players[p->killer_id].weapon]);
                                 break;
                         case KILLTYPE_HEADSHOT:
-                                sprintf(m, "%c%s%c killed %c%s%c (%s Headshot)", color_killer, players[p->killer_id].name, color_kill, color_dead, players[p->player_id].name,
+                                snprintf(m, sizeof(m), "%c%s%c killed %c%s%c (%s Headshot)", color_killer, players[p->killer_id].name, color_kill, color_dead, players[p->player_id].name,
                                         color_kill, gun_name[players[p->killer_id].weapon]);
                                 break;
                         case KILLTYPE_MELEE:
-                                sprintf(m, "%c%s%c killed %c%s%c (Spade)", color_killer, players[p->killer_id].name, color_kill, color_dead, players[p->player_id].name, color_kill);
+                                snprintf(m, sizeof(m), "%c%s%c killed %c%s%c (Spade)", color_killer, players[p->killer_id].name, color_kill, color_dead, players[p->player_id].name, color_kill);
                                 break;
                         case KILLTYPE_GRENADE:
-                                sprintf(m, "%c%s%c killed %c%s%c (Grenade)", color_killer, players[p->killer_id].name, color_kill, color_dead, players[p->player_id].name, color_kill);
+                                snprintf(m, sizeof(m), "%c%s%c killed %c%s%c (Grenade)", color_killer, players[p->killer_id].name, color_kill, color_dead, players[p->player_id].name, color_kill);
                                 break;
-                        case KILLTYPE_FALL: sprintf(m, "%c%s%c fell too far", color_dead, players[p->player_id].name, color_kill); break;
-                        case KILLTYPE_TEAMCHANGE: sprintf(m, "%c%s%c changed teams", color_dead, players[p->player_id].name, color_kill); break;
-                        case KILLTYPE_CLASSCHANGE: sprintf(m, "%c%s%c changed weapons", color_dead, players[p->player_id].name, color_kill); break;
+                        case KILLTYPE_FALL: snprintf(m, sizeof(m), "%c%s%c fell too far", color_dead, players[p->player_id].name, color_kill); break;
+                        case KILLTYPE_TEAMCHANGE: snprintf(m, sizeof(m), "%c%s%c changed teams", color_dead, players[p->player_id].name, color_kill); break;
+                        case KILLTYPE_CLASSCHANGE: snprintf(m, sizeof(m), "%c%s%c changed weapons", color_dead, players[p->player_id].name, color_kill); break;
                 }
                 if(p->killer_id == local_player_id || p->player_id == local_player_id) {
                         chat_add(1, 0x0000FF, m);
@@ -1089,15 +1092,15 @@ void read_PacketIntelCapture(void* data, int len) {
         }
         struct PacketIntelCapture* p = (struct PacketIntelCapture*)data;
         if(gamestate.gamemode_type == GAMEMODE_CTF && p->player_id < PLAYERS_MAX) {
-                char capture_str[128];
+                char capture_str[128] = {0};
                 switch(players[p->player_id].team) {
                         case TEAM_1:
                                 gamestate.gamemode.ctf.team_1_score++;
-                                sprintf(capture_str, "\1%s\6 has captured the \2%s\6 Intel", players[p->player_id].name, gamestate.team_2.name);
+                                snprintf(capture_str, sizeof(capture_str), "\1%s\6 has captured the \2%s\6 Intel", players[p->player_id].name, gamestate.team_2.name);
                                 break;
                         case TEAM_2:
                                 gamestate.gamemode.ctf.team_2_score++;
-                                sprintf(capture_str, "\2%s\6 has captured the \1%s\6 Intel", players[p->player_id].name, gamestate.team_1.name);
+                                snprintf(capture_str, sizeof(capture_str), "\2%s\6 has captured the \1%s\6 Intel", players[p->player_id].name, gamestate.team_1.name);
                                 break;
                 }
                 if(!demo_mute_effects()) sound_create(SOUND_LOCAL, p->winning ? &sound_horn : &sound_pickup, 0.0F, 0.0F, 0.0F);
@@ -1111,7 +1114,7 @@ void read_PacketIntelCapture(void* data, int len) {
                                 case TEAM_2: name = gamestate.team_2.name; break;
                         }
 
-                        sprintf(capture_str, "%s Team Wins!", name);
+                        snprintf(capture_str, sizeof(capture_str), "%s Team Wins!", name);
                         chat_showpopup(capture_str, 5.0F, rgb(255, 0, 0));
 
                         gamestate.gamemode.ctf.team_1_score = 0;
@@ -1127,21 +1130,21 @@ void read_PacketIntelDrop(void* data, int len) {
         }
         struct PacketIntelDrop* p = (struct PacketIntelDrop*)data;
         if(gamestate.gamemode_type == GAMEMODE_CTF && p->player_id < PLAYERS_MAX) {
-                char drop_str[128];
+                char drop_str[128] = {0};
                 switch(players[p->player_id].team) {
                         case TEAM_1:
                                 gamestate.gamemode.ctf.team_2_intel = 0; // drop opposing team's intel
                                 gamestate.gamemode.ctf.team_2_intel_location.dropped.x = p->x;
                                 gamestate.gamemode.ctf.team_2_intel_location.dropped.y = p->y;
                                 gamestate.gamemode.ctf.team_2_intel_location.dropped.z = p->z;
-                                sprintf(drop_str, "\1%s\6 has dropped the \2%s\6 Intel", players[p->player_id].name, gamestate.team_2.name);
+                                snprintf(drop_str, sizeof(drop_str), "\1%s\6 has dropped the \2%s\6 Intel", players[p->player_id].name, gamestate.team_2.name);
                                 break;
                         case TEAM_2:
                                 gamestate.gamemode.ctf.team_1_intel = 0;
                                 gamestate.gamemode.ctf.team_1_intel_location.dropped.x = p->x;
                                 gamestate.gamemode.ctf.team_1_intel_location.dropped.y = p->y;
                                 gamestate.gamemode.ctf.team_1_intel_location.dropped.z = p->z;
-                                sprintf(drop_str, "\2%s\6 has dropped the \1%s\6 Intel", players[p->player_id].name, gamestate.team_1.name);
+                                snprintf(drop_str, sizeof(drop_str), "\2%s\6 has dropped the \1%s\6 Intel", players[p->player_id].name, gamestate.team_1.name);
                                 break;
                 }
                 chat_add(0, hud_accent_color(), drop_str);
@@ -1155,17 +1158,17 @@ void read_PacketIntelPickup(void* data, int len) {
         }
         struct PacketIntelPickup* p = (struct PacketIntelPickup*)data;
         if(gamestate.gamemode_type == GAMEMODE_CTF && p->player_id < PLAYERS_MAX) {
-                char pickup_str[128];
+                char pickup_str[128] = {0};
                 switch(players[p->player_id].team) {
                         case TEAM_1:
                                 gamestate.gamemode.ctf.team_2_intel = 1; // pickup opposing team's intel
                                 gamestate.gamemode.ctf.team_2_intel_location.held.player_id = p->player_id;
-                                sprintf(pickup_str, "\1%s\6 has the \2%s\6 Intel", players[p->player_id].name, gamestate.team_2.name);
+                                snprintf(pickup_str, sizeof(pickup_str), "\1%s\6 has the \2%s\6 Intel", players[p->player_id].name, gamestate.team_2.name);
                                 break;
                         case TEAM_2:
                                 gamestate.gamemode.ctf.team_1_intel = 1;
                                 gamestate.gamemode.ctf.team_1_intel_location.held.player_id = p->player_id;
-                                sprintf(pickup_str, "\2%s\6 has the \1%s\6 Intel", players[p->player_id].name, gamestate.team_1.name);
+                                snprintf(pickup_str, sizeof(pickup_str), "\2%s\6 has the \1%s\6 Intel", players[p->player_id].name, gamestate.team_1.name);
                                 break;
                 }
                 chat_add(0, hud_accent_color(), pickup_str);
@@ -1184,8 +1187,8 @@ void read_PacketTerritoryCapture(void* data, int len) {
                 if(!demo_mute_effects()) sound_create(SOUND_LOCAL, p->winning ? &sound_horn : &sound_pickup, 0.0F, 0.0F, 0.0F);
                 char x = (int)(gamestate.gamemode.tc.territory[p->tent].x / 64.0F) + 'A';
                 char y = (int)(gamestate.gamemode.tc.territory[p->tent].y / 64.0F) + '1';
-                char capture_str[128];
-                char* team_n;
+                char capture_str[128] = {0};
+                char* team_n = NULL;
                 switch(p->team) {
                         case TEAM_1: team_n = gamestate.team_1.name; break;
                         case TEAM_2: team_n = gamestate.team_2.name; break;
@@ -1193,10 +1196,10 @@ void read_PacketTerritoryCapture(void* data, int len) {
                 if(team_n) {
                         char team_color = team_color_char(p->team);
 
-                        sprintf(capture_str, "%c%s\6 have captured %c%c", team_color, team_n, x, y);
+                        snprintf(capture_str, sizeof(capture_str), "%c%s\6 have captured %c%c", team_color, team_n, x, y);
                         chat_add(0, hud_accent_color(), capture_str);
                         if(p->winning) {
-                                sprintf(capture_str, "%s Team Wins!", team_n);
+                                snprintf(capture_str, sizeof(capture_str), "%s Team Wins!", team_n);
                                 chat_showpopup(capture_str, 5.0F, rgb(255, 0, 0));
                         }
                 }
@@ -1304,7 +1307,7 @@ static void send_version_enhanced(const unsigned char* props, int prop_count) {
                                 versioninfo_put_u8(payload, &pos, (unsigned char)KYROSPADES_MAJOR);
                                 versioninfo_put_u8(payload, &pos, (unsigned char)KYROSPADES_MINOR);
                                 versioninfo_put_u8(payload, &pos, (unsigned char)KYROSPADES_PATCH);
-                                versioninfo_put_string(payload, &pos, "KyroSpades", (int)sizeof(payload));
+                                versioninfo_put_string(payload, &pos, "KyroSpades", min((int)sizeof(payload), begin + 255));
                                 break;
                         case 1: { /* UserLocale */
                                 char locale_buf[32];
@@ -1315,7 +1318,7 @@ static void send_version_enhanced(const unsigned char* props, int prop_count) {
                                         n++;
                                 }
                                 locale_buf[n] = 0;
-                                versioninfo_put_string(payload, &pos, locale_buf, (int)sizeof(payload));
+                                versioninfo_put_string(payload, &pos, locale_buf, min((int)sizeof(payload), begin + 255));
                                 break;
                         }
                         case 2: /* ClientFeatureFlags1 */
@@ -1331,7 +1334,7 @@ static void send_version_enhanced(const unsigned char* props, int prop_count) {
                 }
 
                 int plen = pos - begin;
-                if(plen > 255) plen = 255;
+                if(plen > 255) return; /* Never advertise a shorter length than was written. */
                 payload[len_pos] = (unsigned char)plen;
         }
 
@@ -1586,11 +1589,19 @@ int network_connect(char* ip, int port) {
 }
 
 int network_identifier_split(char* addr, char* ip_out, int* port_out) {
-        char* ip_start = strstr(addr, "aos://") + 6;
-        if((size_t)ip_start <= 6)
+        if(!addr || strncmp(addr, "aos://", 6) != 0 || !ip_out || !port_out)
                 return 0;
+        char* ip_start = addr + 6;
         char* port_start = strchr(ip_start, ':');
-        *port_out = port_start ? strtoul(port_start + 1, NULL, 10) : 32887;
+        if(port_start) {
+                char* end;
+                unsigned long port = strtoul(port_start + 1, &end, 10);
+                if(end == port_start + 1 || *end || port == 0 || port > 65535)
+                        return 0;
+                *port_out = (int)port;
+        } else {
+                *port_out = 32887;
+        }
 
         /* Determine the raw IP substring length (without port suffix) so we
            can bound the copy into ip_out. Callers pass a 32-byte buffer; a
@@ -1600,12 +1611,12 @@ int network_identifier_split(char* addr, char* ip_out, int* port_out) {
         if(ip_len == 0 || ip_len >= 32)
                 return 0;
 
-        if(strchr(ip_start, '.')) {
+        if(memchr(ip_start, '.', ip_len)) {
                 memcpy(ip_out, ip_start, ip_len);
                 ip_out[ip_len] = 0;
         } else {
                 unsigned int ip = strtoul(ip_start, NULL, 10);
-                sprintf(ip_out, "%i.%i.%i.%i", ip & 255, (ip >> 8) & 255, (ip >> 16) & 255, (ip >> 24) & 255);
+                snprintf(ip_out, 32, "%i.%i.%i.%i", ip & 255, (ip >> 8) & 255, (ip >> 16) & 255, (ip >> 24) & 255);
         }
 
         return 1;

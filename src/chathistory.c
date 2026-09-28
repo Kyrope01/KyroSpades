@@ -31,6 +31,7 @@ static int worker_advance = 0;           /* days the worker scanned */
 static int worker_done    = 0;
 static int worker_no_more = 0;
 static pthread_t worker_thread;
+static int worker_running = 0;
 
 static void hist_state_clear(struct hist_state* s) {
 	free(s->lines);
@@ -66,6 +67,11 @@ static int hist_state_prepend(struct hist_state* dst, const struct hist_state* a
 }
 
 void chathistory_reset(void) {
+	/* The worker owns worker_result and reads target_ip until it exits. */
+	if(worker_running) {
+		pthread_join(worker_thread, NULL);
+		worker_running = 0;
+	}
 	pthread_mutex_lock(&public_lock);
 	hist_state_clear(&public_state);
 	hist_state_clear(&worker_result);
@@ -267,8 +273,7 @@ static void* worker_main(void* arg) {
 
 	worker_advance = days;
 	worker_no_more = (days >= HIST_MAX_DAYS && !produced_any);
-	__sync_synchronize();
-	worker_done = 1;
+	__atomic_store_n(&worker_done, 1, __ATOMIC_RELEASE);
 	return NULL;
 }
 
@@ -296,13 +301,15 @@ int chathistory_request_load(void) {
 		loading_flag = 0;
 		return 0;
 	}
-	pthread_detach(worker_thread);
+	worker_running = 1;
 	return 1;
 }
 
 void chathistory_poll(void) {
 	if(!loading_flag) return;
-	if(!worker_done) return;
+	if(!__atomic_load_n(&worker_done, __ATOMIC_ACQUIRE)) return;
+	pthread_join(worker_thread, NULL);
+	worker_running = 0;
 
 	pthread_mutex_lock(&public_lock);
 	hist_state_prepend(&public_state, &worker_result);

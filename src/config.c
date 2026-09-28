@@ -34,7 +34,7 @@
 #include "model.h"
 #include "camera.h"
 
-struct RENDER_OPTIONS settings, settings_tmp;
+struct RENDER_OPTIONS settings = {.sunlight_intensity = 100}, settings_tmp;
 struct list config_keys;
 struct list config_macros;
 struct list config_settings;
@@ -246,14 +246,18 @@ static void config_sets(const char* section, const char* name, const char* value
                 struct config_file_entry* e = list_get(&config_file, k);
                 if(strcmp(e->name, name) == 0) {
                         strncpy(e->value, value, sizeof(e->value) - 1);
+                        e->value[sizeof(e->value) - 1] = 0;
                         return;
                 }
         }
 
         struct config_file_entry e;
         strncpy(e.section, section, sizeof(e.section) - 1);
+        e.section[sizeof(e.section) - 1] = 0;
         strncpy(e.name, name, sizeof(e.name) - 1);
+        e.name[sizeof(e.name) - 1] = 0;
         strncpy(e.value, value, sizeof(e.value) - 1);
+        e.value[sizeof(e.value) - 1] = 0;
         list_add(&config_file, &e);
 }
 
@@ -322,6 +326,7 @@ void config_save() {
         config_seti("client", "ambient_occlusion", settings.ambient_occlusion);
         config_seti("client", "shadow_quality", settings.shadow_quality);
         config_setf("client", "shadow_intensity", settings.shadow_intensity);
+        config_seti("client", "sunlight_intensity", settings.sunlight_intensity);
         config_seti("client", "sky_gradient", settings.sky_gradient);
         config_setf("client", "sky_gradient_intensity", settings.sky_gradient_intensity);
         config_seti("client", "water_waves", settings.water_waves);
@@ -365,6 +370,7 @@ void config_save() {
         config_setf("client", "bloom_strength", settings.bloom_strength);
         config_setf("client", "bloom_threshold", settings.bloom_threshold);
         config_seti("client", "dynamic_lights", settings.dynamic_lights);
+        config_seti("client", "all_player_flashlights", settings.all_player_flashlights);
         config_seti("client", "flash_lights", settings.flash_lights);
         config_seti("client", "tracer_lights", settings.tracer_lights);
         config_setf("client", "dynamic_light_intensity", settings.dynamic_light_intensity);
@@ -522,6 +528,7 @@ IMPORT_SETTING(settings.camera_movement, camera_movement, atoi(value));
                 IMPORT_SETTING(settings.ao_multiplier, ao_multiplier, fmaxf(0.0F, fminf(5.0F, atof(value))));
                 IMPORT_SETTING(settings.shadow_quality, shadow_quality, atoi(value));
                 IMPORT_SETTING(settings.shadow_intensity, shadow_intensity, fmaxf(0.0F, fminf(1.0F, atof(value))));
+                IMPORT_SETTING(settings.sunlight_intensity, sunlight_intensity, max(0, min(100, atoi(value))));
                 IMPORT_SETTING(settings.sky_gradient, sky_gradient, atoi(value));
                 IMPORT_SETTING(settings.sky_gradient_intensity, sky_gradient_intensity, fmaxf(0.0F, fminf(1.0F, atof(value))));
                 IMPORT_SETTING(settings.water_waves, water_waves, atoi(value));
@@ -552,6 +559,7 @@ IMPORT_SETTING(settings.camera_movement, camera_movement, atoi(value));
                 IMPORT_SETTING(settings.bloom_strength, bloom_strength, fmaxf(0.0F, fminf(2.0F, atof(value))));
                 IMPORT_SETTING(settings.bloom_threshold, bloom_threshold, fmaxf(0.25F, fminf(4.0F, atof(value))));
                 IMPORT_SETTING(settings.dynamic_lights, dynamic_lights, atoi(value) ? 1 : 0);
+                IMPORT_SETTING(settings.all_player_flashlights, all_player_flashlights, atoi(value) ? 1 : 0);
                 IMPORT_SETTING(settings.flash_lights, flash_lights, atoi(value) ? 1 : 0);
                 IMPORT_SETTING(settings.tracer_lights, tracer_lights, atoi(value) ? 1 : 0);
                 IMPORT_SETTING(settings.dynamic_light_intensity, dynamic_light_intensity,
@@ -1207,6 +1215,17 @@ void config_reload() {
                          });
         list_add(&config_settings,
                          &(struct config_setting) {
+                                 .value = &settings_tmp.sunlight_intensity,
+                                 .type = CONFIG_TYPE_INT,
+                                 .min = 0,
+                                 .max = 100,
+                                 .help = "Sun and ambient daylight (0 = dark, 100 = default)",
+                                 .name = "Sunlight intensity",
+                                 .category = "Visual Effects",
+                                 .subcategory = "Lighting",
+                         });
+        list_add(&config_settings,
+                         &(struct config_setting) {
                                  .value = &settings_tmp.particle_animations,
                                  .type = CONFIG_TYPE_INT,
                                  .min = 0,
@@ -1433,6 +1452,17 @@ void config_reload() {
                                  .max = 1,
                                  .help = "Enable forward point lighting and material-aware terrain shading",
                                  .name = "Dynamic lights",
+                                 .category = "Visual Effects",
+                                 .subcategory = "Lighting",
+                         });
+        list_add(&config_settings,
+                         &(struct config_setting) {
+                                 .value = &settings_tmp.all_player_flashlights,
+                                 .type = CONFIG_TYPE_INT,
+                                 .min = 0,
+                                 .max = 1,
+                                 .help = "Client-side lamps for living players; nearest beams light the scene (needs Dynamic lights)",
+                                 .name = "Enable flashlights for all players",
                                  .category = "Visual Effects",
                                  .subcategory = "Lighting",
                          });

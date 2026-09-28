@@ -34,16 +34,24 @@ void entitysys_create(struct entity_system* es, size_t object_size, size_t initi
 	es->length = initial_size;
 }
 
+void entitysys_destroy(struct entity_system* es) {
+	if(!es) return;
+	free(es->buffer);
+	memset(es, 0, sizeof(*es));
+}
+
 void entitysys_iterate(struct entity_system* es, void* user, bool (*callback)(void* object, void* user)) {
 	assert(es != NULL && callback != NULL);
 
-	uint8_t* obj = es->buffer;
-	for(size_t k = 0; k < es->count; k++, obj += es->object_size) {
+	for(size_t k = 0; k < es->count; ) {
+		uint8_t* obj = (uint8_t*)es->buffer + k * es->object_size;
 		if(callback(obj, user)) {
-			if(es->count > 1)
+			if(k != es->count - 1)
 				memcpy(obj, (uint8_t*)es->buffer + es->object_size * (es->count - 1), es->object_size);
-
 			es->count--;
+			/* Recheck the element swapped into this slot. */
+		} else {
+			k++;
 		}
 	}
 }

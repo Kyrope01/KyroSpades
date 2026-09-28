@@ -46,6 +46,7 @@ extern int particle_stats_vertices;
 extern struct tesselator rain_tesselator[3];
 
 void particle_init(void);
+void particle_deinit(void);
 void particle_update(float dt);
 void particle_render(void);
 void particle_create_casing(struct Player* p);

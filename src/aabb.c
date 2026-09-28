@@ -32,31 +32,29 @@ void aabb_render(AABB* a) { }
 
 // see: https://tavianator.com/2011/ray_box.html
 bool aabb_intersection_ray(AABB* a, Ray* r, float* distance) {
-	double inv_x = 1.0 / r->direction.x;
-	double tx1 = (a->min_x - r->origin.x) * inv_x;
-	double tx2 = (a->max_x - r->origin.x) * inv_x;
-
-	double tmin = fmin(tx1, tx2);
-	double tmax = fmax(tx1, tx2);
-
-	double inv_y = 1.0 / r->direction.y;
-	double ty1 = (a->min_y - r->origin.y) * inv_y;
-	double ty2 = (a->max_y - r->origin.y) * inv_y;
-
-	tmin = fmax(tmin, fmin(fmin(ty1, ty2), tmax));
-	tmax = fmin(tmax, fmax(fmax(ty1, ty2), tmin));
-
-	double inv_z = 1.0 / r->direction.z;
-	double tz1 = (a->min_z - r->origin.z) * inv_z;
-	double tz2 = (a->max_z - r->origin.z) * inv_z;
-
-	tmin = fmax(tmin, fmin(fmin(tz1, tz2), tmax));
-	tmax = fmin(tmax, fmax(fmax(tz1, tz2), tmin));
-
+	const float* min_axis = a->min;
+	const float* max_axis = a->max;
+	const float* origin = r->origin.coords;
+	const float* direction = r->direction.coords;
+	double tmin = -INFINITY, tmax = INFINITY;
+	for(int axis = 0; axis < 3; axis++) {
+		if(direction[axis] == 0.0F) {
+			/* A parallel ray outside the slab cannot intersect it; avoid 0*inf. */
+			if(origin[axis] < min_axis[axis] || origin[axis] > max_axis[axis])
+				return false;
+			continue;
+		}
+		double near = (min_axis[axis] - origin[axis]) / (double)direction[axis];
+		double far = (max_axis[axis] - origin[axis]) / (double)direction[axis];
+		if(near > far) { double tmp = near; near = far; far = tmp; }
+		tmin = fmax(tmin, near);
+		tmax = fmin(tmax, far);
+		if(tmax < tmin) return false;
+	}
+	if(tmax <= fmax(tmin, 0.0)) return false;
 	if(distance)
 		*distance = fmax(tmin, 0.0) * len3D(r->direction.x, r->direction.y, r->direction.z);
-
-	return tmax > fmax(tmin, 0.0);
+	return true;
 }
 
 void aabb_set_center(AABB* a, float x, float y, float z) {

@@ -33,6 +33,7 @@
 #include "common.h"
 #include "glx.h"
 #include "lighting.h"
+#include "shadow.h"
 #include "glowing_blocks.h"
 #include "list.h"
 #include "matrix.h"
@@ -1322,27 +1323,31 @@ unsigned int i = 0;
 for(c = chat[channel][idx]; *c != '\0'; c++) {
 if((unsigned char)*c == 0xFF) {
 buffer[i] = '\0';
-float len = font_length(16.F, buffer) - 2.F;
+if(i) {
         if(is_mentioned)
                 glColor3ub(settings.chat_mention_r, settings.chat_mention_g, settings.chat_mention_b);
         font_render(x, y, 16.F, buffer);
-        x += len;
+        x += font_length(16.F, buffer) - 2.F;
+}
         i = 0;
         continue;
 }
 // Chat color codes are 1..7; everything else (including UTF-8 high bytes) is text.
-if((unsigned char)*c > 7) {buffer[i++] = *c;
+if((unsigned char)*c > 7) {
+if(i < sizeof(buffer) - 1) buffer[i++] = *c;
 if(*(c + 1) != '\0') {
 continue;
 }
 }
 
 buffer[i] = '\0';
-float len = font_length(16.F, buffer) - 2.F;
-if(is_mentioned) {
-glColor3ub(settings.chat_mention_r, settings.chat_mention_g, settings.chat_mention_b);
+float len = 0.F;
+if(i) {
+        len = font_length(16.F, buffer) - 2.F;
+        if(is_mentioned)
+                glColor3ub(settings.chat_mention_r, settings.chat_mention_g, settings.chat_mention_b);
+        font_render(x, y, 16.F, buffer);
 }
-font_render(x, y, 16.F, buffer);
 
 switch(*c) {
 case '\1': glColor3ub(LIGHTEN(gamestate.team_1.red), LIGHTEN(gamestate.team_1.green), LIGHTEN(gamestate.team_1.blue)); break; // Team1 color
@@ -1792,6 +1797,8 @@ static void hud_colorpicker_render(void) {
 }
 
 static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
+        if(local_player_id < 0 || local_player_id >= PLAYERS_MAX)
+                local_player_id = PLAYERS_MAX - 1;
         // window_mousemode(camera_mode==CAMERAMODE_SELECTION?WINDOW_CURSOR_ENABLED:WINDOW_CURSOR_DISABLED);
 
         /* Fixed-function world/model rendering can leave the texture combiner
@@ -3680,7 +3687,9 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
                            && players[local_player_id].connected
                            && players[local_player_id].alive
                            && players[local_player_id].team != TEAM_SPECTATOR) {
-                                if(lighting_flashlight_toggle())
+                                /* This option forces our own lamp on as well; F
+                                   cannot turn it off until the option is disabled. */
+                                if(!settings.all_player_flashlights && lighting_flashlight_toggle())
                                         sound_create(SOUND_LOCAL, &sound_switch, 0.0F, 0.0F, 0.0F);
                         }
 
@@ -4187,6 +4196,7 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
 }
 
 static void hud_ingame_touch(void* finger, int action, float x, float y, float dx, float dy) {
+        if(!finger) return; /* Touch tracking is full; there is no start position. */
         window_setmouseloc(x, y);
         struct window_finger* f = (struct window_finger*)finger;
 
@@ -4575,6 +4585,42 @@ static struct serverlist_news_entry {
 } serverlist_news;
 
 static int serverlist_news_exists = 0;
+
+static void hud_serverlist_clear_news(void) {
+        struct serverlist_news_entry* entry = serverlist_news.next;
+        if(serverlist_news.image.texture_id || serverlist_news.image.pixels)
+                texture_delete(&serverlist_news.image);
+        while(entry) {
+                struct serverlist_news_entry* next = entry->next;
+                if(entry->image.texture_id || entry->image.pixels)
+                        texture_delete(&entry->image);
+                free(entry);
+                entry = next;
+        }
+        memset(&serverlist_news, 0, sizeof(serverlist_news));
+        serverlist_news_exists = 0;
+}
+
+void hud_deinit(void) {
+        if(request_news) http_release(request_news);
+        if(request_serverlist) http_release(request_serverlist);
+#ifdef JENKINS_BUILD
+        if(request_version) http_release(request_version);
+#endif
+        hud_serverlist_clear_news();
+        free(serverlist);
+        serverlist = NULL;
+        free(hud_serverlist.ctx);
+        free(hud_settings.ctx);
+        free(hud_controls.ctx);
+        free(hud_chatlog.ctx);
+        free(hud_demolist.ctx);
+        free(hud_skins.ctx);
+        free(hud_macros.ctx);
+        free(hud_recording.ctx);
+        free(hud_replay.ctx);
+}
+
 static char serverlist_input[128];
 
 static void pinned_load();
@@ -4815,7 +4861,7 @@ static void server_c(char* address, char* name, int slots) {
                         hud_change(&hud_ingame);
         }
 
-        memcpy(&settings.last_address, address, 128);
+        snprintf(settings.last_address, sizeof(settings.last_address), "%s", address);
         config_save();
 }
 
@@ -5324,8 +5370,8 @@ static void hud_serverlist_render(mu_Context* ctx, float scalex, float scaley) {
                                 JSON_Array* news = json_value_get_array(js);
                                 int news_entries = json_array_get_count(news);
 
+                                hud_serverlist_clear_news();
                                 struct serverlist_news_entry* current = &serverlist_news;
-                                memset(current, 0, sizeof(struct serverlist_news_entry));
 
                                 for(int k = 0; k < news_entries; k++) {
                                         JSON_Object* s = json_array_get_object(news, k);
@@ -5338,13 +5384,18 @@ static void hud_serverlist_render(mu_Context* ctx, float scalex, float scaley) {
                                         if(json_object_get_string(s, "image")) {
                                                 char* img = (char*)json_object_get_string(s, "image");
                                                 int size = base64_decode(img, strlen(img));
-                                                unsigned char* buffer;
-                                                int width, height;
-                                                lodepng_decode32(&buffer, &width, &height, img, size);
-                                                texture_create_buffer(&current->image, width, height, buffer, 1);
-                                                texture_filter(&current->image, TEXTURE_FILTER_LINEAR);
+                                                unsigned char* buffer = NULL;
+                                                unsigned width = 0, height = 0;
+                                                unsigned err = size > 0 ? lodepng_decode32(&buffer, &width, &height, img, (size_t)size) : 1;
+                                                if(!err && width > 0 && height > 0 && width <= INT_MAX && height <= INT_MAX) {
+                                                        texture_create_buffer(&current->image, (int)width, (int)height, buffer, 1);
+                                                        texture_filter(&current->image, TEXTURE_FILTER_LINEAR);
+                                                } else {
+                                                        free(buffer);
+                                                }
                                         }
-                                        current->next = (k < news_entries - 1) ? malloc(sizeof(struct serverlist_news_entry)) : NULL;
+                                        current->next = (k < news_entries - 1) ? calloc(1, sizeof(struct serverlist_news_entry)) : NULL;
+                                        if(k < news_entries - 1 && !current->next) break;
                                         current = current->next;
                                 }
 
@@ -5859,13 +5910,20 @@ static void hud_settings_render(mu_Context* ctx, float scalex, float scaley) {
                         || settings.shadow_intensity != settings_tmp.shadow_intensity;
                 int water_mesh_changed = !!(settings.water_shader || settings.water_waves)
                         != !!(settings_tmp.water_shader || settings_tmp.water_waves);
+                /* Vertex-lit terrain and baked directional shadows must be
+                   regenerated; shader-lit terrain reads the percentage live. */
+                int baked_sunlight_changed = settings.sunlight_intensity != settings_tmp.sunlight_intensity
+                        && (!lighting_world_supported() || shadow_baked_enabled());
                 int remesh = settings.textured_blocks != settings_tmp.textured_blocks
                         || settings.ambient_occlusion != settings_tmp.ambient_occlusion
                         || settings.greedy_meshing != settings_tmp.greedy_meshing
                         || settings.ao_multiplier != settings_tmp.ao_multiplier
                         || shadow_changed
                         || water_mesh_changed
-                        || lighting_changed;
+                        || lighting_changed
+                        || baked_sunlight_changed
+                        || (settings.force_displaylist != settings_tmp.force_displaylist
+                            && (settings.sunlight_intensity != 100 || settings_tmp.sunlight_intensity != 100));
 
                 /* "Game width"/"Game height" are the WINDOWED size. An explicit edit
                    has to replace the size we restore when leaving fullscreen even when

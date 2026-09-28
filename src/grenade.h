@@ -32,6 +32,7 @@ struct Grenade {
 };
 
 void grenade_init(void);
+void grenade_deinit(void);
 void grenade_add(struct Grenade* g);
 void grenade_update(float dt);
 void grenade_render(void);

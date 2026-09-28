@@ -202,7 +202,7 @@ list(APPEND CLIENT_SOURCES particle.c)
 list(APPEND CLIENT_SOURCES player.c)
 list(APPEND CLIENT_SOURCES sound.c)
 list(APPEND CLIENT_SOURCES stb_truetype.c)
-list(APPEND CLIENT_SOURCES texture.c)
+list(APPEND CLIENT_SOURCES texture.c lodepng/lodepng.c)
 list(APPEND CLIENT_SOURCES tracer.c)
 list(APPEND CLIENT_SOURCES weapon.c)
 list(APPEND CLIENT_SOURCES window.c)
@@ -498,11 +498,14 @@ if(NOT ANDROID)
                 COMMAND ${CMAKE_COMMAND} -E copy_directory ${KyroSpades_SOURCE_DIR}/resources ${KyroSpades_SOURCE_DIR}/build/KyroSpades
         )
 
+        # POST_BUILD does not accept DEPENDS (CMP0175). On Make/Ninja, relink
+        # when the archive changes so its post-build extraction runs again.
+        set_property(TARGET ${KS_TARGET} APPEND PROPERTY LINK_DEPENDS
+                "${KyroSpades_SOURCE_DIR}/bsresources.zip")
         add_custom_command(
                 TARGET ${KS_TARGET}
                 POST_BUILD
                 COMMENT "Extracting additional third-party assets..."
-                DEPENDS ${KyroSpades_SOURCE_DIR}/bsresources.zip
                 WORKING_DIRECTORY ${KyroSpades_SOURCE_DIR}/build/KyroSpades
                 COMMAND ${CMAKE_COMMAND} -E tar xzf ${KyroSpades_SOURCE_DIR}/bsresources.zip
         )

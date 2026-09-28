@@ -228,14 +228,40 @@ static void window_impl_mousescroll(GLFWwindow* window, double xoffset, double y
 	mouse_scroll(hud_window, xoffset, yoffset);
 }
 static int window_creating_context = 0;
+static int window_keyboard_ready = 0;
+
+/* GLFW 3.3 has one Linux backend per build; 3.4 can select at runtime.  Do not
+   infer the backend from WAYLAND_DISPLAY: it is also set for XWayland clients. */
+static int window_on_wayland(void) {
+#ifdef OS_LINUX
+#if defined(GLFW_PLATFORM_WAYLAND) && (GLFW_VERSION_MAJOR > 3 || (GLFW_VERSION_MAJOR == 3 && GLFW_VERSION_MINOR >= 4))
+	return glfwGetPlatform() == GLFW_PLATFORM_WAYLAND;
+#else
+	/* In 3.3 the version string names the *only* compiled-in backend. */
+	int major, minor;
+	glfwGetVersion(&major, &minor, NULL);
+	const char* version = glfwGetVersionString();
+	return major == 3 && minor < 4 && version && strstr(version, " Wayland") != NULL;
+#endif
+#else
+	return 0;
+#endif
+}
 
 static void window_impl_error(int i, const char* s) {
-	/* A failed preferred-context attempt is recoverable; do not route it to
-	   on_error(), whose interactive pause would prevent the fallback retry. */
-	if(window_creating_context)
-		log_warn("GLFW context creation error [%i]: %s", i, s);
-	else
+	/* A bad system Compose file degrades text input but doesn't prevent GLFW
+	   from creating a window. Leave the locale untouched and report the fix. */
+	if(s && strstr(s, "Wayland: Failed to create XKB compose table")) {
+		log_warn("GLFW [%i]: %s; check locale/LC_ALL/LC_CTYPE and XCOMPOSEFILE (use an installed UTF-8 locale)", i, s);
+	} else if(s && (strstr(s, "Wayland: Invalid scancode -1")
+	                || strstr(s, "Wayland: The platform does not support setting the window position"))) {
+		log_warn("GLFW [%i]: %s", i, s);
+	} else if(window_creating_context) {
+		/* Context creation and fullscreen transitions can fail recoverably. */
+		log_warn("GLFW window operation error [%i]: %s", i, s);
+	} else {
 		on_error(i, s);
+	}
 }
 static void window_impl_reshape(GLFWwindow* window, int width, int height) {
 	reshape(hud_window, width, height);
@@ -261,6 +287,25 @@ static void window_impl_textinput(GLFWwindow* window, unsigned int codepoint) {
 	text_input(hud_window, buf);
 }
 static void window_impl_keys(GLFWwindow* window, int key, int scancode, int action, int mods) {
+	/* A real key event means Wayland has delivered a keymap. Never query all
+	   GLFW key names at startup: unsupported tokens have scancode -1 there,
+	   and some Wayland GLFW builds have no keymap until the window has focus. */
+	window_keyboard_ready = 1;
+	if(action == GLFW_PRESS && key >= GLFW_KEY_SPACE && key <= GLFW_KEY_WORLD_2
+	   && key != GLFW_KEY_SLASH && scancode >= 0
+	   && glfwGetKeyScancode(key) >= 0) {
+		const char* name = glfwGetKeyName(key, scancode);
+		if(name && name[0] == '/' && name[1] == '\0' && key != GLFW_KEY_SLASH) {
+			/* Keep the layout-aware '/' alias on the first actual key press,
+			   before translating it, including on AZERTY keyboards. */
+			static int command_alias = GLFW_KEY_UNKNOWN;
+			if(key != command_alias) {
+				config_register_key(WINDOW_KEY_COMMAND, key, NULL, 0, NULL, NULL);
+				command_alias = key;
+				log_info("Bound chat command to the layout's '/' key (GLFW key %i)", key);
+			}
+		}
+	}
 	int count = config_key_translate(key, 0, NULL);
 
 	int a = -1;
@@ -319,11 +364,19 @@ void window_keyname(int keycode, char* output, size_t length) {
 		if(output[0] && strcmp(output, "?")) return;
 	}
 #else
-	const char* name = glfwGetKeyName(keycode, 0);
-	if(name && *name) {
-		strncpy(output, name, length);
-		output[length - 1] = 0;
-		return;
+	/* Non-printable keys have no GLFW key name; on Wayland also wait for
+	   the first keymap before calling this API (some GLFW versions don't). */
+	if((!window_on_wayland() || window_keyboard_ready)
+	   && ((keycode >= GLFW_KEY_SPACE && keycode <= GLFW_KEY_GRAVE_ACCENT)
+	       || (keycode >= GLFW_KEY_WORLD_1 && keycode <= GLFW_KEY_WORLD_2)
+	       || (keycode >= GLFW_KEY_KP_0 && keycode <= GLFW_KEY_KP_EQUAL))
+	   && glfwGetKeyScancode(keycode) >= 0) {
+		const char* name = glfwGetKeyName(keycode, 0);
+		if(name && *name) {
+			strncpy(output, name, length);
+			output[length - 1] = 0;
+			return;
+		}
 	}
 #endif
 	if(keycode >= GLFW_KEY_F1 && keycode <= GLFW_KEY_F12) {
@@ -414,7 +467,9 @@ void window_init() {
 	   to compatibility mode would hide removed-API regressions. Builds with
 	   ENABLE_OPENGL_CORE=OFF retain the established compatibility ladder. */
 	glfwDefaultWindowHints();
-	glfwWindowHint(GLFW_VISIBLE, 0);
+	/* On Wayland let the compositor create/configure a surface immediately,
+	   rather than depending on a hidden window's first configure at startup. */
+	glfwWindowHint(GLFW_VISIBLE, window_on_wayland() ? GLFW_TRUE : GLFW_FALSE);
 #ifndef OPENGL_ES
 #ifdef OPENGL_CORE
 	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
@@ -437,22 +492,6 @@ void window_init() {
 	glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
 	glfwWindowHint(GLFW_CONTEXT_CREATION_API, GLFW_EGL_CONTEXT_API);
 #endif
-
-	/* GLFW key tokens are positional: on AZERTY and other layouts the
-	   physical key that prints '/' is NOT GLFW_KEY_SLASH, so the command
-	   binding would only react to the QWERTY position.  Find the key that
-	   actually types '/' and register it as an alias for the command key.
-	   config_reload() already ran (before window_init), so we append here;
-	   the extra binding has no display name, so it stays invisible in the
-	   Controls list. */
-	for(int k = GLFW_KEY_SPACE; k <= GLFW_KEY_LAST; k++) {
-		const char* nm = glfwGetKeyName(k, 0);
-		if(nm && nm[0] == '/' && nm[1] == '\0' && k != GLFW_KEY_SLASH) {
-			config_register_key(WINDOW_KEY_COMMAND, k, NULL, 0, NULL, NULL);
-			log_info("Bound chat command to the layout's '/' key (GLFW key %i)", k);
-			break;
-		}
-	}
 
 	if(settings.multisamples > 0) {
 		glfwWindowHint(GLFW_SAMPLES, settings.multisamples);
@@ -522,16 +561,16 @@ void window_init() {
 	GLFWmonitor* monitor = glfwGetPrimaryMonitor();
 	const GLFWvidmode* mode = monitor ? glfwGetVideoMode(monitor) : NULL;
 
-	if(mode) {
+	/* Native Wayland deliberately does not expose client-side window placement. */
+	if(mode && !window_on_wayland()) {
 		glfwSetWindowPos(hud_window->impl, (mode->width - settings.window_width) / 2,
 						 (mode->height - settings.window_height) / 2);
 	}
 
-	/* Stay hidden while the pending fullscreen transition (window_apply, first
-	   frame) is outstanding, so the desktop doesn't get a flash of the small
-	   windowed frame during loading; window_apply() shows it afterwards. The
-	   GL context works fine on a hidden window. */
-	if(!settings.fullscreen)
+	/* On X11 keep fullscreen startup hidden until the first transition to
+	   avoid flashing a small window. Wayland needs a visible, configured
+	   surface before asking the compositor to maximize it. */
+	if(!settings.fullscreen || window_on_wayland())
 		glfwShowWindow(hud_window->impl);
 
 	glfwMakeContextCurrent(hud_window->impl);
@@ -573,7 +612,23 @@ void window_apply() {
 	GLFWmonitor* monitor = glfwGetPrimaryMonitor();
 	const GLFWvidmode* mode = monitor ? glfwGetVideoMode(monitor) : NULL;
 
-	if(pending_fullscreen && monitor && mode) {
+	int fullscreen_failed = 0;
+	if(pending_fullscreen && window_on_wayland()) {
+		/* Wayland owns output modes and positioning. A successful GLFW monitor
+		   transition doesn't establish that a compositor mapped the surface;
+		   use a compositor-managed maximized window instead. */
+		if(!glfwGetWindowAttrib(hud_window->impl, GLFW_MAXIMIZED)) {
+			glfwGetWindowSize(hud_window->impl, &windowed_width, &windowed_height);
+			glfwShowWindow(hud_window->impl);
+			glfwGetError(NULL);
+			glfwMaximizeWindow(hud_window->impl);
+			fullscreen_failed = glfwGetError(NULL) != GLFW_NO_ERROR;
+			if(fullscreen_failed)
+				log_warn("Wayland maximization failed; restoring a windowed window");
+			else
+				log_info("Wayland: using compositor-maximized window (not exclusive fullscreen)");
+		}
+	} else if(pending_fullscreen && monitor && mode) {
 		/* Remember the windowed size first: reshape() overwrites
 		   settings.window_width/height (and thus pending_*) with the
 		   fullscreen size, so it can't be recovered on exit otherwise. */
@@ -586,17 +641,33 @@ void window_apply() {
 		   with a mismatched (or 0) rate is what makes X11/XWayland perform a real
 		   mode switch, which is how the desktop ended up stuck at the saved window
 		   size. */
+		glfwGetError(NULL); /* Discard errors from earlier GLFW operations. */
+		window_creating_context = 1;
 		glfwSetWindowMonitor(hud_window->impl, monitor, 0, 0,
 							 mode->width, mode->height, mode->refreshRate);
-		log_info("Fullscreen at %ix%i@%iHz", mode->width, mode->height, mode->refreshRate);
-	} else {
+		int transition_error = glfwGetError(NULL);
+		window_creating_context = 0;
+		fullscreen_failed = transition_error != GLFW_NO_ERROR
+						|| glfwGetWindowMonitor(hud_window->impl) != monitor;
+		if(fullscreen_failed)
+			log_warn("Fullscreen transition failed; restoring the windowed size");
+		else
+			log_info("Fullscreen at %ix%i@%iHz", mode->width, mode->height, mode->refreshRate);
+	}
+	if(!pending_fullscreen || (!window_on_wayland() && (!monitor || !mode)) || fullscreen_failed) {
 		int w = windowed_width > 0 ? windowed_width : pending_width;
 		int h = windowed_height > 0 ? windowed_height : pending_height;
 
-		if(pending_fullscreen)
+		if(pending_fullscreen && !fullscreen_failed)
 			log_warn("Fullscreen requested but no monitor/video mode is available, staying windowed at %ix%i", w, h);
 
-		if(mode) {
+		window_creating_context = 1;
+		if(window_on_wayland() && !glfwGetWindowMonitor(hud_window->impl)) {
+			/* Leaving a compositor-maximized window: no monitor switch or
+			   client-side placement is needed (or supported). */
+			glfwRestoreWindow(hud_window->impl);
+			glfwSetWindowSize(hud_window->impl, w, h);
+		} else if(mode) {
 			glfwSetWindowMonitor(hud_window->impl, NULL, (mode->width - w) / 2,
 								 (mode->height - h) / 2, w, h, 0);
 		} else if(glfwGetWindowMonitor(hud_window->impl)) {
@@ -605,6 +676,15 @@ void window_apply() {
 			glfwSetWindowMonitor(hud_window->impl, NULL, 0, 0, w, h, 0);
 		} else {
 			glfwSetWindowSize(hud_window->impl, w, h);
+		}
+		window_creating_context = 0;
+		if(pending_fullscreen) {
+			if(!glfwGetWindowMonitor(hud_window->impl)) {
+				settings.fullscreen = 0;
+				settings_tmp.fullscreen = 0;
+			} else {
+				log_warn("Could not return to a windowed window after the fullscreen request");
+			}
 		}
 	}
 

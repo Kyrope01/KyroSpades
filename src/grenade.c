@@ -38,6 +38,10 @@
 
 struct entity_system grenades;
 
+void grenade_deinit(void) {
+	entitysys_destroy(&grenades);
+}
+
 void grenade_init() {
 	entitysys_create(&grenades, sizeof(struct Grenade), 32);
 }

@@ -589,6 +589,23 @@ static bool sound_update_single(void* obj, void* user) {
 }
 #endif
 
+void sound_deinit(void) {
+#ifdef USE_SOUND
+	if(sound_enabled) {
+		if(rain_source) {
+			alSourceStop(rain_source);
+			alDeleteSources(1, &rain_source);
+			rain_source = 0;
+		}
+		for(size_t k = 0; k < sound_sources.count; k++) {
+			struct Sound_source* source = (struct Sound_source*)sound_sources.buffer + k;
+			if(source->openal_handle) sound_source_free(source);
+		}
+	}
+	entitysys_destroy(&sound_sources);
+#endif
+}
+
 void sound_update() {
 #ifdef USE_SOUND
         if(!sound_enabled)

@@ -127,5 +127,6 @@ void sound_update(void);
 int sound_reload(struct Sound_wav* wav, const char* name, float min, float max);
 void sound_load(struct Sound_wav* wav, char* name, float min, float max);
 void sound_init(void);
+void sound_deinit(void);
 
 #endif

@@ -91,6 +91,7 @@ extern struct RENDER_OPTIONS {
         float ao_multiplier;
         int shadow_quality;
         float shadow_intensity;
+        int sunlight_intensity;                /* percent of daylight (direct + ambient), 0..100 */
         int sky_gradient;
         float sky_gradient_intensity;
         int water_waves;
@@ -131,6 +132,7 @@ extern struct RENDER_OPTIONS {
         float bloom_strength;
         float bloom_threshold;
         int dynamic_lights;                   /* forward point lights and terrain material shading */
+        int all_player_flashlights;           /* locally show a flashlight for every living player */
         int flash_lights;                     /* muzzle-flash and grenade-explosion point lights */
         int tracer_lights;                    /* moving projectile-tracer point lights */
         float dynamic_light_intensity;        /* global dynamic-light intensity multiplier, 1..10 */
@@ -201,8 +203,8 @@ struct config_setting {
         int type;
         int min;
         int max;
-        char name[32];
-        char help[64];
+        char name[48];
+        char help[128];
         char category[32];
         char subcategory[32];   /* optional: groups settings into collapsible dropdowns within a category */
         int defaults[8];

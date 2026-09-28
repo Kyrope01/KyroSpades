@@ -49,6 +49,7 @@
 #include "grenade.h"
 #include "player.h"
 #include "hud.h"
+#include "chathistory.h"
 #include "config.h"
 #include "log.h"
 #include "ping.h"
@@ -163,6 +164,32 @@ static float glowing_ray_distance_attenuation(float distance) {
 }
 
 static void postproc_release_targets(void) {
+        /* Deleting a bound target leaves GL state dangling across resize/shutdown.
+           On iOS the drawable's default FBO is not necessarily zero. */
+        GLint bound = 0;
+        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &bound);
+        if((postproc.fbo && bound == (GLint)postproc.fbo)
+           || (postproc.vol_fbo && bound == (GLint)postproc.vol_fbo))
+                glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)window_gl_default_framebuffer);
+        glGetIntegerv(GL_RENDERBUFFER_BINDING, &bound);
+        if(postproc.depth_rb && bound == (GLint)postproc.depth_rb)
+                glBindRenderbuffer(GL_RENDERBUFFER, 0);
+        GLint active = 0;
+        glGetIntegerv(GL_ACTIVE_TEXTURE, &active);
+        glActiveTexture(GL_TEXTURE0);
+        glGetIntegerv(GL_TEXTURE_BINDING_2D, &bound);
+        if((postproc.texture && bound == (GLint)postproc.texture)
+           || (postproc.depth_tex && bound == (GLint)postproc.depth_tex)
+           || (postproc.vol_tex && bound == (GLint)postproc.vol_tex))
+                glBindTexture(GL_TEXTURE_2D, 0);
+        glActiveTexture((GLenum)active);
+        if(active != GL_TEXTURE0) {
+                glGetIntegerv(GL_TEXTURE_BINDING_2D, &bound);
+                if((postproc.texture && bound == (GLint)postproc.texture)
+                   || (postproc.depth_tex && bound == (GLint)postproc.depth_tex)
+                   || (postproc.vol_tex && bound == (GLint)postproc.vol_tex))
+                        glBindTexture(GL_TEXTURE_2D, 0);
+        }
         if(postproc.fbo)
                 glDeleteFramebuffers(1, &postproc.fbo);
         if(postproc.depth_rb)
@@ -1474,9 +1501,10 @@ void display() {
                                    horizon matches the actual fog color. */
                                 float fc[3];
                                 fog_color_render(fc);
-                                float zr = fc[0] + (0.18F - fc[0]) * intensity;
-                                float zg = fc[1] + (0.28F - fc[1]) * intensity;
-                                float zb = fc[2] + (0.55F - fc[2]) * intensity;
+                                float sun = lighting_sunlight_scale();
+                                float zr = fc[0] + (0.18F * sun - fc[0]) * intensity;
+                                float zg = fc[1] + (0.28F * sun - fc[1]) * intensity;
+                                float zb = fc[2] + (0.55F * sun - fc[2]) * intensity;
 
                                 glx_draw_gradient_quad_2d(0, h, w, h - horizon, zr, zg, zb,
                                                            fc[0], fc[1], fc[2]);
@@ -1858,6 +1886,7 @@ void display() {
                                         float vol_sun_brightness = 107.143F * sun_dir[1];
                                         if(vol_sun_brightness < 0.0F) vol_sun_brightness = 0.0F;
                                         if(vol_sun_brightness > 1.0F) vol_sun_brightness = 1.0F;
+                                        vol_sun_brightness *= lighting_sunlight_scale();
 
                                         /* Warm daylight tint for the ray color. */
                                         float vol_day_light[3] = { 1.0F, 0.95F, 0.8F };
@@ -2002,6 +2031,7 @@ void display() {
                                         float fl_sun_brightness = 107.143F * sun_dir[1];
                                         if(fl_sun_brightness < 0.0F) fl_sun_brightness = 0.0F;
                                         if(fl_sun_brightness > 1.0F) fl_sun_brightness = 1.0F;
+                                        fl_sun_brightness *= lighting_sunlight_scale();
 
                                         /* A no-op full-screen flare still paid for every fragment.
                                            Skip it entirely at night or while the sun is behind us. */
@@ -2675,13 +2705,20 @@ void mouse_scroll(struct window_instance* window, double xoffset, double yoffset
 void deinit() {
         recorder_shutdown();
         rpc_deinit();
-        ping_deinit();
+        ping_deinit(); /* Join before freeing HUD state used by ping callbacks. */
+        chathistory_reset(); /* Join the log reader before closing its state. */
         postproc_release_all();
-        /* Stop the reflection worker before network teardown can release or
-           replace map storage it may be reading. */
+        /* Workers must stop before map/GL storage is released; keep the GL
+           context alive through all texture, display-list and shader cleanup. */
         water_deinit();
         if(network_connected)
                 network_disconnect();
+        hud_deinit();
+        map_deinit();
+        particle_deinit();
+        tracer_deinit();
+        grenade_deinit();
+        sound_deinit();
         glowing_blocks_deinit();
         lighting_deinit();
         shadow_deinit();
@@ -2692,7 +2729,6 @@ void deinit() {
 
 void on_error(int i, const char* s) {
         log_fatal("Major error occured: [%i] %s", i, s);
-        getchar();
 }
 
 #if defined(OS_APPLE)
@@ -2872,6 +2908,7 @@ int main(int argc, char** argv) {
         settings.bloom_strength = 0.35F;
         settings.bloom_threshold = 0.8F;
         settings.dynamic_lights = 1;
+        settings.all_player_flashlights = 0; /* Opt-in: never alter remote visuals on upgrade. */
         settings.flash_lights = 1;
         settings.tracer_lights = 1;
         settings.dynamic_light_intensity = 3.0F;

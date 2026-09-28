@@ -23,6 +23,8 @@ bool lighting_supported(void);
 /* The Core world shader can remain active for live directional shadows even
  * when the point-light master is off. */
 bool lighting_world_supported(void);
+/* Scales direct sunlight and ambient daylight (point/flash lights remain independent). */
+float lighting_sunlight_scale(void);
 
 /* OpenSpades-style local flashlight. It starts off, toggles with the user's
  * control binding, and only emits while update() marks the local view usable. */
@@ -48,9 +50,21 @@ void lighting_submit_point(float x, float y, float z, float red, float green, fl
 /* Select the most relevant active and submitted lights for this frame. */
 void lighting_prepare_frame(double now, float camera_x, float camera_y, float camera_z);
 
+/* Render-only lamp-tip location for a living remote player this frame. The
+ * getter has no network side effects and returns false when disabled. */
+bool lighting_remote_flashlight_position(int player_id, float position[3]);
+
 /* Upload this frame's lights and sunlight to a programmable model shader that
  * uses the shared u_LightPositionRadius/u_LightColorIntensity contract. */
 void lighting_apply_program(unsigned int program);
+
+/* Desktop compatibility KV6 meshes use fixed-function arrays rather than the
+ * programmable default model shader. Bind their own GLSL 120 light consumer;
+ * the light scale occludes daylight only, never the flashlight/point lights.
+ * Begin/end must bracket the mesh draws, including the team-colour pass. */
+bool lighting_model_begin(float daylight_occlusion);
+void lighting_model_tint(float red, float green, float blue);
+void lighting_model_end(void);
 
 /* Bind the forward-lighting shader around terrain rendering.  Returns true
  * when a shader was bound.  The caller may invoke update_matrices after every

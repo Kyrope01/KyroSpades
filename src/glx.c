@@ -29,6 +29,7 @@
 #include "common.h"
 #include "camera.h"
 #include "config.h"
+#include "lighting.h"
 #include "map.h"
 #include "matrix.h"
 #include "texture.h"
@@ -224,7 +225,8 @@ static const char* default_fs =
         "    if(u_LightingEnabled > 0.5) {\n"
         "        vec3 normal = normalize(v_WorldNormal);\n"
         "        float sun = max(dot(normal, normalize(u_SunDirection)), 0.0);\n"
-        "        vec3 light = u_AmbientLight + u_SunColor * (0.34 * sun);\n"
+        /* map_sunblock occludes daylight, not nearby flashlight/point lights. */
+        "        vec3 light = (u_AmbientLight + u_SunColor * (0.34 * sun)) * u_LightScale;\n"
         "        bool flashlight_active = u_FlashlightDirection.w >= 0.0;\n"
         "        for(int i = 0; i < 4; ++i) {\n"
         "            vec4 pr = u_LightPositionRadius[i];\n"
@@ -232,12 +234,21 @@ static const char* default_fs =
         "            if(ci.a > 0.0 && (i != 3 || !flashlight_active)) {\n"
         "                vec3 delta = pr.xyz - v_WorldPosition;\n"
         "                float distance_to_light = length(delta);\n"
-        "                float distance_ratio = distance_to_light / max(pr.w, 0.0001);\n"
+        "                float distance_ratio = distance_to_light / max(abs(pr.w), 0.0001);\n"
         "                float attenuation = clamp(1.0 - distance_ratio, 0.0, 1.0);\n"
         "                attenuation *= attenuation;\n"
         "                vec3 light_direction = delta / max(distance_to_light, 0.0001);\n"
         "                float diffuse = max(dot(normal, light_direction), 0.0);\n"
-        "                light += ci.rgb * ci.a * attenuation * (0.18 + 0.82 * diffuse);\n"
+        "                float facing = 0.18 + 0.82 * diffuse;\n"
+        "                if(pr.w < 0.0) {\n"
+        "                    float cone = smoothstep(0.70710678, 0.82710678,\n"
+        "                                            dot(-light_direction, normalize(ci.rgb)));\n"
+        "                    float fill = clamp(1.0 - distance_to_light / 10.0, 0.0, 1.0);\n"
+        "                    fill = 0.30 * fill * fill;\n"
+        "                    light += vec3(1.0, 0.70, 0.50) * ci.a * (cone * attenuation + fill) * facing;\n"
+        "                } else {\n"
+        "                    light += ci.rgb * ci.a * attenuation * facing;\n"
+        "                }\n"
         "            }\n"
         "        }\n"
         "        if(flashlight_active) {\n"
@@ -255,7 +266,7 @@ static const char* default_fs =
         "            fill = 0.30 * fill * fill;\n"
         "            light += ci.rgb * ci.a * (cone * range + fill) * (0.18 + 0.82 * diffuse);\n"
         "        }\n"
-        "        c.rgb *= light * u_LightScale;\n"
+        "        c.rgb *= light;\n"
         "    }\n"
         "    float fog = v_FogDistance * v_FogDistance * (3.0 - 2.0 * v_FogDistance);\n"
         "    gl_FragColor = vec4(mix(c.rgb, u_FogColor, fog), c.a);\n"
@@ -1394,6 +1405,11 @@ void glx_enable_sphericalfog() {
         }
 #elif !defined(OPENGL_ES)
         if(!settings.smooth_fog) {
+                /* Fixed-function GL has its own global model ambient, in
+                   addition to GL_LIGHT0's ambient contribution. */
+                float ambient = 0.2F * lighting_sunlight_scale();
+                glLightModelfv(GL_LIGHT_MODEL_AMBIENT,
+                               (float[]) {ambient, ambient, ambient, 1.0F});
                 glActiveTexture(GL_TEXTURE1);
                 glEnable(GL_TEXTURE_2D);
                 glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, (float[]) {fc[0], fc[1], fc[2], 1.0F});
@@ -1427,7 +1443,8 @@ void glx_enable_sphericalfog() {
                 glLightfv(GL_LIGHT1, GL_POSITION,
                                   (float[]) {camera_x, (settings.render_distance * map_size_y) / 16.0F, camera_z, 1.0F});
                 glLightfv(GL_LIGHT1, GL_SPOT_DIRECTION, (float[]) {0.0F, -1.0F, 0.0F});
-                glLightfv(GL_LIGHT1, GL_DIFFUSE, (float[]) {1.0F, 1.0F, 1.0F, 1.0F});
+                float sun = lighting_sunlight_scale();
+                glLightfv(GL_LIGHT1, GL_DIFFUSE, (float[]) {sun, sun, sun, 1.0F});
                 glLightfv(GL_LIGHT1, GL_AMBIENT, (float[]) {-fc[0], -fc[1], -fc[2], 1.0F});
                 glLightf(GL_LIGHT1, GL_SPOT_CUTOFF, tan(16.0F / map_size_y) / PI * 180.0F);
                 glLightf(GL_LIGHT1, GL_SPOT_EXPONENT, 128.0F);
@@ -1453,7 +1470,8 @@ void glx_enable_sphericalfog() {
                 glLightfv(GL_LIGHT1, GL_SPOT_DIRECTION, dir);
                 float dif[4] = {0.0F, 0.0F, 0.0F, 1.0F};
                 glLightfv(GL_LIGHT1, GL_DIFFUSE, dif);
-                float amb2[4] = {1.0F, 1.0F, 1.0F, 1.0F};
+                float sun = lighting_sunlight_scale();
+                float amb2[4] = {sun, sun, sun, 1.0F};
                 glLightfv(GL_LIGHT1, GL_AMBIENT, amb2);
                 glLightf(GL_LIGHT1, GL_SPOT_CUTOFF, tan(16.0F / map_size_y) / PI * 180.0F);
                 glLightf(GL_LIGHT1, GL_SPOT_EXPONENT, 128.0F);
@@ -1482,6 +1500,8 @@ void glx_disable_sphericalfog() {
         }
 #elif !defined(OPENGL_ES)
         if(!settings.smooth_fog) {
+                glLightModelfv(GL_LIGHT_MODEL_AMBIENT,
+                               (float[]) {0.2F, 0.2F, 0.2F, 1.0F});
                 glActiveTexture(GL_TEXTURE1);
                 glDisable(GL_TEXTURE_GEN_T);
                 glDisable(GL_TEXTURE_GEN_S);
