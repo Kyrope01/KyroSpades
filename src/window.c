@@ -569,7 +569,7 @@ void window_init() {
 
 	/* On X11 keep fullscreen startup hidden until the first transition to
 	   avoid flashing a small window. Wayland needs a visible, configured
-	   surface before asking the compositor to maximize it. */
+	   surface before requesting fullscreen from the compositor. */
 	if(!settings.fullscreen || window_on_wayland())
 		glfwShowWindow(hud_window->impl);
 
@@ -612,49 +612,38 @@ void window_apply() {
 	GLFWmonitor* monitor = glfwGetPrimaryMonitor();
 	const GLFWvidmode* mode = monitor ? glfwGetVideoMode(monitor) : NULL;
 
+	int wayland = window_on_wayland();
 	int fullscreen_failed = 0;
-	if(pending_fullscreen && window_on_wayland()) {
-		/* Wayland owns output modes and positioning. A successful GLFW monitor
-		   transition doesn't establish that a compositor mapped the surface;
-		   use a compositor-managed maximized window instead. */
-		if(!glfwGetWindowAttrib(hud_window->impl, GLFW_MAXIMIZED)) {
-			glfwGetWindowSize(hud_window->impl, &windowed_width, &windowed_height);
-			glfwShowWindow(hud_window->impl);
-			glfwGetError(NULL);
-			glfwMaximizeWindow(hud_window->impl);
-			fullscreen_failed = glfwGetError(NULL) != GLFW_NO_ERROR;
-			if(fullscreen_failed)
-				log_warn("Wayland maximization failed; restoring a windowed window");
-			else
-				log_info("Wayland: using compositor-maximized window (not exclusive fullscreen)");
-		}
-	} else if(pending_fullscreen && monitor && mode) {
+	if(pending_fullscreen && monitor && (mode || wayland)) {
 		/* Remember the windowed size first: reshape() overwrites
 		   settings.window_width/height (and thus pending_*) with the
 		   fullscreen size, so it can't be recovered on exit otherwise. */
 		if(!glfwGetWindowMonitor(hud_window->impl))
 			glfwGetWindowSize(hud_window->impl, &windowed_width, &windowed_height);
 
-		/* Go fullscreen at the mode the monitor is ALREADY in - GLFW's equivalent
-		   of the SDL_WINDOW_FULLSCREEN_DESKTOP the SDL backend uses. The refresh
-		   rate has to come from that same mode: requesting the current resolution
-		   with a mismatched (or 0) rate is what makes X11/XWayland perform a real
-		   mode switch, which is how the desktop ended up stuck at the saved window
-		   size. */
+		/* Request the monitor's current mode, not the saved windowed size.
+		   X11/XWayland must also use the current refresh rate to avoid a mode
+		   switch. On native Wayland the compositor controls the mode and GLFW
+		   requests actual fullscreen (not maximization); mode can be unavailable
+		   while an output is still being configured. */
+		int width = mode ? mode->width : (windowed_width > 0 ? windowed_width : pending_width);
+		int height = mode ? mode->height : (windowed_height > 0 ? windowed_height : pending_height);
+		int refresh = mode ? mode->refreshRate : GLFW_DONT_CARE;
 		glfwGetError(NULL); /* Discard errors from earlier GLFW operations. */
 		window_creating_context = 1;
-		glfwSetWindowMonitor(hud_window->impl, monitor, 0, 0,
-							 mode->width, mode->height, mode->refreshRate);
+		glfwSetWindowMonitor(hud_window->impl, monitor, 0, 0, width, height, refresh);
 		int transition_error = glfwGetError(NULL);
 		window_creating_context = 0;
 		fullscreen_failed = transition_error != GLFW_NO_ERROR
 						|| glfwGetWindowMonitor(hud_window->impl) != monitor;
 		if(fullscreen_failed)
 			log_warn("Fullscreen transition failed; restoring the windowed size");
+		else if(wayland)
+			log_info("Wayland: requested compositor fullscreen");
 		else
-			log_info("Fullscreen at %ix%i@%iHz", mode->width, mode->height, mode->refreshRate);
+			log_info("Fullscreen at %ix%i@%iHz", width, height, refresh);
 	}
-	if(!pending_fullscreen || (!window_on_wayland() && (!monitor || !mode)) || fullscreen_failed) {
+	if(!pending_fullscreen || !monitor || (!mode && !wayland) || fullscreen_failed) {
 		int w = windowed_width > 0 ? windowed_width : pending_width;
 		int h = windowed_height > 0 ? windowed_height : pending_height;
 
@@ -662,10 +651,12 @@ void window_apply() {
 			log_warn("Fullscreen requested but no monitor/video mode is available, staying windowed at %ix%i", w, h);
 
 		window_creating_context = 1;
-		if(window_on_wayland() && !glfwGetWindowMonitor(hud_window->impl)) {
-			/* Leaving a compositor-maximized window: no monitor switch or
-			   client-side placement is needed (or supported). */
-			glfwRestoreWindow(hud_window->impl);
+		if(wayland) {
+			/* Wayland has no client-side window placement. Unset the fullscreen
+			   monitor and restore the requested windowed size (including on GLFW
+			   versions that do not resize when leaving fullscreen). */
+			if(glfwGetWindowMonitor(hud_window->impl))
+				glfwSetWindowMonitor(hud_window->impl, NULL, 0, 0, w, h, 0);
 			glfwSetWindowSize(hud_window->impl, w, h);
 		} else if(mode) {
 			glfwSetWindowMonitor(hud_window->impl, NULL, (mode->width - w) / 2,

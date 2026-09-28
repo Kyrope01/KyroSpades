@@ -3687,9 +3687,9 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
                            && players[local_player_id].connected
                            && players[local_player_id].alive
                            && players[local_player_id].team != TEAM_SPECTATOR) {
-                                /* This option forces our own lamp on as well; F
-                                   cannot turn it off until the option is disabled. */
-                                if(!settings.all_player_flashlights && lighting_flashlight_toggle())
+                                /* The all-player option controls remote lamps only;
+                                   our flashlight always follows the local toggle. */
+                                if(lighting_flashlight_toggle())
                                         sound_create(SOUND_LOCAL, &sound_switch, 0.0F, 0.0F, 0.0F);
                         }
 

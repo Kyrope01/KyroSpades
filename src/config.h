@@ -132,7 +132,7 @@ extern struct RENDER_OPTIONS {
         float bloom_strength;
         float bloom_threshold;
         int dynamic_lights;                   /* forward point lights and terrain material shading */
-        int all_player_flashlights;           /* locally show a flashlight for every living player */
+        int all_player_flashlights;           /* locally show lamps for living remote players */
         int flash_lights;                     /* muzzle-flash and grenade-explosion point lights */
         int tracer_lights;                    /* moving projectile-tracer point lights */
         float dynamic_light_intensity;        /* global dynamic-light intensity multiplier, 1..10 */

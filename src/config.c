@@ -1461,7 +1461,7 @@ void config_reload() {
                                  .type = CONFIG_TYPE_INT,
                                  .min = 0,
                                  .max = 1,
-                                 .help = "Client-side lamps for living players; nearest beams light the scene (needs Dynamic lights)",
+                                 .help = "Other living players always have lamps; your flashlight still toggles with F (needs Dynamic lights)",
                                  .name = "Enable flashlights for all players",
                                  .category = "Visual Effects",
                                  .subcategory = "Lighting",

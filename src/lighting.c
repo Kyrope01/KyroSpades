@@ -659,7 +659,7 @@ bool lighting_flashlight_toggle(void) {
         return true;
 }
 
-bool lighting_flashlight_enabled(void) { return flashlight.enabled || settings.all_player_flashlights; }
+bool lighting_flashlight_enabled(void) { return flashlight.enabled; }
 
 void lighting_flashlight_reset(void) {
         memset(&flashlight, 0, sizeof(flashlight));
@@ -669,7 +669,7 @@ void lighting_flashlight_update(float dt, bool usable,
                                 float x, float y, float z,
                                 float direction_x, float direction_y, float direction_z) {
         flashlight.frame_active = false;
-        if(!(flashlight.enabled || settings.all_player_flashlights) || !usable || !lighting_supported())
+        if(!flashlight.enabled || !usable || !lighting_supported())
                 return;
 
         float target_length = sqrtf(direction_x * direction_x + direction_y * direction_y
