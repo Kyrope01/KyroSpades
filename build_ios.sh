@@ -103,12 +103,10 @@ cmake -S "$ROOT" -B "$BUILD/app" -G "$GEN" "${TC_ARGS[@]}" \
 	-Ddeflate_LIBRARY="$PREFIX/lib/libdeflate.a"
 
 echo ">> building KyroSpades"
-# Overlay zips are unpacked with their archive mtimes, which can predate object
-# files from a previous build. ninja then sees sources as "older" than their .o
-# and SKIPS recompiling them, silently shipping a stale binary. Bump every
-# source/header mtime to now so changed files actually rebuild and re-link.
-find "$ROOT/src" -type f \( -name '*.c' -o -name '*.h' \) -exec touch {} + 2>/dev/null || true
-cmake --build "$BUILD/app" --config Release
+# Overlays can preserve archive mtimes older than an earlier object file.
+# Clean the build outputs rather than touching tracked source timestamps:
+# this ensures the staged overlay is recompiled on every bundle build.
+cmake --build "$BUILD/app" --config Release --clean-first
 
 # ── Assemble the (unsigned) .app bundle ───────────────────────────────────────
 # The CMake target writes the executable + a full resource payload (resources/,

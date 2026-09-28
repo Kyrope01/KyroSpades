@@ -364,62 +364,8 @@ cmake -S "$PROJECT_DIR" -B "$FINAL_BUILD" \
 
 info "Compiling KyroSpades..."
 
-# ── Source patches for Android ────────────────────────────────────────────────
-# 1. file.c + main.c: Android's NDK mkdir() requires 2 args (path + mode).
-#    file.c line 77 is inside #ifdef OS_WINDOWS where 1-arg is correct; only
-#    the USE_ANDROID_FILE branch (mkdir(str)) and main.c need fixing.
-#    main.c also needs <sys/stat.h> for the mkdir declaration — Android's NDK
-#    doesn't pull it in transitively the way macOS does.
-sed -i.bak 's/mkdir(str);/mkdir(str, 0755);/' "$PROJECT_DIR/src/file.c"
-sed -i.bak 's|mkdir("/sdcard/KyroSpades");|mkdir("/sdcard/KyroSpades", 0755);|' "$PROJECT_DIR/src/main.c"
-if ! grep -q 'sys/stat.h' "$PROJECT_DIR/src/main.c"; then
-    sed -i.bak2 's|#include <time.h>|#include <time.h>\n#include <sys/stat.h>|' "$PROJECT_DIR/src/main.c"
-    info "Patched main.c: added <sys/stat.h>"
-fi
-
-# 2. cameracontroller.c: the USE_TOUCH block references hud_ingame but
-#    hud.h is not included in that file. Add the missing include.
-if ! grep -q '"hud.h"' "$PROJECT_DIR/src/cameracontroller.c"; then
-    sed -i.bak 's|#include "cameracontroller.h"|#include "cameracontroller.h"\n#include "hud.h"|' \
-        "$PROJECT_DIR/src/cameracontroller.c"
-fi
-
-# 3. Stub out immediate-mode GL calls that don't exist in GLES2.
-#    glLineWidth and glColor4f are NOT stubbed — they're real GLES functions.
-STUBS_HEADER="$PROJECT_DIR/src/gles_immediate_stubs.h"
-cat > "$STUBS_HEADER" << 'GLES_STUBS_EOF'
-#pragma once
-#ifdef OPENGL_ES
-#  ifndef GL_QUADS
-#    define GL_QUADS 0x0007
-#  endif
-static inline void glBegin(int m)                { (void)m; }
-static inline void glEnd(void)                   {}
-static inline void glVertex2f(float x, float y)  { (void)x; (void)y; }
-static inline void glTexCoord2f(float s, float t) { (void)s; (void)t; }
-#endif
-GLES_STUBS_EOF
-
-# 4. http.h: IPPROTO_TCP lives in <netinet/in.h>. macOS/glibc pull it in
-#    transitively via <netdb.h>; Android's NDK does not. Add the missing include.
-if ! grep -q 'netinet/in.h' "$PROJECT_DIR/src/http.h"; then
-    sed -i.bak 's|#include <netdb.h>|#include <netdb.h>\n    #include <netinet/in.h>|' \
-        "$PROJECT_DIR/src/http.h"
-    info "Patched http.h: added <netinet/in.h>"
-fi
-
-# 5. window.c: SDL_HINT_ANDROID_SEPARATE_MOUSE_AND_TOUCH was removed in SDL2
-#    2.24.0. Replace with SDL_HINT_MOUSE_TOUCH_EVENTS (the modern equivalent
-#    that controls the same touch/mouse separation behaviour).
-sed -i.bak \
-    's/SDL_HINT_ANDROID_SEPARATE_MOUSE_AND_TOUCH/SDL_HINT_MOUSE_TOUCH_EVENTS/' \
-    "$PROJECT_DIR/src/window.c"
-
-if ! grep -q 'gles_immediate_stubs.h' "$PROJECT_DIR/src/hud.c"; then
-    sed -i.bak "1s|^|#include \"gles_immediate_stubs.h\"\n|" "$PROJECT_DIR/src/hud.c"
-    info "Injected gles_immediate_stubs.h into hud.c"
-fi
-
+# Platform fixes live in the sources (common.h, http.h, window.c and
+# cameracontroller.c); never rewrite tracked files during a build.
 cmake --build "$FINAL_BUILD" --parallel "$JOBS"
 
 echo
