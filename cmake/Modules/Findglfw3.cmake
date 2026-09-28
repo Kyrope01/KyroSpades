@@ -20,12 +20,12 @@ pkg_check_modules(PC_glfw3 QUIET glfw3)
 
 find_path(glfw3_INCLUDE_DIR
   NAMES GLFW/glfw3.h
-  PATHS ${PC_glfw3_INCLUDE_DIRS} ../../deps
+  PATHS ${PC_glfw3_INCLUDE_DIRS} ${CMAKE_CURRENT_LIST_DIR}/../../deps
   PATH_SUFFIXES GLFW
 )
 find_library(glfw3_LIBRARY
   NAMES glfw glfw3
-  PATHS ${PC_glfw3_LIBRARY_DIRS} ../../deps
+  PATHS ${PC_glfw3_LIBRARY_DIRS} ${CMAKE_CURRENT_LIST_DIR}/../../deps
 )
 
 include(FindPackageHandleStandardArgs)

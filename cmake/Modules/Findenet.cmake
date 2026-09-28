@@ -20,13 +20,13 @@ pkg_check_modules(PC_enet QUIET enet)
 
 find_path(enet_INCLUDE_DIR
   NAMES enet/enet.h
-  PATHS ${PC_enet_INCLUDE_DIRS} ../../deps
+  PATHS ${PC_enet_INCLUDE_DIRS} ${CMAKE_CURRENT_LIST_DIR}/../../deps
   PATH_SUFFIXES enet
 )
 
 find_library(enet_LIBRARY
   NAMES enet
-  PATHS ${PC_enet_LIBRARY_DIRS} ../../deps
+  PATHS ${PC_enet_LIBRARY_DIRS} ${CMAKE_CURRENT_LIST_DIR}/../../deps
 )
 
 include(FindPackageHandleStandardArgs)
