@@ -158,7 +158,7 @@ bool libvxl_create(struct libvxl_map* map, size_t w, size_t h, size_t d, const v
 //! @param map Map to be written
 //! @param name Filename of output file
 //! @returns total bytes written to disk
-size_t libvxl_writefile(struct libvxl_map* map, char* name);
+size_t libvxl_writefile(struct libvxl_map* map, const char* name);
 
 //! @brief Compress the map back to vxl format and save it in *out*, the total byte size will be written to *size*
 //! @param map Map to compress
@@ -206,9 +206,9 @@ uint32_t libvxl_map_get(struct libvxl_map* map, int x, int y, int z);
 //! @param x x-coordinate of block column
 //! @param y y-coordinate of block column
 //! @param result pointer to *int[2]*, is filled with color at *index 0* and height at *index 1*
-//! @note *result* is left unmodified if [x,y,z] is out of map bounds
-//! @returns *nothing, see result param*
-void libvxl_map_gettop(struct libvxl_map* map, int x, int y, uint32_t* result);
+//! @note *result* is left unmodified if the column has no block or coordinates are invalid
+//! @returns true if a block was found
+bool libvxl_map_gettop(struct libvxl_map* map, int x, int y, uint32_t* result);
 
 //! @brief Set block at location [x,y,z] to a new color
 //!
