@@ -94,23 +94,32 @@ int overlaps_with_player(int bx, int by, int bz) {
         if(bz < (int)floorf(p->pos.z - 0.45F) || bz > (int)floorf(p->pos.z + 0.45F))
                 return 0;
 
-        /* Vertical extent, in map cells.  pos.y is the EYE BASE, not the
-           feet: a grounded player rests with pos.y about 1.25 (standing) /
-           0.35 (crouched) above the floor (player_boxclipmove's landing
-           cell sits one cell below the feet).  The feet therefore occupy
-           floor(pos.y - 1.25) / floor(pos.y - 0.35), the collision body
-           fills the cells above them, and the head hitbox reaches
-           pos.y + 1.40 standing / +1.35 crouched.
+        /* player_boxclipmove samples in network Z and player_clipbox maps
+           that sample with 63 - (int)z. This labels each sampled voxel one
+           cell ABOVE floorf(63 - z) for noninteger z. Account for that cell
+           when comparing with camera_terrain_pick_local's map-up voxel
+           indices: standing feet are at pos.y - 1.25, crouched feet at
+           pos.y - 0.35, and the head reaches pos.y + 1.45. Using the raw
+           physics sample heights here wrongly required a two-block jump. */
+        float feet = p->pos.y - (p->input.keys.crouch ? 0.35F : 1.25F);
+        float head = p->pos.y + 1.45F;
+        return (float)by < head && (float)(by + 1) > feet;
+}
 
-           The old code built the box as [pos.y, pos.y + 1.85], which starts
-           a full cell ABOVE the feet -- so the air cell you stand in never
-           overlapped and a block could be placed into your own feet while
-           standing.  The cell directly below the feet is deliberately NOT
-           included: that is the cell you land on / bridge with while
-           airborne, and it must stay placeable. */
-        int y_min = (int)floorf(p->pos.y - (p->input.keys.crouch ? 0.35F : 1.25F));
-        int y_max = (int)floorf(p->pos.y + (p->input.keys.crouch ? 1.35F : 1.40F));
-        return by >= y_min && by <= y_max;
+/* Keep the usual camera-based reach for walls and overhead blocks. Looking
+   down from a standing player's camera can put the floor below their feet
+   outside that range even during a jump; permit nearby below-body targets
+   measured from the physical player position instead. The overlap check is
+   still required before sending any build. */
+bool player_block_in_range(int bx, int by, int bz) {
+	float ex, ey, ez;
+	camera_local_eye(&ex, &ey, &ez);
+	if(chebyshev(bx - ex, by - ey, bz - ez) < 3.0F)
+		return true;
+	const struct Player* p = &players[local_player_id];
+	return (float)(by + 1) <= p->pos.y
+	       && chebyshev(bx + 0.5F - p->pos.x, by + 0.5F - p->pos.y,
+	                    bz + 0.5F - p->pos.z) < 4.0F;
 }
 
 int button_map[3];
@@ -139,17 +148,43 @@ int local_player_drag_y;
 int local_player_drag_z;
 int local_player_drag_amount = 0;
 
-/* Pending block placement when airborne */
-char local_player_pending_block_active = 0;
-int local_player_pending_block_x;
-int local_player_pending_block_y;
-int local_player_pending_block_z;
-
 int player_intersection_type = -1;
 int player_intersection_player = 0;
 float player_intersection_dist = 1024.0F;
 
 struct Player players[PLAYERS_MAX];
+
+/* Both a new click and held-button repeat use this path. Trying on the press
+   avoids losing short clicks between physics ticks; repeating still respects
+   the normal half-second block-tool cooldown. Never predict a map edit here:
+   the server may reject the build and sends the authoritative block packet. */
+bool player_try_place_block(void) {
+	if(!network_connected || network_map_transfer || demo_is_playing()
+	   || camera_mode != CAMERAMODE_FPS || !local_player_blocks)
+		return false;
+	struct Player* p = &players[local_player_id];
+	if(!p->connected || !p->alive || p->team == TEAM_SPECTATOR || p->held_item != TOOL_BLOCK)
+		return false;
+	float now = window_time();
+	if(now - p->item_showup < 0.5F)
+		return false;
+
+	int* pos = camera_terrain_pick_local(0);
+	if(!pos || pos[1] <= 1 || !player_block_in_range(pos[0], pos[1], pos[2])
+	   || overlaps_with_player(pos[0], pos[1], pos[2]))
+		return false;
+
+	struct PacketBlockAction blk = {0};
+	blk.player_id = local_player_id;
+	blk.action_type = ACTION_BUILD;
+	blk.x = pos[0];
+	blk.y = pos[2];
+	blk.z = 63 - pos[1];
+	network_send(PACKET_BLOCKACTION_ID, &blk, sizeof(blk));
+	p->item_showup = now;
+	local_player_blocks--;
+	return true;
+}
 
 #define FALL_DAMAGE_VELOCITY 0.58F
 #define FALL_SLOW_DOWN 0.24F

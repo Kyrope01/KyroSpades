@@ -1484,6 +1484,13 @@ static void network_note_glowing_build(int id, const void* data, int len) {
 void network_send(int id, void* data, int len) {
         network_note_glowing_build(id, data, len);
         network_send_flags(id, data, len, ENET_PACKET_FLAG_RELIABLE);
+        /* A mouse press is dispatched after the frame's normal network_update.
+           Send builds now instead of holding them for another frame; the
+           server remains authoritative over whether the block was accepted. */
+        if(network_connected && !demo_is_playing()
+           && id == PACKET_BLOCKACTION_ID && len >= (int)sizeof(struct PacketBlockAction)
+           && ((const struct PacketBlockAction*)data)->action_type == ACTION_BUILD)
+                enet_host_flush(client);
 }
 
 unsigned int network_ping() {

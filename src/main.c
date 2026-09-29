@@ -1541,58 +1541,10 @@ void display() {
                         if(camera_mode == CAMERAMODE_FPS) {
                                 weapon_update();
                                 
-                                /* Check for pending block placement when landing */
-                                if(local_player_pending_block_active && !players[local_player_id].physics.airborne) {
-                                        float ex, ey, ez;
-                                        camera_local_eye(&ex, &ey, &ez);
-                                        int* pos = camera_terrain_pick_local(0);
-                                        if(pos != NULL && pos[1] > 1
-                                           && chebyshev(pos[0] - ex, pos[1] - ey, pos[2] - ez) < 3.0F
-                                           && !overlaps_with_player(pos[0], pos[1], pos[2])) {
-                                                players[local_player_id].item_showup = window_time();
-                                                local_player_blocks = max(local_player_blocks - 1, 0);
-
-                                                struct PacketBlockAction blk;
-                                                blk.player_id = local_player_id;
-                                                blk.action_type = ACTION_BUILD;
-                                                blk.x = pos[0];
-                                                blk.y = pos[2];
-                                                blk.z = 63 - pos[1];
-                                                network_send(PACKET_BLOCKACTION_ID, &blk, sizeof(blk));
-                                        }
-                                        local_player_pending_block_active = 0;
-                                }
-                                
-                                if(players[local_player_id].input.buttons.lmb && players[local_player_id].held_item == TOOL_BLOCK
-                                   && (window_time() - players[local_player_id].item_showup) >= 0.5F && local_player_blocks > 0) {
-                                        float ex, ey, ez;
-                                        camera_local_eye(&ex, &ey, &ez);
-                                        int* pos = camera_terrain_pick_local(0);
-                                        if(pos != NULL && pos[1] > 1
-                                           && chebyshev(pos[0] - ex, pos[1] - ey, pos[2] - ez) < 3.0F
-                                           && !overlaps_with_player(pos[0], pos[1], pos[2])) {
-                                                players[local_player_id].item_showup = window_time();
-                                                local_player_blocks = max(local_player_blocks - 1, 0);
-
-                                                struct PacketBlockAction blk;
-                                                blk.player_id = local_player_id;
-                                                blk.action_type = ACTION_BUILD;
-                                                blk.x = pos[0];
-                                                blk.y = pos[2];
-                                                blk.z = 63 - pos[1];
-                                                network_send(PACKET_BLOCKACTION_ID, &blk, sizeof(blk));
-                                                // read_PacketBlockAction(&blk,sizeof(blk));
-                                        } else if(pos != NULL && pos[1] > 1
-                                                  && chebyshev(pos[0] - ex, pos[1] - ey, pos[2] - ez) < 3.0F
-                                                  && overlaps_with_player(pos[0], pos[1], pos[2])
-                                                  && !local_player_pending_block_active) {
-                                                /* Queue block placement for when we land */
-                                                local_player_pending_block_active = 1;
-                                                local_player_pending_block_x = pos[0];
-                                                local_player_pending_block_y = pos[1];
-                                                local_player_pending_block_z = pos[2];
-                                        }
-                                }
+                                /* A held block tool repeats after its cooldown;
+                                   the first attempt is handled on mouse press. */
+                                if(players[local_player_id].input.buttons.lmb)
+                                        player_try_place_block();
                                 if(players[local_player_id].input.buttons.lmb && players[local_player_id].held_item == TOOL_GRENADE
                                    && window_time() - players[local_player_id].input.buttons.lmb_start > 3.0F) {
                                         local_player_grenades = max(local_player_grenades - 1, 0);
@@ -1616,7 +1568,6 @@ void display() {
                                         if(!players[local_id].input.keys.sprint && render_fpv) {
                                                 if(is_local) {
                                                         pos = camera_terrain_pick_local(0);
-                                                        camera_local_eye(&pick_ox, &pick_oy, &pick_oz);
                                                 } else
                                                         pos = camera_terrain_pickEx(
                                                                 0, camera_x, camera_y, camera_z, players[local_id].orientation_smooth.x,
@@ -1626,7 +1577,8 @@ void display() {
                                 default: pos = NULL;
                         }
                         if(pos != NULL && pos[1] > 1
-                           && chebyshev(pos[0] - pick_ox, pos[1] - pick_oy, pos[2] - pick_oz) < 3.0F
+                           && (is_local ? player_block_in_range(pos[0], pos[1], pos[2])
+                                        : chebyshev(pos[0] - pick_ox, pos[1] - pick_oy, pos[2] - pick_oz) < 3.0F)
                            && !overlaps_with_player(pos[0], pos[1], pos[2])) {
                                 matrix_upload();
                                 glDisable(GL_DEPTH_TEST);

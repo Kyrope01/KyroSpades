@@ -3334,11 +3334,9 @@ void hud_ingame_mouseclick(double x, double y, int button, int action, int mods)
                         }
                 }
                 if(local_player_drag_active && action == WINDOW_RELEASE && players[local_player_id].held_item == TOOL_BLOCK) {
-                        float ex, ey, ez;
-                        camera_local_eye(&ex, &ey, &ez);
                         int* pos = camera_terrain_pick_local(0);
                         if(pos != NULL && pos[1] > 1
-                           && chebyshev(pos[0] - ex, pos[1] - ey, pos[2] - ez) < 3.0F
+                           && player_block_in_range(pos[0], pos[1], pos[2])
                            && !overlaps_with_player(pos[0], pos[1], pos[2])) {
                                 int amount = map_cube_line(local_player_drag_x, local_player_drag_z, 63 - local_player_drag_y, pos[0],
                                                                                    pos[2], 63 - pos[1], NULL);
@@ -3360,11 +3358,9 @@ void hud_ingame_mouseclick(double x, double y, int button, int action, int mods)
                 local_player_drag_active = 0;
                 if(action == WINDOW_PRESS && players[local_player_id].held_item == TOOL_BLOCK
                    && window_time() - players[local_player_id].item_showup >= 0.5F) {
-                        float ex, ey, ez;
-                        camera_local_eye(&ex, &ey, &ez);
                         int* pos = camera_terrain_pick_local(0);
                         if(pos != NULL && pos[1] > 1
-                           && chebyshev(pos[0] - ex, pos[1] - ey, pos[2] - ez) < 3.0F
+                           && player_block_in_range(pos[0], pos[1], pos[2])
                            && !overlaps_with_player(pos[0], pos[1], pos[2])) {
                                 local_player_drag_active = 1;
                                 local_player_drag_x = pos[0];
@@ -3437,6 +3433,8 @@ void hud_ingame_mouseclick(double x, double y, int button, int action, int mods)
         }
         if(button == WINDOW_MOUSE_LMB && action == WINDOW_PRESS) {
                 players[local_player_id].input.buttons.lmb_start = window_time();
+                if(screen_current == SCREEN_NONE && players[local_player_id].held_item == TOOL_BLOCK)
+                        player_try_place_block();
 
                 if(camera_mode == CAMERAMODE_FPS) {
                         if(players[local_player_id].held_item == TOOL_GUN) {

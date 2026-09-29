@@ -72,12 +72,6 @@ extern int local_player_drag_y;
 extern int local_player_drag_z;
 extern int local_player_drag_amount;
 
-/* Pending block placement when airborne */
-extern char local_player_pending_block_active;
-extern int local_player_pending_block_x;
-extern int local_player_pending_block_y;
-extern int local_player_pending_block_z;
-
 extern int player_intersection_type;
 extern int player_intersection_player;
 extern float player_intersection_dist;
@@ -229,6 +223,10 @@ void player_reset(struct Player* p);
 int player_move(struct Player* p, float fsynctics, int id);
 int player_uncrouch(struct Player* p);
 int overlaps_with_player(int bx, int by, int bz);
+/* Placement reach: usual camera ray, plus nearby below-body jump targets. */
+bool player_block_in_range(int bx, int by, int bz);
+/* Attempt one local block build; false if the target/cooldown is invalid. */
+bool player_try_place_block(void);
 void player_save_corpse(int player_id);
 void player_clear_corpses(void);
 void player_update_corpses(float dt);
