@@ -123,6 +123,7 @@ enum window_keys {
 	   The old fixed size of 64 ended at WINDOW_KEY_DEMO_PAUSE, so newer
 	   bindings (including Map zoom/X at index 68) wrote past the array and
 	   could corrupt button_map, making a keyboard press fire the weapon. */
+	WINDOW_KEY_PIE_MENU,
 	WINDOW_KEY_COUNT
 };
 

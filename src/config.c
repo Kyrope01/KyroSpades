@@ -78,10 +78,13 @@ static int config_glfw_to_sdl(int code) {
                 case 52:  return SDLK_4;
                 case 61:  return SDLK_EQUALS;
                 case 65:  return SDLK_a;
+                case 66:  return SDLK_b;
                 case 67:  return SDLK_c;
                 case 68:  return SDLK_d;
                 case 69:  return SDLK_e;
                 case 70:  return SDLK_f;
+                case 71:  return SDLK_g;
+                case 72:  return SDLK_h;
                 case 77:  return SDLK_m;
                 case 78:  return SDLK_n;
                 case 80:  return SDLK_p;
@@ -846,7 +849,8 @@ void config_reload() {
         config_register_key(WINDOW_KEY_COLORPICKER, SDLK_c, "color_picker", 0, "Color selector", "Block");
         config_register_key(WINDOW_KEY_COMMAND, SDLK_SLASH, "chat_command", 0, "Command", "Game");
         config_register_key(WINDOW_KEY_HIDEHUD, SDLK_F6, "hide_hud", 1, "Hide HUD", "Game");
-        config_register_key(WINDOW_KEY_LASTTOOL, SDLK_q, "last_tool", 0, "Last tool", "Tools & Weapons");
+        config_register_key(WINDOW_KEY_PIE_MENU, SDLK_g, "pie_menu", 0, "Pie menu / next page", "Game");
+        config_register_key(WINDOW_KEY_LASTTOOL, SDLK_h, "last_tool", 0, "Last tool", "Tools & Weapons");
         config_register_key(WINDOW_KEY_NETWORKSTATS, SDLK_F12, "network_stats", 1, "Network stats", "Information");
          config_register_key(WINDOW_KEY_SAVE_MAP, SDLK_F9, "save_map", 0, "Save map", "Game");
         config_register_key(WINDOW_KEY_SELECT1, SDLK_1, NULL, 0, NULL, NULL);
@@ -921,7 +925,8 @@ void config_reload() {
         config_register_key(WINDOW_KEY_COLORPICKER, GLFW_KEY_C, "color_picker", 0, "Color selector", "Block");
         config_register_key(WINDOW_KEY_COMMAND, GLFW_KEY_SLASH, "chat_command", 0, "Command", "Game");
         config_register_key(WINDOW_KEY_HIDEHUD, GLFW_KEY_F6, "hide_hud", 1, "Hide HUD", "Game");
-        config_register_key(WINDOW_KEY_LASTTOOL, GLFW_KEY_Q, "last_tool", 0, "Last tool", "Tools & Weapons");
+        config_register_key(WINDOW_KEY_PIE_MENU, GLFW_KEY_G, "pie_menu", 0, "Pie menu / next page", "Game");
+        config_register_key(WINDOW_KEY_LASTTOOL, GLFW_KEY_H, "last_tool", 0, "Last tool", "Tools & Weapons");
         config_register_key(WINDOW_KEY_NETWORKSTATS, GLFW_KEY_F12, "network_stats", 1, "Network stats", "Information");
          config_register_key(WINDOW_KEY_SAVE_MAP, GLFW_KEY_F9, "save_map", 0, "Save map", "Game");
         config_register_key(WINDOW_KEY_SELECT1, GLFW_KEY_1, NULL, 0, NULL, NULL);
@@ -977,6 +982,23 @@ void config_reload() {
                 }
         }
 #endif
+
+        /* An existing config may still contain the previous shipped H-menu /
+           G-last-tool pair. Give G to the menu on upgrade, including configs
+           with no explicit pie_menu entry, and leave last-tool usable on H.
+           This runs after backend key-code migration so SDL and GLFW agree. */
+        struct config_key_pair* pie_key = config_key(WINDOW_KEY_PIE_MENU);
+        struct config_key_pair* last_key = config_key(WINDOW_KEY_LASTTOOL);
+#ifdef USE_SDL
+        const int old_pie_key = SDLK_h, requested_pie_key = SDLK_g;
+#else
+        const int old_pie_key = GLFW_KEY_H, requested_pie_key = GLFW_KEY_G;
+#endif
+        if(pie_key && pie_key->def == old_pie_key)
+                pie_key->def = requested_pie_key;
+        if(last_key && pie_key && pie_key->def == requested_pie_key
+           && last_key->def == requested_pie_key)
+                last_key->def = old_pie_key;
 
         if(!list_created(&config_settings))
                 list_create(&config_settings, sizeof(struct config_setting));

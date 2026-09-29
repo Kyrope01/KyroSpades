@@ -33,6 +33,7 @@ static float mouse_scale_x = 1.0F, mouse_scale_y = 1.0F;
 
 #include "config.h"
 #include "hud.h"
+#include "pie_menu.h"
 #include "camera.h"
 #include "player.h"
 #include "network.h"
@@ -1426,6 +1427,12 @@ void window_update() {
 				}
 
 				if(hud_active == &hud_ingame && f == aim_finger) {
+					/* A held menu owns aim input on touch as well as on desktop.
+					   Do not let this direct camera-look path move the crosshair. */
+					if(pie_menu_opened()) {
+						pie_menu_move(fdx, fdy);
+						break;
+					}
 					/* Mirror the desktop mouse-look formula from hud.c so the
 					   "Mouse sensitivity" setting (and invert Y / ADS slowdown)
 					   actually affects touch aiming, instead of the previous

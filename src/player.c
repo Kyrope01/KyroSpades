@@ -1246,7 +1246,11 @@ static void player_draw_esp_box(struct Player* p) {
 	if(color_material_was_on) glDisable(GL_COLOR_MATERIAL);
 	if(cull_was_on) glDisable(GL_CULL_FACE);
 #endif
-	glx_disable_sphericalfog();
+	bool spherical_fog_was_on = glx_fog != 0;
+	GLboolean depth_was_on = glIsEnabled(GL_DEPTH_TEST);
+	GLboolean depth_write_was_on;
+	glGetBooleanv(GL_DEPTH_WRITEMASK, &depth_write_was_on);
+	if(spherical_fog_was_on) glx_disable_sphericalfog();
 	glDisable(GL_DEPTH_TEST);
 	glDepthMask(GL_FALSE);
 
@@ -1304,9 +1308,9 @@ static void player_draw_esp_box(struct Player* p) {
 	player_esp_draw_part(&box_arm_right, p->team);
 
 	matrix_pop(matrix_model);
-	glDepthMask(GL_TRUE);
-	glEnable(GL_DEPTH_TEST);
-	glx_enable_sphericalfog();
+	glDepthMask(depth_write_was_on);
+	if(depth_was_on) glEnable(GL_DEPTH_TEST);
+	if(spherical_fog_was_on) glx_enable_sphericalfog();
 #ifdef OPENGL_CORE
 	if(cull_was_on) glEnable(GL_CULL_FACE);
 #elif !defined(OPENGL_ES)

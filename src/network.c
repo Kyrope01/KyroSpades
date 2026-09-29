@@ -39,6 +39,7 @@
 #include "map.h"
 #include "player.h"
 #include "network.h"
+#include "teamplay.h"
 #include "particle.h"
 #include "texture.h"
 #include "chunk.h"
@@ -60,6 +61,7 @@ int network_map_transfer = 0;
 int network_map_transfer_end = 0;
 int network_map_cached = 0;
 int network_received_packets = 0;
+
 char network_current_ip[64] = {0};
 int  network_current_port = 0;
 
@@ -630,6 +632,7 @@ void read_PacketPlayerLeft(void* data, int len) {
         if(p->player_id < PLAYERS_MAX) {
                 log_debug("Player left: id=%i name=%s", p->player_id, players[p->player_id].name);
                 player_save_corpse(p->player_id);
+                teamplay_player_left(p->player_id);
                 players[p->player_id].connected = 0;
                 players[p->player_id].alive = 0;
                 players[p->player_id].score = 0;
@@ -643,6 +646,7 @@ void read_PacketPlayerLeft(void* data, int len) {
 
 void read_PacketMapStart(void* data, int len) {
         if(demo_is_seeking()) return;
+        teamplay_reset_map();
         lighting_flashlight_reset();
         player_clear_corpses();
         bloodmarks_clear();
@@ -1385,6 +1389,7 @@ void read_PacketVersionGet(void* data, int len) {
 }
 
 void read_PacketExtInfo(void* data, int len) {
+        if(len < 1 || !data) return;
         struct PacketExtInfo* p = (struct PacketExtInfo*)data;
         if(len >= p->length * sizeof(struct PacketExtInfoEntry) + 1) {
                 if(p->length > 0) {
@@ -1398,8 +1403,14 @@ void read_PacketExtInfo(void* data, int len) {
                         log_info("Server does not support extensions");
                 }
 
+                /* Do not advertise Teamplay on a server that did not offer v1. */
+                bool supports_teamplay = false;
+                for(int k = 0; k < p->length; k++)
+                        if(p->entries[k].id == TEAMPLAY_EXTENSION_ID && p->entries[k].version == 1)
+                                supports_teamplay = true;
+                teamplay_set_negotiated(supports_teamplay);
                 struct PacketExtInfo reply;
-                reply.length = 4;
+                reply.length = supports_teamplay ? 5 : 4;
                 reply.entries[0] = (struct PacketExtInfoEntry) {
                         .id = EXT_PLAYER_PROPERTIES,
                         .version = 1,
@@ -1416,6 +1427,7 @@ void read_PacketExtInfo(void* data, int len) {
                         .id = EXT_KICKREASON,
                         .version = 1,
                 };
+                if(supports_teamplay) reply.entries[4] = (struct PacketExtInfoEntry){ TEAMPLAY_EXTENSION_ID, 1 };
                 network_send(PACKET_EXTINFO_ID, &reply, reply.length * sizeof(struct PacketExtInfoEntry) + 1);
         }
 }
@@ -1498,6 +1510,7 @@ unsigned int network_ping() {
 }
 
 void network_disconnect() {
+        teamplay_reset_connection();
         lighting_flashlight_reset();
         glowing_blocks_clear();
         if(demo_is_playing()) {
@@ -1572,6 +1585,7 @@ int network_connect_sub(char* ip, int port, int version) {
 }
 
 int network_connect(char* ip, int port) {
+        teamplay_reset_connection();
         log_info("Connecting to %s at port %i", ip, port);
         if(network_connected) {
                 network_disconnect();
@@ -1687,6 +1701,7 @@ void network_service(void) {
                                 network_connected = 0;
                                 network_logged_in = 0;
                                 network_map_transfer_end = 0;
+                                teamplay_reset_connection();
                                 lighting_flashlight_reset();
                                 glowing_blocks_clear();
                                 player_clear_corpses();
@@ -1820,6 +1835,11 @@ int network_status() {
         return network_connected;
 }
 
+static void read_PacketTeamplay(void* data, int len) {
+        if(len <= 0 || !data) return;
+        teamplay_receive(data, (size_t)len, demo_is_seeking(), network_map_transfer);
+}
+
 void network_init() {
         enet_initialize();
         client = enet_host_create(NULL, 1, 1, 0, 0); // limit bandwidth here if you want to
@@ -1859,5 +1879,6 @@ void network_init() {
         packets[PACKET_HANDSHAKEINIT_ID] = read_PacketHandshakeInit;
         packets[PACKET_VERSIONGET_ID] = read_PacketVersionGet;
         packets[PACKET_EXTINFO_ID] = read_PacketExtInfo;
+        packets[TEAMPLAY_PACKET_ID] = read_PacketTeamplay;
         packets[PACKET_EXT_BASE + EXT_PLAYER_PROPERTIES] = read_PacketPlayerProperties;
 }

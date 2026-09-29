@@ -18,6 +18,7 @@
 #include "file.h"
 #include "window.h"
 #include "network.h"
+#include "teamplay.h"
 #include "map.h"
 #include "player.h"
 #include "chunk.h"
@@ -140,9 +141,17 @@ void register_demo_packet(ENetPacket* packet) {
     fwrite(packet->data,    packet->dataLength,      1, CurrentDemo.fp);
 }
 
+static void demo_record_teamplay_packet(const uint8_t* data, size_t len) {
+    ENetPacket packet = {0};
+    packet.data = (enet_uint8*)data;
+    packet.dataLength = len;
+    register_demo_packet(&packet);
+}
 void demo_start_record(void) {
     CurrentDemo.fp         = create_demo_file();
     CurrentDemo.start_time = (float)window_time();
+    if(CurrentDemo.fp && network_logged_in && teamplay_negotiated())
+        teamplay_record_initial(demo_record_teamplay_packet);
     log_info("Demo Recording started.");
 }
 
@@ -265,9 +274,15 @@ static inline void dispatch_packet(const struct DemoPacketEntry* e) {
 static void detect_bootstrap_end(void) {
     DemoPlaybackState.bootstrap_end_time = 0.0f;
     for (int i = 0; i < DemoPlaybackState.packet_count; i++) {
-        unsigned char t = DemoPlaybackState.packets[i].data[0];
+        const struct DemoPacketEntry* e = &DemoPlaybackState.packets[i];
+        unsigned char t = e->data[0];
+        /* Mid-game Teamplay Config precedes the map packets. Ignore it as
+           a bootstrap boundary so Seek(0) still reaches StateData. */
+        bool teamplay_bootstrap = t == TEAMPLAY_PACKET_ID && e->length > 1
+                && e->data[1] == 0;
         if (t != PACKET_MAPSTART_ID && t != PACKET_MAPCHUNK_ID &&
-            t != PACKET_STATEDATA_ID && t != PACKET_EXISTINGPLAYER_ID)
+            t != PACKET_STATEDATA_ID && t != PACKET_EXISTINGPLAYER_ID &&
+            !teamplay_bootstrap)
             break;
         DemoPlaybackState.bootstrap_end_time =
             DemoPlaybackState.packets[i].timestamp;
@@ -277,7 +292,7 @@ static void detect_bootstrap_end(void) {
 /* ── Open ─────────────────────────────────────────────────────────── */
 
 bool demo_playback_open(const char* filename) {
-    demo_playback_close(); /* clean up any previous session */
+    demo_playback_close(); /* also resets Teamplay */
 
     FILE* f = fopen(filename, "rb");
     if (!f) {
@@ -378,6 +393,7 @@ bool demo_playback_open(const char* filename) {
 /* ── Close ────────────────────────────────────────────────────────── */
 
 void demo_playback_close(void) {
+    teamplay_reset_connection();
     free_packets();
     memset(&DemoPlaybackState, 0, sizeof(DemoPlaybackState));
     demo_seeking = false;
@@ -399,6 +415,7 @@ void demo_playback_update(void) {
     if (DemoPlaybackState.finished) return;
 
     double now = window_time();
+    float teamplay_cursor = DemoPlaybackState.current_time;
     if (!DemoPlaybackState.paused) {
         float dt = (float)(now - DemoPlaybackState.last_real_time);
         DemoPlaybackState.current_time +=
@@ -406,15 +423,22 @@ void demo_playback_update(void) {
     }
     DemoPlaybackState.last_real_time = now;
 
+    /* Teamplay durations run on demo timestamps, not real frame time. */
     /* Dispatch all packets whose timestamp is <= current_time. */
     while (DemoPlaybackState.current_packet_index <
            DemoPlaybackState.packet_count) {
         struct DemoPacketEntry* e =
             &DemoPlaybackState.packets[DemoPlaybackState.current_packet_index];
         if (e->timestamp > DemoPlaybackState.current_time) break;
+        if (e->timestamp > teamplay_cursor) {
+            teamplay_tick(e->timestamp - teamplay_cursor);
+            teamplay_cursor = e->timestamp;
+        }
         dispatch_packet(e);
         DemoPlaybackState.current_packet_index++;
     }
+    if (DemoPlaybackState.current_time > teamplay_cursor)
+        teamplay_tick(DemoPlaybackState.current_time - teamplay_cursor);
 
     if (DemoPlaybackState.current_packet_index >=
         DemoPlaybackState.packet_count) {
@@ -494,6 +518,7 @@ static int demo_reset_world(float time) {
     map_vxl_load(m->data, m->size);
     chunk_rebuild_all();
     player_init();
+    teamplay_reset_connection();
 
     /* Wipe chat so the silent replay rebuilds it from scratch instead of
        appending duplicate join/disconnect lines on every backward seek. */
@@ -517,19 +542,27 @@ static int demo_reset_world(float time) {
 static void demo_fast_replay_to(int from_index, float target_time) {
     demo_seeking = true;
     demo_muting  = true;
+    float teamplay_cursor = 0;
 
     for (int i = from_index; i < DemoPlaybackState.packet_count; i++) {
         struct DemoPacketEntry* e = &DemoPlaybackState.packets[i];
         if (e->timestamp > target_time) break;
+        if (e->timestamp > teamplay_cursor) {
+            teamplay_tick(e->timestamp - teamplay_cursor);
+            teamplay_cursor = e->timestamp;
+        }
 
         /* Skip map-loading packets — map was restored in demo_reset_world() */
         unsigned char id = e->data[0];
-        if (id == PACKET_MAPSTART_ID || id == PACKET_MAPCHUNK_ID) continue;
+        if (id == PACKET_MAPSTART_ID) { teamplay_reset_map(); continue; }
+        if (id == PACKET_MAPCHUNK_ID) continue;
 
         if (packets[id])
             (*packets[id])(e->data + 1, (int)(e->length - 1));
     }
 
+    if (target_time > teamplay_cursor)
+        teamplay_tick(target_time - teamplay_cursor);
     demo_seeking = false;
     demo_muting  = false;
 }
@@ -546,28 +579,36 @@ void demo_playback_seek(float time) {
 
     if (time < 0.0f) time = 0.0f;
     if (time > DemoPlaybackState.duration) time = DemoPlaybackState.duration;
+    /* Playback cannot precede the world bootstrap; keep its clock aligned
+       with the replayed packets and their Teamplay expiry timestamps. */
+    if (time < DemoPlaybackState.bootstrap_end_time)
+        time = DemoPlaybackState.bootstrap_end_time;
 
     bool backward = time < DemoPlaybackState.current_time;
 
     if (backward) {
-        float replay_time = (time < DemoPlaybackState.bootstrap_end_time)
-                          ? DemoPlaybackState.bootstrap_end_time : time;
         demo_reset_world(time); /* restores the map active at `time` */
-        demo_fast_replay_to(0, replay_time);
+        demo_fast_replay_to(0, time);
     } else if (!backward) {
         /* Forward: fast-dispatch the in-between packets exactly as
            demo_playback_update would, just with effects muted.  Map packets
            are NOT skipped here — the world is live, so an in-progress load or
            a mid-demo map change must apply normally. */
         demo_muting = true;
+        float teamplay_cursor = DemoPlaybackState.current_time;
         while (DemoPlaybackState.current_packet_index <
                DemoPlaybackState.packet_count) {
             struct DemoPacketEntry* e =
                 &DemoPlaybackState.packets[DemoPlaybackState.current_packet_index];
             if (e->timestamp > time) break;
+            if (e->timestamp > teamplay_cursor) {
+                teamplay_tick(e->timestamp - teamplay_cursor);
+                teamplay_cursor = e->timestamp;
+            }
             dispatch_packet(e);
             DemoPlaybackState.current_packet_index++;
         }
+        if (time > teamplay_cursor) teamplay_tick(time - teamplay_cursor);
         demo_muting = false;
     }
 

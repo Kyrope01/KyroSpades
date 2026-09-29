@@ -49,6 +49,7 @@
 #include "grenade.h"
 #include "player.h"
 #include "hud.h"
+#include "teamplay_draw.h"
 #include "chathistory.h"
 #include "config.h"
 #include "log.h"
@@ -1451,6 +1452,7 @@ void display() {
 #endif
 
                 camera_ExtractFrustum();
+                teamplay_draw_capture();
 
                 /* Snapshot the camera matrices now, while they still describe
                    the real 3D scene -- everything from here on (view-model

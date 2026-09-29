@@ -46,6 +46,9 @@ extern float tactical_sprint_amount;
 #include "parson.h"
 #include "config.h"
 #include "network.h"
+#include "pie_menu.h"
+#include "teamplay.h"
+#include "teamplay_draw.h"
 #include "demo.h"
 #include "rpc.h"
 #include "map.h"
@@ -541,7 +544,14 @@ static int chat_input_offset_at(double sx_pixel, double sy_pixel) {
 static int mouse_seed_pending = 1;
 static void hud_colorpicker_close(int restore_cursor);
 
+static int pie_attack_suppressed[2];
+static int pie_key_down;
+static float teamplay_last_tick;
 static void hud_ingame_init() {
+        pie_menu_close(false);
+        pie_attack_suppressed[0] = pie_attack_suppressed[1] = 0;
+        pie_key_down = 0;
+        teamplay_last_tick = game_time();
         hud_colorpicker_close(0); /* never come back to a half-open picker */
         window_textinput(0);
         chat_input_mode = CHAT_NO_INPUT;
@@ -1619,6 +1629,7 @@ static void cp_commit(void) {
 }
 
 static void hud_colorpicker_open(void) {
+        pie_menu_close(false);
         cp_rgb_to_hsv(players[local_player_id].block.red, players[local_player_id].block.green,
                       players[local_player_id].block.blue, &cp_h, &cp_s, &cp_v);
         cp_open = 1;
@@ -1804,6 +1815,19 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
         /* Fixed-function world/model rendering can leave the texture combiner
            in a non-HUD mode. Restore standard modulation for legacy drawing. */
         hud_fixed_texture_modulate();
+
+        /* Teamplay lifetimes use the pause-aware game clock. */
+        float tp_now = game_time();
+        float tp_dt = fmaxf(0.f, tp_now - teamplay_last_tick);
+        teamplay_last_tick = tp_now;
+        /* Markers expire in real game time even after a slow/minimized frame;
+           only the menu's cosmetic animation needs a bounded frame delta. */
+        if(!demo_is_playing()) teamplay_tick(tp_dt);
+        if(pie_menu_opened() && (!network_connected || !network_logged_in || network_map_transfer
+           || show_exit || cp_open || chat_input_mode != CHAT_NO_INPUT || screen_current != SCREEN_NONE
+           || players[local_player_id].team == TEAM_SPECTATOR || camera_mode == CAMERAMODE_SPECTATOR
+           || camera_mode == CAMERAMODE_BODYVIEW || demo_is_playing())) pie_menu_close(false);
+        pie_menu_update(fminf(.25f, tp_dt));
 
         /* Close the colour selector as soon as it no longer applies: tool
            switched, died, became spectator, chat/menu/team screen opened. */
@@ -2847,6 +2871,7 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 glColor3f(0.0F, 1.0F, 1.0F);
                                 texture_draw_rotated(&texture_player, minimap_x + camera_x * scalef, minimap_y - camera_z * scalef,
                                                                          12 * scalef, 12 * scalef, camera_rot_x + PI);
+                                teamplay_draw_map(minimap_x, minimap_y, 512*scalef, 512*scalef, 0, 0, 512);
                                 glColor3f(1.0F, 1.0F, 1.0F);
                         } else {
                                 // minimized, top right
@@ -3017,6 +3042,8 @@ texture_draw_empty_rotated(settings.window_width - 143 * scalef + tent2_x * map_
                                                 }
                                         }
                                 }
+                                teamplay_draw_map(settings.window_width - 143*scalef, 585*scalef,
+                                                  128*scalef, 128*scalef, view_x, view_z, viewport);
                                 glColor3f(1.0F, 1.0F, 1.0F);
                         }
                 }
@@ -3169,11 +3196,14 @@ texture_draw_empty_rotated(settings.window_width - 143 * scalef + tent2_x * map_
                 }
         }
 #endif
-        hud_colorpicker_render(); /* last: on top of every other HUD element */
+        teamplay_draw_world();
+        hud_colorpicker_render();
         demo_playback_render_overlay(scalef);
+        pie_menu_draw();
 }
 
 static void hud_ingame_scroll(double yoffset) {
+        if(pie_menu_opened()) return;
         /* While the chat input is open, the scroll wheel pages through the
          * chat history instead of switching weapons. yoffset > 0 scrolls
          * toward older messages; yoffset < 0 scrolls back toward the newest. */
@@ -3242,6 +3272,7 @@ static void hud_ingame_mouselocation(double x, double y) {
         float dy = y - last_y;
         last_x = x;
         last_y = y;
+        if(pie_menu_opened()) { pie_menu_move(dx, dy); return; }
 
         float s = 1.0F;
         if(camera_mode == CAMERAMODE_FPS && players[local_player_id].held_item == TOOL_GUN
@@ -3290,6 +3321,28 @@ static void hud_switch_next_player() {
 }
 
 void hud_ingame_mouseclick(double x, double y, int button, int action, int mods) {
+        if(pie_menu_opened() && (chat_input_mode != CHAT_NO_INPUT || show_exit || cp_open
+           || screen_current != SCREEN_NONE)) pie_menu_close(false);
+        /* The menu owns attack buttons: click to use a slice, right-click to
+           cancel. Swallow the matching release even after the menu closes so
+           no shot/ADS/throw sneaks through to the game. */
+        if(button == WINDOW_MOUSE_LMB || button == WINDOW_MOUSE_RMB) {
+                int idx = button == WINDOW_MOUSE_LMB ? 0 : 1;
+                if(pie_menu_opened()) {
+                        if(action == WINDOW_PRESS) {
+                                pie_attack_suppressed[idx] = 1;
+                                if(idx == 1) pie_menu_close(false);
+                                else if(pie_menu_has_selection()) pie_menu_close(true);
+                        } else pie_attack_suppressed[idx] = 0;
+                        button_map[idx] = 0;
+                        return;
+                }
+                if(pie_attack_suppressed[idx]) {
+                        if(action == WINDOW_RELEASE) pie_attack_suppressed[idx] = 0;
+                        button_map[idx] = 0;
+                        return;
+                }
+        }
         if(chat_input_mode != CHAT_NO_INPUT) {
                 if(button == WINDOW_MOUSE_LMB) {
                         if(action == WINDOW_PRESS) {
@@ -3539,6 +3592,28 @@ static const char* hud_ingame_completeword(const char* s) {
 }
 
 static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
+        if(pie_menu_opened() && (key == WINDOW_KEY_CHAT || key == WINDOW_KEY_COMMAND
+           || key == WINDOW_KEY_COLORPICKER || key == WINDOW_KEY_CHANGETEAM
+           || key == WINDOW_KEY_CHANGEWEAPON)) pie_menu_close(false);
+        if(key == WINDOW_KEY_PIE_MENU) {
+                if(action == WINDOW_RELEASE) pie_key_down = 0;
+                else if(action == WINDOW_PRESS && !pie_key_down) {
+                        pie_key_down = 1; /* SDL repeats KEYDOWN, GLFW uses REPEAT */
+                        if(pie_menu_opened()) pie_menu_cycle(1);
+                        else if(!demo_is_playing() && !show_exit && !cp_open
+                                && chat_input_mode == CHAT_NO_INPUT && screen_current == SCREEN_NONE
+                                && pie_menu_open()) {
+                                pie_attack_suppressed[0] |= button_map[0] != 0;
+                                pie_attack_suppressed[1] |= button_map[1] != 0;
+                                button_map[0] = button_map[1] = 0;
+                                local_player_drag_active = 0;
+                        }
+                }
+                return;
+        }
+        if(pie_menu_opened() && action == WINDOW_PRESS && key == WINDOW_KEY_ESCAPE) {
+                pie_menu_close(false); return;
+        }
         /* Key repeat: GLFW delivers GLFW_REPEAT events that the handler used
            to drop, so holding a key did nothing and actions felt like they
            landed on release.  Normalize repeat to press for the keys that
@@ -3654,6 +3729,11 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
                                 return;
                         }
 
+                        if(key == WINDOW_KEY_LASTTOOL && config_key(WINDOW_KEY_LASTTOOL)
+                           && (pie_menu_opened()
+                               || (config_key(WINDOW_KEY_PIE_MENU)
+                                   && config_key(WINDOW_KEY_LASTTOOL)->def == config_key(WINDOW_KEY_PIE_MENU)->def)))
+                                return; /* a shared menu binding must not change tools */
                         if(key == WINDOW_KEY_LASTTOOL) {
                                 int tmp = players[local_player_id].held_item;
                                 players[local_player_id].held_item = local_player_lasttool;
