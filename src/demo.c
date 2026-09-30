@@ -276,10 +276,10 @@ static void detect_bootstrap_end(void) {
     for (int i = 0; i < DemoPlaybackState.packet_count; i++) {
         const struct DemoPacketEntry* e = &DemoPlaybackState.packets[i];
         unsigned char t = e->data[0];
-        /* Mid-game Teamplay Config precedes the map packets. Ignore it as
-           a bootstrap boundary so Seek(0) still reaches StateData. */
+        /* Mid-game Teamplay Config and the initial active-mark snapshot
+           precede the map packets. Seek(0) must still reach StateData. */
         bool teamplay_bootstrap = t == TEAMPLAY_PACKET_ID && e->length > 1
-                && e->data[1] == 0;
+                && (e->data[1] == 0 || e->data[1] == 2);
         if (t != PACKET_MAPSTART_ID && t != PACKET_MAPCHUNK_ID &&
             t != PACKET_STATEDATA_ID && t != PACKET_EXISTINGPLAYER_ID &&
             !teamplay_bootstrap)
@@ -543,6 +543,7 @@ static void demo_fast_replay_to(int from_index, float target_time) {
     demo_seeking = true;
     demo_muting  = true;
     float teamplay_cursor = 0;
+    bool map_loading = true; /* snapshot marks precede the first StateData */
 
     for (int i = from_index; i < DemoPlaybackState.packet_count; i++) {
         struct DemoPacketEntry* e = &DemoPlaybackState.packets[i];
@@ -554,11 +555,24 @@ static void demo_fast_replay_to(int from_index, float target_time) {
 
         /* Skip map-loading packets — map was restored in demo_reset_world() */
         unsigned char id = e->data[0];
-        if (id == PACKET_MAPSTART_ID) { teamplay_reset_map(); continue; }
+        if (id == PACKET_MAPSTART_ID) {
+            teamplay_reset_map();
+            map_loading = true;
+            continue;
+        }
         if (id == PACKET_MAPCHUNK_ID) continue;
-
+        if (id == TEAMPLAY_PACKET_ID && map_loading && e->length > 1 && e->data[1] == 2) {
+            /* Before StateData a seek has no live map-transfer flag. Keep
+               bootstrap/server marks pending just like ordinary playback. */
+            teamplay_receive(e->data + 1, e->length - 1, true, true);
+            continue;
+        }
         if (packets[id])
             (*packets[id])(e->data + 1, (int)(e->length - 1));
+        if (id == PACKET_STATEDATA_ID) {
+            teamplay_apply_pending();
+            map_loading = false;
+        }
     }
 
     if (target_time > teamplay_cursor)

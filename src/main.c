@@ -50,6 +50,7 @@
 #include "player.h"
 #include "hud.h"
 #include "teamplay_draw.h"
+#include "teamplay.h"
 #include "chathistory.h"
 #include "config.h"
 #include "log.h"
@@ -3210,6 +3211,7 @@ int main(int argc, char** argv) {
                                  loading_screen_seen_time = window_time();
                          if(window_time() - loading_screen_seen_time >= 0.5F) {
                                  network_map_transfer = 0;
+                                 teamplay_apply_pending();
                                  network_map_transfer_end = 0;
                                  loading_screen_seen_time = 0.0F;
                          }

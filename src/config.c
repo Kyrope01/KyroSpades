@@ -85,6 +85,7 @@ static int config_glfw_to_sdl(int code) {
                 case 70:  return SDLK_f;
                 case 71:  return SDLK_g;
                 case 72:  return SDLK_h;
+                case 74:  return SDLK_j;
                 case 77:  return SDLK_m;
                 case 78:  return SDLK_n;
                 case 80:  return SDLK_p;
@@ -850,6 +851,7 @@ void config_reload() {
         config_register_key(WINDOW_KEY_COMMAND, SDLK_SLASH, "chat_command", 0, "Command", "Game");
         config_register_key(WINDOW_KEY_HIDEHUD, SDLK_F6, "hide_hud", 1, "Hide HUD", "Game");
         config_register_key(WINDOW_KEY_PIE_MENU, SDLK_g, "pie_menu", 0, "Pie menu / next page", "Game");
+        config_register_key(WINDOW_KEY_TEAM_OVERLAY, SDLK_j, "team_overlay", 0, "Show teammates (hold)", "Game");
         config_register_key(WINDOW_KEY_LASTTOOL, SDLK_h, "last_tool", 0, "Last tool", "Tools & Weapons");
         config_register_key(WINDOW_KEY_NETWORKSTATS, SDLK_F12, "network_stats", 1, "Network stats", "Information");
          config_register_key(WINDOW_KEY_SAVE_MAP, SDLK_F9, "save_map", 0, "Save map", "Game");
@@ -926,6 +928,7 @@ void config_reload() {
         config_register_key(WINDOW_KEY_COMMAND, GLFW_KEY_SLASH, "chat_command", 0, "Command", "Game");
         config_register_key(WINDOW_KEY_HIDEHUD, GLFW_KEY_F6, "hide_hud", 1, "Hide HUD", "Game");
         config_register_key(WINDOW_KEY_PIE_MENU, GLFW_KEY_G, "pie_menu", 0, "Pie menu / next page", "Game");
+        config_register_key(WINDOW_KEY_TEAM_OVERLAY, GLFW_KEY_J, "team_overlay", 0, "Show teammates (hold)", "Game");
         config_register_key(WINDOW_KEY_LASTTOOL, GLFW_KEY_H, "last_tool", 0, "Last tool", "Tools & Weapons");
         config_register_key(WINDOW_KEY_NETWORKSTATS, GLFW_KEY_F12, "network_stats", 1, "Network stats", "Information");
          config_register_key(WINDOW_KEY_SAVE_MAP, GLFW_KEY_F9, "save_map", 0, "Save map", "Game");

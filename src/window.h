@@ -124,6 +124,7 @@ enum window_keys {
 	   bindings (including Map zoom/X at index 68) wrote past the array and
 	   could corrupt button_map, making a keyboard press fire the weapon. */
 	WINDOW_KEY_PIE_MENU,
+	WINDOW_KEY_TEAM_OVERLAY,
 	WINDOW_KEY_COUNT
 };
 

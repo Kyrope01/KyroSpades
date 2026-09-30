@@ -13,10 +13,26 @@
 
 #define TEAMPLAY_PACKET_ID 112
 #define TEAMPLAY_EXTENSION_ID 48
+#define TEAMPLAY_FEATURE_ESP 1
 #define TEAMPLAY_FEATURE_PING 2
 #define TEAMPLAY_WORLD 1
 #define TEAMPLAY_MAP 2
 #define TEAMPLAY_PLAYERS 256
+#define TEAMPLAY_CLEAR_ON_RESPAWN 1
+#define TEAMPLAY_SHOW_NAME 2
+
+typedef struct TeamplayMark {
+    bool active, endless, clear_on_respawn, show_name;
+    float remaining;
+    uint8_t surfaces, sent_surfaces, red, green, blue;
+    char reason[65];
+} TeamplayMark;
+extern TeamplayMark teamplay_marks[TEAMPLAY_PLAYERS];
+void teamplay_player_spawned(int id);
+void teamplay_apply_pending(void);
+bool teamplay_can_overlay(void);
+void teamplay_overlay_hold(bool held);
+float teamplay_overlay_opacity(void);
 
 typedef struct TeamplayPing {
     bool active, endless;

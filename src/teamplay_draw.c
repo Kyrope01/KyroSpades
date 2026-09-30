@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "common.h"
+#include "demo.h"
 #include "camera.h"
 #include "config.h"
 #include "font.h"
@@ -111,11 +112,15 @@ static void begin(void) {
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 }
 static void end(void) { glColor3f(1,1,1); glDisable(GL_BLEND); }
-static void label(float x, float y, const char* text, float alpha) {
+static void label_color(float x, float y, const char* text, float alpha,
+                        uint8_t red, uint8_t green, uint8_t blue) {
     if(!text || !*text) return;
     font_select(FONT_FIXEDSYS);
-    glColor4f(1,1,1,alpha);
+    glColor4f(red/255.f,green/255.f,blue/255.f,alpha);
     font_render_shadow(x - font_length(14, (char*)text)*.5f, y, 14, (char*)text, .8f*alpha);
+}
+static void label(float x, float y, const char* text, float alpha) {
+    label_color(x, y, text, alpha, 255, 255, 255);
 }
 static bool project(float x,float y,float z, float* out_x,float* out_y,float* forward) {
     vec4 v = {x,y,z,1}, eye, clip;
@@ -128,7 +133,7 @@ static bool project(float x,float y,float z, float* out_x,float* out_y,float* fo
     return isfinite(*out_x) && isfinite(*out_y);
 }
 void teamplay_draw_world(void) {
-    if(!scene_valid || !network_connected || network_map_transfer) return;
+    if(!scene_valid || (!network_connected && !demo_is_playing()) || network_map_transfer) return;
     begin();
     float sw = settings.window_width, sh = settings.window_height;
     float size = fminf(88.f, fmaxf(60.f, sh * .09f));
@@ -167,6 +172,47 @@ void teamplay_draw_world(void) {
         }
         label(px,py-size*.55f-7.f,text,alpha);
     }
+    /* Marks follow players, not a frozen packet position. SHOW_NAME is a
+       server decision; reason alone may be shown without revealing identity. */
+    for(int id = 0; id < TEAMPLAY_PLAYERS - 1; id++) {
+        const TeamplayMark* m = &teamplay_marks[id];
+        if(!m->active || !(m->surfaces & TEAMPLAY_WORLD) || id == local_player_id
+           || !players[id].connected || !players[id].alive
+           || players[id].team == TEAM_SPECTATOR) continue;
+        float px, py, f;
+        if(!project(players[id].physics.eye.x,
+                    players[id].physics.eye.y + player_height(&players[id]) + .8f,
+                    players[id].physics.eye.z, &px, &py, &f)
+           || px < 0 || px > sw || py < 0 || py > sh) continue;
+        char line[110];
+        snprintf(line, sizeof(line), "%s%s%s", m->show_name ? players[id].name : "",
+                 m->show_name && *m->reason ? ": " : "", m->reason);
+        if(*line) label_color(px, py + 20.f, line, 1.f, m->red, m->green, m->blue);
+    }
+    if(teamplay_overlay_opacity() > 0.f && camera_mode == CAMERAMODE_FPS
+       && players[local_player_id].team != TEAM_SPECTATOR) {
+        for(int id = 0; id < TEAMPLAY_PLAYERS - 1; id++) {
+            const struct Player* p = &players[id];
+            if(id == local_player_id || !p->connected || !p->alive
+               || p->team != players[local_player_id].team
+               || (teamplay_marks[id].active && (teamplay_marks[id].surfaces & TEAMPLAY_WORLD)))
+                continue;
+            float px, py, f;
+            if(project(p->physics.eye.x, p->physics.eye.y + player_height(p) + .8f,
+                       p->physics.eye.z, &px, &py, &f)
+               && px >= 0 && px <= sw && py >= 0 && py <= sh)
+                label(px, py + 20.f, p->name, teamplay_overlay_opacity());
+        }
+    }
+    /* Receiving a mark for ourselves is informative even when its only
+       requested surface is the minimap (or a surface this client lacks). */
+    if(local_player_id < TEAMPLAY_PLAYERS - 1 && teamplay_marks[local_player_id].active
+       && players[local_player_id].connected) {
+        const TeamplayMark* m = &teamplay_marks[local_player_id];
+        char line[100];
+        snprintf(line, sizeof(line), "YOU ARE MARKED%s%s", *m->reason ? ": " : "", m->reason);
+        label_color(sw * .5f, sh * .84f, line, 1.f, m->red, m->green, m->blue);
+    }
     end();
 }
 void teamplay_draw_map(float left,float top,float width,float height,float origin_x,float origin_y,float extent) {
@@ -181,6 +227,20 @@ void teamplay_draw_map(float left,float top,float width,float height,float origi
                && y<=top-size*.5f && y>=top-height+size*.5f)
                 ping_sprite(id,p,x,y,size,fade(p));
         }
+    }
+    for(int id=0; id<TEAMPLAY_PLAYERS-1; id++) {
+        const TeamplayMark* m=&teamplay_marks[id];
+        if(!m->active || !(m->surfaces & TEAMPLAY_MAP) || !players[id].connected
+           || !players[id].alive || players[id].team==TEAM_SPECTATOR) continue;
+        float x=left+(players[id].pos.x-origin_x)/extent*width;
+        float y=top-(players[id].pos.z-origin_y)/extent*height;
+        float r=fminf(6.f,fmaxf(3.f,height*.01f));
+        if(x<left+r || x>left+width-r || y>top-r || y<top-height+r) continue;
+        glEnable(GL_BLEND);
+        glColor4f(0,0,0,.85f);
+        glx_draw_ring_segment_2d(x,y,0,r+1.f,0,2.f*TP_PI,24);
+        glColor4f(m->red/255.f,m->green/255.f,m->blue/255.f,1.f);
+        glx_draw_ring_segment_2d(x,y,0,r,0,2.f*TP_PI,24);
     }
     end();
 }

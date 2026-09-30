@@ -15,6 +15,13 @@
 #include "demo.h"
 
 TeamplayPing teamplay_pings[TEAMPLAY_PLAYERS];
+TeamplayMark teamplay_marks[TEAMPLAY_PLAYERS];
+/* A mark names a player in the new world; preserve only the latest packet per
+ * player until map loading finishes. A zero-duration removal is state too. */
+static TeamplayMark pending_marks[TEAMPLAY_PLAYERS];
+static bool pending_present[TEAMPLAY_PLAYERS];
+static bool overlay_held;
+static float overlay_alpha;
 uint8_t teamplay_features;
 float teamplay_north_x = 0.0f, teamplay_north_y = -1.0f;
 static bool negotiated;
@@ -81,9 +88,14 @@ void teamplay_reason(char out[65], const uint8_t* s, size_t len) {
 
 void teamplay_reset_map(void) {
     memset(teamplay_pings, 0, sizeof(teamplay_pings));
+    memset(teamplay_marks, 0, sizeof(teamplay_marks));
+    /* A mark may precede MapStart; keep queued marks until the new map loads. */
+    overlay_held = false;
+    overlay_alpha = 0;
 }
 void teamplay_reset_connection(void) {
     negotiated = false;
+    memset(pending_present, 0, sizeof(pending_present));
     teamplay_features = 0;
     teamplay_north_x = 0.0f;
     teamplay_north_y = -1.0f;
@@ -92,18 +104,41 @@ void teamplay_reset_connection(void) {
 void teamplay_set_negotiated(bool enabled) { negotiated = enabled; }
 bool teamplay_negotiated(void) { return negotiated; }
 bool teamplay_can_ping(void) { return negotiated && (teamplay_features & TEAMPLAY_FEATURE_PING); }
+bool teamplay_can_overlay(void) { return negotiated && (teamplay_features & TEAMPLAY_FEATURE_ESP); }
+void teamplay_overlay_hold(bool held) { overlay_held = held; }
+float teamplay_overlay_opacity(void) { return teamplay_can_overlay() ? overlay_alpha : 0.f; }
+void teamplay_player_spawned(int id) {
+    if(id >= 0 && id < TEAMPLAY_PLAYERS && teamplay_marks[id].clear_on_respawn)
+        teamplay_marks[id].active = false;
+}
 void teamplay_player_left(int id) {
-    if(id >= 0 && id < TEAMPLAY_PLAYERS)
+    if(id >= 0 && id < TEAMPLAY_PLAYERS) {
         teamplay_pings[id].active = false;
+        teamplay_marks[id].active = false;
+        pending_present[id] = false;
+    }
+}
+void teamplay_apply_pending(void) {
+    for(int i = 0; i < TEAMPLAY_PLAYERS; ++i) {
+        if(pending_present[i]) {
+            teamplay_marks[i] = pending_marks[i];
+            pending_present[i] = false;
+        }
+    }
 }
 void teamplay_tick(float dt) {
     if(!tp_finite(dt) || dt < 0) return;
+    float target = overlay_held && teamplay_can_overlay() ? 1.f : 0.f;
+    overlay_alpha += (target - overlay_alpha) * fminf(1.f, dt * 14.f);
+    if(overlay_alpha < .001f) overlay_alpha = 0.f;
     for(int i = 0; i < TEAMPLAY_PLAYERS; i++) {
         TeamplayPing* p = &teamplay_pings[i];
         if(p->active) {
             p->age += dt;
             if(!p->endless && (p->remaining -= dt) <= 0) p->active = false;
         }
+        TeamplayMark* m = &teamplay_marks[i];
+        if(m->active && !m->endless && (m->remaining -= dt) <= 0) m->active = false;
     }
 }
 static uint8_t surfaces(uint8_t sent) { return sent ? (sent & 7) : (TEAMPLAY_WORLD | TEAMPLAY_MAP); }
@@ -120,6 +155,10 @@ bool teamplay_receive(const uint8_t* data, size_t len, bool seeking, bool map_lo
         if(len < 10) return false;
         float nx = lefloat(data + 2), ny = lefloat(data + 6);
         teamplay_features = data[1] & 7;
+        if(!(teamplay_features & TEAMPLAY_FEATURE_ESP)) {
+            overlay_held = false;
+            overlay_alpha = 0.f;
+        }
         double magnitude = hypot((double)nx, (double)ny);
         if(tp_finite(nx) && tp_finite(ny) && magnitude > 0) {
             teamplay_north_x = (float)(nx / magnitude);
@@ -153,8 +192,32 @@ bool teamplay_receive(const uint8_t* data, size_t len, bool seeking, bool map_lo
         if(!demo_mute_effects()) sound_create(SOUND_LOCAL, &sound_beep1, 0, 0, 0);
         return true;
     }
-    /* Player-mark/ESP packets are a separate Teamplay feature, not part of
-       the pie menu or location pings. Ignore them without affecting pings. */
+    if(sub == 2) {
+        if(len < 12 || data[1] == 255) return false;
+        int id = data[1];
+        float duration = lefloat(data + 2);
+        if(!valid_duration(duration)) return false;
+        TeamplayMark mark = {0};
+        if(duration != 0) {
+            mark.active = true;
+            mark.endless = tp_inf(duration);
+            mark.remaining = duration;
+            mark.sent_surfaces = data[6];
+            mark.surfaces = surfaces(data[6]);
+            mark.clear_on_respawn = (data[7] & TEAMPLAY_CLEAR_ON_RESPAWN) != 0;
+            mark.show_name = (data[7] & TEAMPLAY_SHOW_NAME) != 0;
+            mark.blue = data[8]; mark.green = data[9]; mark.red = data[10];
+            /* data[11] is a reserved message ID; the reason is raw UTF-8. */
+            teamplay_reason(mark.reason, data + 12, len - 12);
+        }
+        if(map_loading) {
+            pending_marks[id] = mark;
+            pending_present[id] = true;
+        } else {
+            teamplay_marks[id] = mark; /* marks are state: replay during seeks */
+        }
+        return true;
+    }
     return false;
 }
 
@@ -183,4 +246,19 @@ void teamplay_record_initial(void (*record)(const uint8_t*, size_t)) {
     putfloat(packet + 3, teamplay_north_x);
     putfloat(packet + 7, teamplay_north_y);
     record(packet, 11);
+    /* Marks are ongoing state; pings are momentary events and must not be
+       resurrected by starting a recording halfway through a match. */
+    for(int id = 0; id < TEAMPLAY_PLAYERS - 1; id++) {
+        const TeamplayMark* m = &teamplay_marks[id];
+        if(!m->active) continue;
+        uint8_t data[1 + 12 + 64] = {TEAMPLAY_PACKET_ID, 2, (uint8_t)id};
+        putfloat(data + 3, m->endless ? INFINITY : m->remaining);
+        data[7] = m->sent_surfaces;
+        data[8] = (m->clear_on_respawn ? TEAMPLAY_CLEAR_ON_RESPAWN : 0)
+                  | (m->show_name ? TEAMPLAY_SHOW_NAME : 0);
+        data[9] = m->blue; data[10] = m->green; data[11] = m->red;
+        size_t n = strlen(m->reason);
+        memcpy(data + 13, m->reason, n);
+        record(data, 13 + n);
+    }
 }

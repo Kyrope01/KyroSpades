@@ -40,6 +40,7 @@
 #include "window.h"
 #include "particle.h"
 #include "hud.h"
+#include "teamplay.h"
 #include "bloodmarks.h"
 #include "damagenumbers.h"
 #include "lighting.h"
@@ -53,7 +54,8 @@ static float os_sway_x=0, os_sway_y=0, os_last_rot_x=0, os_last_rot_y=0;
 static int os_sway_initialized=0;
 static float os_lerp_smooth(float cur,float tgt,float dt,float p){float f=1.0f-powf(p,dt);return cur+(tgt-cur)*f;}
 
-static void player_draw_esp_box(struct Player* p);
+static void player_draw_esp_box(struct Player* p, unsigned char red, unsigned char green, unsigned char blue);
+static void player_esp_team_color(int team, unsigned char* red, unsigned char* green, unsigned char* blue);
 
 struct GameState gamestate;
 
@@ -63,7 +65,10 @@ static int player_is_obscured(struct Player* p) {
         float tx = p->physics.eye.x;
         float ty = p->physics.eye.y + player_height(p) * 0.5F;
         float tz = p->physics.eye.z;
-        camera_hit_mask(&hit, -1, camera_x, camera_y, camera_z,
+        /* In first person the ray starts inside our own hitbox. Including
+           ourselves makes the nearest hit PLAYER instead of the wall, so
+           Teamplay ESP can show only the HUD name while its box is skipped. */
+        camera_hit_mask(&hit, local_player_id, camera_x, camera_y, camera_z,
                         tx - camera_x, ty - camera_y, tz - camera_z, 1024.0F);
         // Player is obscured if terrain is hit before the player hitbox.
         return hit.type == CAMERA_HITTYPE_BLOCK;
@@ -958,11 +963,39 @@ void player_render_all() {
 		for(int k = 0; k < PLAYERS_MAX; k++) {
 			if(k == local_player_id || !players[k].connected || players[k].team == TEAM_SPECTATOR)
 				continue;
+			/* A server mark owns its own colour; draw it in the Teamplay pass. */
+			if(teamplay_marks[k].active && (teamplay_marks[k].surfaces & TEAMPLAY_WORLD))
+				continue;
 			if(!camera_CubeInFrustum(players[k].pos.x, players[k].pos.y, players[k].pos.z, 1.0F, 2.0F)
 			   || distance2D(players[k].pos.x, players[k].pos.z, camera_x, camera_z) > render_dist_sq)
 				continue;
-			if(player_is_obscured(players + k))
-				player_draw_esp_box(players + k);
+			if(player_is_obscured(players + k)) {
+				unsigned char red, green, blue;
+				player_esp_team_color(players[k].team, &red, &green, &blue);
+				player_draw_esp_box(players + k, red, green, blue);
+			}
+		}
+	}
+
+	/* Teamplay uses exactly the spectator ESP box geometry, but only for
+	   server-marked players or teammates while the server-authorized key is
+	   held. Never infer a mark or reveal an unmarked enemy locally. */
+	if((network_connected && network_logged_in && !network_map_transfer) || demo_is_playing()) {
+		int team = players[local_player_id].team;
+		bool teammates = camera_mode == CAMERAMODE_FPS && team != TEAM_SPECTATOR
+			&& teamplay_overlay_opacity() > 0.f;
+		for(int k = 0; k < PLAYERS_MAX - 1; ++k) {
+			struct Player* p = &players[k];
+			if(k == local_player_id || !p->connected || !p->alive || p->team == TEAM_SPECTATOR)
+				continue;
+			TeamplayMark* mark = &teamplay_marks[k];
+			bool marked = mark->active && (mark->surfaces & TEAMPLAY_WORLD);
+			if(!marked && !(teammates && p->team == team)) continue;
+			if(!player_in_view(p) || !player_is_obscured(p)) continue;
+			unsigned char red, green, blue;
+			if(marked) { red = mark->red; green = mark->green; blue = mark->blue; }
+			else player_esp_team_color(p->team, &red, &green, &blue);
+			player_draw_esp_box(p, red, green, blue);
 		}
 	}
 
@@ -1062,18 +1095,20 @@ static void player_esp_draw_hitbox(const struct hitbox* box, int fill) {
 		player_esp_draw_cuboid_lines(x0, y0, z0, x1, y1, z1);
 }
 
-static void player_esp_color(int team) {
-	switch(team) {
-		case TEAM_1: glColor3ub(gamestate.team_1.red, gamestate.team_1.green, gamestate.team_1.blue); break;
-		case TEAM_2: glColor3ub(gamestate.team_2.red, gamestate.team_2.green, gamestate.team_2.blue); break;
-		default: glColor3ub(255, 220, 32); break;
+static void player_esp_team_color(int team, unsigned char* red, unsigned char* green, unsigned char* blue) {
+	if(team == TEAM_1) {
+		*red = gamestate.team_1.red; *green = gamestate.team_1.green; *blue = gamestate.team_1.blue;
+	} else if(team == TEAM_2) {
+		*red = gamestate.team_2.red; *green = gamestate.team_2.green; *blue = gamestate.team_2.blue;
+	} else {
+		*red = 255; *green = 220; *blue = 32;
 	}
 }
 
-static void player_esp_draw_part(const struct hitbox* box, int team) {
+static void player_esp_draw_part(const struct hitbox* box, unsigned char red, unsigned char green, unsigned char blue) {
 	glColor3ub(10, 10, 10);
 	player_esp_draw_hitbox(box, 1);
-	player_esp_color(team);
+	glColor3ub(red, green, blue);
 	player_esp_draw_hitbox(box, 0);
 }
 
@@ -1200,7 +1235,7 @@ void player_collision(const struct Player* p, Ray* ray, struct player_intersecti
 	matrix_pop(matrix_model);
 }
 
-static void player_draw_esp_box(struct Player* p) {
+static void player_draw_esp_box(struct Player* p, unsigned char red, unsigned char green, unsigned char blue) {
 	if(!p->alive || p->team == TEAM_SPECTATOR)
 		return;
 
@@ -1225,7 +1260,7 @@ static void player_draw_esp_box(struct Player* p) {
 	b /= 0.25F;
 
 	glx_set_line_width(1.0F);
-	player_esp_color(p->team);
+	glColor3ub(red, green, blue);
 	/* ESP outlines are informational overlays, not world geometry: disable fog,
 	   lighting and texturing so the line color is exactly the team color.  The
 	   previous version only disabled the spherical fog texture unit; if texture0
@@ -1264,14 +1299,14 @@ static void player_draw_esp_box(struct Player* p) {
 	matrix_pointAt(matrix_model, ox, oy, oz);
 	matrix_rotate(matrix_model, 90.0F, 0.0F, 1.0F, 0.0F);
 	matrix_upload();
-	player_esp_draw_part(&box_head, p->team);
+	player_esp_draw_part(&box_head, red, green, blue);
 
 	matrix_identity(matrix_model);
 	matrix_translate(matrix_model, p->physics.eye.x, p->physics.eye.y + height, p->physics.eye.z);
 	matrix_pointAt(matrix_model, ox, 0.0F, oz);
 	matrix_rotate(matrix_model, 90.0F, 0.0F, 1.0F, 0.0F);
 	matrix_upload();
-	player_esp_draw_part(torso, p->team);
+	player_esp_draw_part(torso, red, green, blue);
 
 	matrix_push(matrix_model);
 	matrix_translate(matrix_model, torso->size[0] * 0.1F * 0.5F - leg->size[0] * 0.1F * 0.5F,
@@ -1280,7 +1315,7 @@ static void player_draw_esp_box(struct Player* p) {
 	matrix_rotate(matrix_model, 45.0F * foot_function(p) * a, 1.0F, 0.0F, 0.0F);
 	matrix_rotate(matrix_model, 45.0F * foot_function(p) * b, 0.0F, 0.0F, 1.0F);
 	matrix_upload();
-	player_esp_draw_part(leg, p->team);
+	player_esp_draw_part(leg, red, green, blue);
 	matrix_pop(matrix_model);
 
 	matrix_translate(matrix_model, -torso->size[0] * 0.1F * 0.5F + leg->size[0] * 0.1F * 0.5F,
@@ -1289,7 +1324,7 @@ static void player_draw_esp_box(struct Player* p) {
 	matrix_rotate(matrix_model, -45.0F * foot_function(p) * a, 1.0F, 0.0F, 0.0F);
 	matrix_rotate(matrix_model, -45.0F * foot_function(p) * b, 0.0F, 0.0F, 1.0F);
 	matrix_upload();
-	player_esp_draw_part(leg, p->team);
+	player_esp_draw_part(leg, red, green, blue);
 
 	matrix_identity(matrix_model);
 	matrix_translate(matrix_model, p->physics.eye.x, p->physics.eye.y + height, p->physics.eye.z);
@@ -1302,10 +1337,10 @@ static void player_draw_esp_box(struct Player* p) {
 	matrix_rotate(matrix_model, angles[0], 1.0F, 0.0F, 0.0F);
 	matrix_rotate(matrix_model, angles[1], 0.0F, 1.0F, 0.0F);
 	matrix_upload();
-	player_esp_draw_part(&box_arm_left, p->team);
+	player_esp_draw_part(&box_arm_left, red, green, blue);
 	matrix_rotate(matrix_model, -45.0F, 0.0F, 1.0F, 0.0F);
 	matrix_upload();
-	player_esp_draw_part(&box_arm_right, p->team);
+	player_esp_draw_part(&box_arm_right, red, green, blue);
 
 	matrix_pop(matrix_model);
 	glDepthMask(depth_write_was_on);

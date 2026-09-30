@@ -552,6 +552,7 @@ static void hud_ingame_init() {
         pie_attack_suppressed[0] = pie_attack_suppressed[1] = 0;
         pie_key_down = 0;
         teamplay_last_tick = game_time();
+        teamplay_overlay_hold(false);
         hud_colorpicker_close(0); /* never come back to a half-open picker */
         window_textinput(0);
         chat_input_mode = CHAT_NO_INPUT;
@@ -1820,6 +1821,13 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
         float tp_now = game_time();
         float tp_dt = fmaxf(0.f, tp_now - teamplay_last_tick);
         teamplay_last_tick = tp_now;
+        /* Keep the hold state tied to the physical key, not to a remembered
+           key-down event that might outlive a focus or HUD change. */
+        teamplay_overlay_hold(!demo_is_playing() && network_connected && network_logged_in
+                && !network_map_transfer && camera_mode == CAMERAMODE_FPS
+                && players[local_player_id].team != TEAM_SPECTATOR && !show_exit
+                && !cp_open && chat_input_mode == CHAT_NO_INPUT && screen_current == SCREEN_NONE
+                && window_key_down(WINDOW_KEY_TEAM_OVERLAY));
         /* Markers expire in real game time even after a slow/minimized frame;
            only the menu's cosmetic animation needs a bounded frame delta. */
         if(!demo_is_playing()) teamplay_tick(tp_dt);
@@ -3592,6 +3600,14 @@ static const char* hud_ingame_completeword(const char* s) {
 }
 
 static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
+        if(key == WINDOW_KEY_TEAM_OVERLAY) {
+                if(action == WINDOW_PRESS && network_connected && network_logged_in
+                   && camera_mode == CAMERAMODE_FPS && chat_input_mode == CHAT_NO_INPUT
+                   && screen_current == SCREEN_NONE && !show_exit && !cp_open
+                   && !teamplay_can_overlay())
+                        chat_showpopup("This server does not allow showing teammates.", 3.f, rgb(255, 255, 255));
+                return;
+        }
         if(pie_menu_opened() && (key == WINDOW_KEY_CHAT || key == WINDOW_KEY_COMMAND
            || key == WINDOW_KEY_COLORPICKER || key == WINDOW_KEY_CHANGETEAM
            || key == WINDOW_KEY_CHANGEWEAPON)) pie_menu_close(false);

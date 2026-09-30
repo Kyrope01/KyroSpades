@@ -501,6 +501,10 @@ free(decompressed);
         }
         compressed_chunk_data_offset = 0;
         skins_apply_all(0);
+        /* Demo timestamps advance during the half-second loading-screen delay.
+           Apply marks queued before StateData now so they age from the correct
+           point in the recording, rather than starting their timer late. */
+        if(demo_is_playing() && !demo_is_seeking()) teamplay_apply_pending();
 }
 void read_PacketFogColor(void* data, int len) {
         if(len < (int)sizeof(struct PacketFogColor)) {
@@ -576,6 +580,7 @@ void read_PacketCreatePlayer(void* data, int len) {
                 players[p->player_id].connected = 1;
                 players[p->player_id].alive = 1;
                 players[p->player_id].team = p->team;
+                teamplay_player_spawned(p->player_id);
                 players[p->player_id].held_item = TOOL_GUN;
                 player_on_held_item_change(&players[p->player_id]);
                 players[p->player_id].weapon = p->weapon;
@@ -1391,7 +1396,7 @@ void read_PacketVersionGet(void* data, int len) {
 void read_PacketExtInfo(void* data, int len) {
         if(len < 1 || !data) return;
         struct PacketExtInfo* p = (struct PacketExtInfo*)data;
-        if(len >= p->length * sizeof(struct PacketExtInfoEntry) + 1) {
+        if((size_t)(len - 1) >= (size_t)p->length * sizeof(struct PacketExtInfoEntry)) {
                 if(p->length > 0) {
                         log_info("Server supports the following extensions:");
                         for(int k = 0; k < p->length; k++) {
@@ -1403,10 +1408,12 @@ void read_PacketExtInfo(void* data, int len) {
                         log_info("Server does not support extensions");
                 }
 
-                /* Do not advertise Teamplay on a server that did not offer v1. */
+                /* ZeroSpades replies with the v1 it implements when the
+                   server advertises Teamplay, even if the offered version is
+                   newer. Never claim the undefined v0 protocol as v1. */
                 bool supports_teamplay = false;
                 for(int k = 0; k < p->length; k++)
-                        if(p->entries[k].id == TEAMPLAY_EXTENSION_ID && p->entries[k].version == 1)
+                        if(p->entries[k].id == TEAMPLAY_EXTENSION_ID && p->entries[k].version >= 1)
                                 supports_teamplay = true;
                 teamplay_set_negotiated(supports_teamplay);
                 struct PacketExtInfo reply;
@@ -1837,7 +1844,9 @@ int network_status() {
 
 static void read_PacketTeamplay(void* data, int len) {
         if(len <= 0 || !data) return;
-        teamplay_receive(data, (size_t)len, demo_is_seeking(), network_map_transfer);
+        teamplay_receive(data, (size_t)len, demo_is_seeking(),
+                         (network_map_transfer && (!demo_is_playing() || !network_map_transfer_end))
+                         || (!network_logged_in && !demo_is_playing()));
 }
 
 void network_init() {
