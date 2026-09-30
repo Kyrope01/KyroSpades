@@ -18,6 +18,7 @@
 */
 
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "common.h"
@@ -318,6 +319,54 @@ unsigned int postprocess_bloom_render(unsigned int scene_texture, int width, int
         return result;
 }
 
+void postprocess_bloom_debug_test(void) {
+        static bool tested;
+        const char* enabled = getenv("KS_BLOOM_TEST");
+        if(tested || !enabled || enabled[0] != '1')
+                return;
+        tested = true;
+
+        /* A single 8x HDR texel should survive extraction and spread into
+           neighbouring pixels after the eight real GPU blur passes. Run only
+           on request, since reading back a framebuffer stalls the pipeline. */
+        struct postprocess_gl_state state;
+        postprocess_state_capture(&state);
+        float pixels[32 * 32 * 4] = {0};
+        pixels[(16 + 16 * 32) * 4] = 8.0F;
+        pixels[(16 + 16 * 32) * 4 + 1] = 8.0F;
+        pixels[(16 + 16 * 32) * 4 + 2] = 8.0F;
+        GLuint source = 0;
+        glGenTextures(1, &source);
+        if(source) {
+                glBindTexture(GL_TEXTURE_2D, source);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, 32, 32, 0, GL_RGBA, GL_FLOAT, pixels);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                GLuint result = postprocess_bloom_render(source, 32, 32, 1.0F);
+                if(result) {
+                        /* Eight passes end on buffer 0; reading near the centre
+                           tests the blur, not merely the original bright texel. */
+                        GLfloat center[4] = {0}, neighbor[4] = {0};
+                        glBindFramebuffer(GL_READ_FRAMEBUFFER, bloom.fbo[0]);
+                        glReadPixels(8, 8, 1, 1, GL_RGBA, GL_FLOAT, center);
+                        glReadPixels(9, 8, 1, 1, GL_RGBA, GL_FLOAT, neighbor);
+                        if(glGetError() == GL_NO_ERROR && center[0] > 0.0F
+                           && neighbor[0] > 0.0F && center[0] > neighbor[0])
+                                log_info("Bloom GPU self-test passed (center %.3f, neighbor %.3f)", center[0], neighbor[0]);
+                        else
+                                log_error("Bloom GPU self-test failed (center %.3f, neighbor %.3f)", center[0], neighbor[0]);
+                } else {
+                        log_error("Bloom GPU self-test failed: bloom render target or shader unavailable");
+                }
+                glActiveTexture(GL_TEXTURE0);
+                glBindTexture(GL_TEXTURE_2D, 0);
+                glDeleteTextures(1, &source);
+        } else {
+                log_error("Bloom GPU self-test failed: test texture allocation");
+        }
+        postprocess_state_restore(&state);
+}
+
 void postprocess_deinit(void) {
         bloom_targets_destroy();
         if(bloom.extract_program)
@@ -344,6 +393,8 @@ unsigned int postprocess_bloom_render(unsigned int scene_texture, int width, int
         (void)threshold;
         return 0;
 }
+
+void postprocess_bloom_debug_test(void) {}
 
 void postprocess_deinit(void) {}
 

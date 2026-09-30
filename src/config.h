@@ -118,10 +118,6 @@ extern struct RENDER_OPTIONS {
         float saturation;
         float contrast;
         float vignette;
-        int   volumetric_light;
-        float volumetric_light_strength;
-        float volumetric_light_brightness;
-        float volumetric_light_range;
         int   lens_flare;
         /* ── New visual shaders (chromatic aberration / filmic) ── */
         int   chromatic_aberration;           /* 0 = off, 1 = on */

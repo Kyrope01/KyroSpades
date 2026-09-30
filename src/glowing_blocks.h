@@ -12,7 +12,7 @@
 #include <stdint.h>
 
 #define GLOWING_BLOCK_FRAME_LIGHTS 16
-#define GLOWING_BLOCK_RAY_RANGE 50.0F
+#define GLOWING_BLOCK_LIGHT_RANGE 50.0F
 
 struct glowing_block_light {
         float position[3];
@@ -34,14 +34,7 @@ void glowing_blocks_map_changed(int x, int y, int z, uint32_t color);
 void glowing_blocks_clear(void);
 void glowing_blocks_deinit(void);
 
-bool glowing_blocks_has_active(void);
-/* Fast range check used to avoid a post-process pass when every remembered
- * source is already beyond its volumetric cutoff. */
-bool glowing_blocks_has_nearby(float view_x, float view_y, float view_z, float range);
-
-/* Select nearby wrapped copies once per frame, submit them to forward lighting,
- * and retain the same bounded selection for the volumetric-light pass. */
+/* Submit nearby coloured point lights to the forward-lighting queue. */
 void glowing_blocks_prepare_frame(float view_x, float view_y, float view_z);
-int glowing_blocks_frame_lights(struct glowing_block_light* output, int capacity);
 
 #endif

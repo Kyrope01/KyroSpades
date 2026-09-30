@@ -168,7 +168,7 @@ static const char* water_fragment_shader =
         "        vec3 reflection = mix(animated_color, horizon, 0.18 + 0.24 * fresnel);\n"
         "        color = mix(body, reflection, 0.22 + 0.50 * fresnel);\n"
         "        float sun_diffuse = max(dot(normal, sun_direction), 0.0);\n"
-        "        color *= 0.88 + 0.12 * sun_diffuse * visibility;\n"
+        "        color *= (0.88 + 0.12 * sun_diffuse * visibility) * u_SunColor.r;\n"
         "        vec3 sun_half_sum = sun_direction + view_direction;\n"
         "        vec3 sun_half = sun_half_sum / max(length(sun_half_sum), 0.0001);\n"
         "        float sun_specular = pow(max(dot(normal, sun_half), 0.0), 96.0);\n"
@@ -180,7 +180,7 @@ static const char* water_fragment_shader =
         "            if(ci.a > 0.0 && (i != 3 || !flashlight_active)) {\n"
         "                vec3 delta = pr.xyz - v_WorldPosition;\n"
         "                float distance_to_light = length(delta);\n"
-        "                float attenuation = clamp(1.0 - distance_to_light / max(pr.w, 0.0001), 0.0, 1.0);\n"
+        "                float attenuation = 1.0 - smoothstep(0.0, 1.0, distance_to_light / max(pr.w, 0.0001));\n"
         "                attenuation *= attenuation;\n"
         "                vec3 light_direction = delta / max(distance_to_light, 0.0001);\n"
         "                float diffuse = max(dot(normal, light_direction), 0.0);\n"
@@ -198,7 +198,7 @@ static const char* water_fragment_shader =
         "            vec3 ray_direction = from_light / max(light_distance, 0.0001);\n"
         "            float cone = smoothstep(u_FlashlightDirection.w, min(u_FlashlightDirection.w + 0.12, 0.999),\n"
         "                                    dot(ray_direction, normalize(u_FlashlightDirection.xyz)));\n"
-        "            float range = clamp(1.0 - light_distance / max(pr.w, 0.0001), 0.0, 1.0);\n"
+        "            float range = 1.0 - smoothstep(0.0, 1.0, light_distance / max(pr.w, 0.0001));\n"
         "            range *= range;\n"
         "            vec3 light_direction = -ray_direction;\n"
         "            float diffuse = max(dot(normal, light_direction), 0.0);\n"
@@ -209,6 +209,8 @@ static const char* water_fragment_shader =
         "            fill = 0.30 * fill * fill;\n"
         "            color += ci.rgb * ci.a * (cone * range + fill) * (0.05 + 0.18 * diffuse + 0.32 * specular);\n"
         "        }\n"
+        "    } else {\n"
+        "        color *= u_SunColor.r;\n"
         "    }\n"
         "    float fog_distance = clamp(length(v_WorldPosition.xz - u_Camera.xz) * u_FogDistance, 0.0, 1.0);\n"
         "    float fog = fog_distance * fog_distance * (3.0 - 2.0 * fog_distance);\n"
@@ -853,6 +855,13 @@ static uint32_t water_animated_color(uint32_t color, float x, float z, float ren
         return rgba(r, g, b, alpha(color));
 }
 
+/* The fallback renderer has no lighting shader. Dim the generated water
+   vertices instead; the Core shader scales its base color at draw time. */
+static uint32_t water_sunlit_color(uint32_t color) {
+        float sun = lighting_sunlight_scale();
+        return rgba(red(color) * sun, green(color) * sun, blue(color) * sun, alpha(color));
+}
+
 static void water_render_tile(int tx, int tz, int x0, int x1, int z0, int z1,
                               float rd, float y, float render_time, size_t* n) {
         int za = max(tz, z0);
@@ -886,9 +895,9 @@ static void water_render_tile(int tx, int tz, int x0, int x1, int z0, int z1,
                                 c = rgba(60, 100, 160, 255);
 #ifdef OPENGL_CORE
                         if(!water_program)
-                                c = water_animated_color(c, (float)wrapped_x, (float)wrapped_z, render_time);
+                                c = water_sunlit_color(water_animated_color(c, (float)wrapped_x, (float)wrapped_z, render_time));
 #else
-                        c = water_animated_color(c, (float)wrapped_x, (float)wrapped_z, render_time);
+                        c = water_sunlit_color(water_animated_color(c, (float)wrapped_x, (float)wrapped_z, render_time));
 #endif
 
                         if(settings.water_waves) {
@@ -952,6 +961,12 @@ static void water_render_tile(int tx, int tz, int x0, int x1, int z0, int z1,
                                                                           (float)wrapped_z, render_time);
 #endif
 
+#ifdef OPENGL_CORE
+                                        if(!water_program)
+                                                tile_color = water_sunlit_color(tile_color);
+#else
+                                        tile_color = water_sunlit_color(tile_color);
+#endif
                                         /* Tile coordinate for wave */
                                         int tlx = x / ts;
                                         int tlz = z / ts;
@@ -1157,8 +1172,8 @@ void water_render(void) {
                 glUniform1f(water_uniform_wave_intensity, settings.water_wave_intensity);
                 glUniform1f(water_uniform_wave_speed, settings.water_wave_speed);
                 glUniform1f(water_uniform_wave_mode, (float)settings.water_wave_mode);
+                lighting_apply_program((unsigned int)water_program);
                 if(settings.water_shader) {
-                        lighting_apply_program((unsigned int)water_program);
                         shadow_apply_program((unsigned int)water_program);
                         shadow_scoped = true;
                 }

@@ -31,6 +31,10 @@ bool postprocess_hdr_supported(void);
  * All OpenGL state touched by this function is restored before it returns. */
 unsigned int postprocess_bloom_render(unsigned int scene_texture, int width, int height, float threshold);
 
+/* Set KS_BLOOM_TEST=1 to render a synthetic HDR highlight once and report
+ * whether the real GPU bloom pipeline spreads it to adjacent pixels. */
+void postprocess_bloom_debug_test(void);
+
 void postprocess_deinit(void);
 
 #endif

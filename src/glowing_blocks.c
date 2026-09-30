@@ -30,8 +30,6 @@ static struct glowing_block_record* glowing_records;
 static size_t glowing_count;
 static size_t glowing_capacity;
 static struct glowing_pending_record glowing_pending[GLOWING_PENDING_CAPACITY];
-static struct glowing_block_light glowing_frame[GLOWING_BLOCK_FRAME_LIGHTS];
-static int glowing_frame_count;
 static bool glowing_placement_enabled;
 static pthread_mutex_t glowing_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -173,7 +171,6 @@ void glowing_blocks_map_changed(int x, int y, int z, uint32_t color) {
 void glowing_blocks_clear(void) {
         pthread_mutex_lock(&glowing_lock);
         glowing_count = 0;
-        glowing_frame_count = 0;
         glowing_placement_enabled = false;
         memset(glowing_pending, 0, sizeof(glowing_pending));
         pthread_mutex_unlock(&glowing_lock);
@@ -185,41 +182,9 @@ void glowing_blocks_deinit(void) {
         glowing_records = NULL;
         glowing_count = 0;
         glowing_capacity = 0;
-        glowing_frame_count = 0;
         glowing_placement_enabled = false;
         memset(glowing_pending, 0, sizeof(glowing_pending));
         pthread_mutex_unlock(&glowing_lock);
-}
-
-bool glowing_blocks_has_active(void) {
-        pthread_mutex_lock(&glowing_lock);
-        bool active = glowing_count > 0;
-        pthread_mutex_unlock(&glowing_lock);
-        return active;
-}
-
-bool glowing_blocks_has_nearby(float view_x, float view_y, float view_z, float range) {
-        if(range <= 0.0F)
-                return false;
-        float range_sq = range * range;
-        bool nearby = false;
-
-        pthread_mutex_lock(&glowing_lock);
-        for(size_t i = 0; i < glowing_count; i++) {
-                float dx = glowing_records[i].x + 0.5F - view_x;
-                float dy = glowing_records[i].y + 0.5F - view_y;
-                float dz = glowing_records[i].z + 0.5F - view_z;
-                if(map_size_x > 0)
-                        dx -= roundf(dx / map_size_x) * map_size_x;
-                if(map_size_z > 0)
-                        dz -= roundf(dz / map_size_z) * map_size_z;
-                if(dx * dx + dy * dy + dz * dz < range_sq) {
-                        nearby = true;
-                        break;
-                }
-        }
-        pthread_mutex_unlock(&glowing_lock);
-        return nearby;
 }
 
 static struct glowing_block_light glowing_make_light(const struct glowing_block_record* block,
@@ -275,7 +240,7 @@ void glowing_blocks_prepare_frame(float view_x, float view_y, float view_z) {
                         = glowing_make_light(&glowing_records[i], view_x, view_z, &distance_sq);
                 float dy = candidate.position[1] - view_y;
                 distance_sq += dy * dy;
-                if(distance_sq >= GLOWING_BLOCK_RAY_RANGE * GLOWING_BLOCK_RAY_RANGE)
+                if(distance_sq >= GLOWING_BLOCK_LIGHT_RANGE * GLOWING_BLOCK_LIGHT_RANGE)
                         continue;
 
                 int insert = selected_count;
@@ -297,24 +262,10 @@ void glowing_blocks_prepare_frame(float view_x, float view_y, float view_z) {
                 selected_distance[insert] = distance_sq;
         }
 
-        glowing_frame_count = selected_count;
-        if(selected_count > 0)
-                memcpy(glowing_frame, selected, (size_t)selected_count * sizeof(*selected));
         pthread_mutex_unlock(&glowing_lock);
 
         for(int i = 0; i < selected_count; i++)
                 lighting_submit_point(selected[i].position[0], selected[i].position[1], selected[i].position[2],
                                       selected[i].color[0], selected[i].color[1], selected[i].color[2],
                                       selected[i].radius, selected[i].intensity);
-}
-
-int glowing_blocks_frame_lights(struct glowing_block_light* output, int capacity) {
-        if(!output || capacity <= 0)
-                return 0;
-        pthread_mutex_lock(&glowing_lock);
-        int count = glowing_frame_count < capacity ? glowing_frame_count : capacity;
-        if(count > 0)
-                memcpy(output, glowing_frame, (size_t)count * sizeof(*output));
-        pthread_mutex_unlock(&glowing_lock);
-        return count;
 }

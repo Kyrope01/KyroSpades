@@ -361,10 +361,6 @@ void config_save() {
         config_setf("client", "saturation", settings.saturation);
         config_setf("client", "contrast", settings.contrast);
         config_setf("client", "vignette", settings.vignette);
-        config_seti("client", "volumetric_light", settings.volumetric_light);
-        config_setf("client", "volumetric_light_strength", settings.volumetric_light_strength);
-        config_setf("client", "volumetric_light_brightness", settings.volumetric_light_brightness);
-        config_setf("client", "volumetric_light_range", settings.volumetric_light_range);
         config_seti("client", "lens_flare", settings.lens_flare);
         config_seti("client", "chromatic_aberration", settings.chromatic_aberration);
         config_setf("client", "chromatic_aberration_strength", settings.chromatic_aberration_strength);
@@ -546,13 +542,6 @@ IMPORT_SETTING(settings.camera_movement, camera_movement, atoi(value));
                 IMPORT_SETTING(settings.saturation, saturation, fmaxf(-100.0F, fminf(100.0F, atof(value))));
                 IMPORT_SETTING(settings.contrast, contrast, fmaxf(-100.0F, fminf(100.0F, atof(value))));
                 IMPORT_SETTING(settings.vignette, vignette, fmaxf(0.0F, fminf(100.0F, atof(value))));
-                IMPORT_SETTING(settings.volumetric_light, volumetric_light, atoi(value));
-                IMPORT_SETTING(settings.volumetric_light_strength, volumetric_light_strength,
-                               fmaxf(0.0F, fminf(1.0F, atof(value))));
-                IMPORT_SETTING(settings.volumetric_light_brightness, volumetric_light_brightness,
-                               fmaxf(0.0F, fminf(1.0F, atof(value))));
-                IMPORT_SETTING(settings.volumetric_light_range, volumetric_light_range,
-                               fmaxf(0.1F, fminf(2.0F, atof(value))));
                 IMPORT_SETTING(settings.lens_flare, lens_flare, atoi(value));
                 IMPORT_SETTING(settings.chromatic_aberration, chromatic_aberration, atoi(value));
                 IMPORT_SETTING(settings.chromatic_aberration_strength, chromatic_aberration_strength,
@@ -1336,50 +1325,6 @@ void config_reload() {
                                  .name = "Wave tile size",
                                  .category = "Visual Effects",
                                  .subcategory = "Water",
-                         });
-        list_add(&config_settings,
-                         &(struct config_setting) {
-                                 .value = &settings_tmp.volumetric_light,
-                                 .type = CONFIG_TYPE_INT,
-                                 .min = 0,
-                                 .max = 1,
-                                 .help = "Enable volumetric light scattering (a.k.a. Godrays)",
-                                 .name = "Volumetric light",
-                                 .category = "Visual Effects",
-                                 .subcategory = "Lighting",
-                         });
-        list_add(&config_settings,
-                         &(struct config_setting) {
-                                 .value = &settings_tmp.volumetric_light_strength,
-                                 .type = CONFIG_TYPE_FLOAT,
-                                 .min = 0,
-                                 .max = 1,
-                                 .help = "Strength of volumetric light (0 = off, 1 = strongest)",
-                                 .name = "Volumetric light strength",
-                                 .category = "Visual Effects",
-                                 .subcategory = "Lighting",
-                         });
-        list_add(&config_settings,
-                         &(struct config_setting) {
-                                 .value = &settings_tmp.volumetric_light_brightness,
-                                 .type = CONFIG_TYPE_FLOAT,
-                                 .min = 0,
-                                 .max = 1,
-                                 .help = "Brightness of the white ray glow (0=none, 1=full)",
-                                 .name = "Ray brightness",
-                                 .category = "Visual Effects",
-                                 .subcategory = "Lighting",
-                         });
-        list_add(&config_settings,
-                         &(struct config_setting) {
-                                 .value = &settings_tmp.volumetric_light_range,
-                                 .type = CONFIG_TYPE_FLOAT,
-                                 .min = 0.1F,
-                                 .max = 2.0F,
-                                 .help = "Range of rays from sun (0.1=short, 2=full screen)",
-                                 .name = "Ray range",
-                                 .category = "Visual Effects",
-                                 .subcategory = "Lighting",
                          });
         list_add(&config_settings,
                          &(struct config_setting) {
