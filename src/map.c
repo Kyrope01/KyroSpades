@@ -63,7 +63,10 @@ void fog_color_render(float out[3]) {
            perceived brightness the user picked in the color picker. */
         /* The server's fog color is the daylight sky. Scale only its render
            value, not fog_color itself (used by the color picker and packets). */
-        float scale = (settings.filmic_tonemapping ? 0.9F : 1.0F) * lighting_sunlight_scale();
+        /* Sky brightness already lives in the stored fog colour. Multiplying
+           by its derived daylight level here would darken dusk twice. */
+        float scale = (settings.filmic_tonemapping ? 0.9F : 1.0F)
+                      * settings.sunlight_intensity * 0.01F;
         out[0] = fog_color[0] * scale;
         out[1] = fog_color[1] * scale;
         out[2] = fog_color[2] * scale;

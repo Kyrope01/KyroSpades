@@ -40,6 +40,7 @@
 #include "player.h"
 #include "network.h"
 #include "teamplay.h"
+#include "flashlight_ext.h"
 #include "particle.h"
 #include "texture.h"
 #include "chunk.h"
@@ -574,6 +575,7 @@ void read_PacketCreatePlayer(void* data, int len) {
         if(p->player_id < PLAYERS_MAX) {
                 if(!players[p->player_id].connected)
                         printJoinMsg(p->team, p->name);
+                flashlight_ext_reset_player(p->player_id, false);
                 player_save_corpse(p->player_id);
                 log_debug("Player created: id=%i name=%s team=%i", p->player_id, p->name, p->team);
                 player_reset(&players[p->player_id]);
@@ -638,6 +640,7 @@ void read_PacketPlayerLeft(void* data, int len) {
                 log_debug("Player left: id=%i name=%s", p->player_id, players[p->player_id].name);
                 player_save_corpse(p->player_id);
                 teamplay_player_left(p->player_id);
+                flashlight_ext_reset_player(p->player_id, true);
                 players[p->player_id].connected = 0;
                 players[p->player_id].alive = 0;
                 players[p->player_id].score = 0;
@@ -650,6 +653,8 @@ void read_PacketPlayerLeft(void* data, int len) {
 }
 
 void read_PacketMapStart(void* data, int len) {
+        /* Seeking skips map decompression, not the extension's state reset. */
+        flashlight_ext_reset_map();
         if(demo_is_seeking()) return;
         teamplay_reset_map();
         lighting_flashlight_reset();
@@ -890,6 +895,7 @@ void read_PacketKillAction(void* data, int len) {
                         }
                 }
                 players[p->player_id].alive = 0;
+                flashlight_ext_reset_player(p->player_id, false);
                 players[p->player_id].input.keys.packed = 0;
                 players[p->player_id].input.buttons.packed = 0;
                 player_save_corpse(p->player_id);
@@ -1416,8 +1422,13 @@ void read_PacketExtInfo(void* data, int len) {
                         if(p->entries[k].id == TEAMPLAY_EXTENSION_ID && p->entries[k].version >= 1)
                                 supports_teamplay = true;
                 teamplay_set_negotiated(supports_teamplay);
+                bool supports_flashlight = false;
+                for(int k = 0; k < p->length; k++)
+                        if(p->entries[k].id == FLASHLIGHT_EXT_ID && p->entries[k].version >= 1)
+                                supports_flashlight = true;
+                flashlight_ext_set_negotiated(supports_flashlight);
                 struct PacketExtInfo reply;
-                reply.length = supports_teamplay ? 5 : 4;
+                reply.length = 4 + (supports_teamplay ? 1 : 0) + (supports_flashlight ? 1 : 0);
                 reply.entries[0] = (struct PacketExtInfoEntry) {
                         .id = EXT_PLAYER_PROPERTIES,
                         .version = 1,
@@ -1435,6 +1446,8 @@ void read_PacketExtInfo(void* data, int len) {
                         .version = 1,
                 };
                 if(supports_teamplay) reply.entries[4] = (struct PacketExtInfoEntry){ TEAMPLAY_EXTENSION_ID, 1 };
+                if(supports_flashlight) reply.entries[4 + (supports_teamplay ? 1 : 0)]
+                        = (struct PacketExtInfoEntry){ FLASHLIGHT_EXT_ID, 1 };
                 network_send(PACKET_EXTINFO_ID, &reply, reply.length * sizeof(struct PacketExtInfoEntry) + 1);
         }
 }
@@ -1518,6 +1531,7 @@ unsigned int network_ping() {
 
 void network_disconnect() {
         teamplay_reset_connection();
+        flashlight_ext_reset_connection();
         lighting_flashlight_reset();
         glowing_blocks_clear();
         if(demo_is_playing()) {
@@ -1593,6 +1607,7 @@ int network_connect_sub(char* ip, int port, int version) {
 
 int network_connect(char* ip, int port) {
         teamplay_reset_connection();
+        flashlight_ext_reset_connection();
         log_info("Connecting to %s at port %i", ip, port);
         if(network_connected) {
                 network_disconnect();
@@ -1709,6 +1724,7 @@ void network_service(void) {
                                 network_logged_in = 0;
                                 network_map_transfer_end = 0;
                                 teamplay_reset_connection();
+                                flashlight_ext_reset_connection();
                                 lighting_flashlight_reset();
                                 glowing_blocks_clear();
                                 player_clear_corpses();
@@ -1842,6 +1858,10 @@ int network_status() {
         return network_connected;
 }
 
+static void read_PacketFlashlight(void* data, int len) {
+        if(len > 0 && data) flashlight_ext_receive(data, (size_t)len);
+}
+
 static void read_PacketTeamplay(void* data, int len) {
         if(len <= 0 || !data) return;
         teamplay_receive(data, (size_t)len, demo_is_seeking(),
@@ -1889,5 +1909,6 @@ void network_init() {
         packets[PACKET_VERSIONGET_ID] = read_PacketVersionGet;
         packets[PACKET_EXTINFO_ID] = read_PacketExtInfo;
         packets[TEAMPLAY_PACKET_ID] = read_PacketTeamplay;
+        packets[FLASHLIGHT_PACKET_ID] = read_PacketFlashlight;
         packets[PACKET_EXT_BASE + EXT_PLAYER_PROPERTIES] = read_PacketPlayerProperties;
 }

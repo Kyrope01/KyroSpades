@@ -33,6 +33,7 @@
 #include "common.h"
 #include "glx.h"
 #include "lighting.h"
+#include "flashlight_ext.h"
 #include "shadow.h"
 #include "glowing_blocks.h"
 #include "list.h"
@@ -3781,10 +3782,17 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
                            && players[local_player_id].connected
                            && players[local_player_id].alive
                            && players[local_player_id].team != TEAM_SPECTATOR) {
-                                /* The all-player option controls remote lamps only;
-                                   our flashlight always follows the local toggle. */
-                                if(lighting_flashlight_toggle())
+                                /* A V1 server confirms the new state; do not
+                                   locally predict a denied light request. */
+                                if(flashlight_ext_negotiated()) {
+                                        if(network_connected && !demo_is_playing()) {
+                                                uint8_t request[3];
+                                                flashlight_ext_request(local_player_id, request);
+                                                network_send(FLASHLIGHT_PACKET_ID, request, sizeof(request));
+                                        }
+                                } else if(lighting_flashlight_toggle()) {
                                         sound_create(SOUND_LOCAL, &sound_switch, 0.0F, 0.0F, 0.0F);
+                                }
                         }
 
                         if(key == WINDOW_KEY_COMMAND) {

@@ -23,13 +23,29 @@ bool lighting_supported(void);
 /* The Core world shader can remain active for live directional shadows even
  * when the point-light master is off. */
 bool lighting_world_supported(void);
-/* Scales direct sunlight and ambient daylight (point/flash lights remain independent). */
+/* AoS has no separate time-of-day packet: the server's fog is the available
+ * sky brightness signal. Use the brightest channel, not luminance, so a
+ * saturated sunset stays bright. Keep a small night floor for navigation. */
+static inline unsigned int lighting_sky_level(float r, float g, float b) {
+        float peak = r > g ? r : g;
+        if(b > peak) peak = b;
+        if(!(peak >= 0.0F)) peak = 0.0F;
+        if(peak > 1.0F) peak = 1.0F;
+        unsigned int level = (unsigned int)(peak * 255.0F + 0.5F);
+        return level < 20U ? 20U : level;
+}
+/* Scales direct sunlight AND ambient daylight; dynamic lights stay independent.
+ * Called from main-thread rendering and chunk meshing workers. */
 float lighting_sunlight_scale(void);
+/* Publish the current server sky colour on the render thread. */
+void lighting_update_sky_color(float r, float g, float b);
 
 /* OpenSpades-style local flashlight. It starts off, toggles with the user's
  * control binding, and only emits while update() marks the local view usable. */
 bool lighting_flashlight_toggle(void);
 bool lighting_flashlight_enabled(void);
+/* Apply a server-confirmed state; unlike the legacy toggle, never predicts a reply. */
+void lighting_flashlight_set_server_state(bool enabled);
 void lighting_flashlight_reset(void);
 void lighting_flashlight_update(float dt, bool usable,
                                 float x, float y, float z,

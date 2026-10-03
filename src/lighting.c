@@ -11,19 +11,46 @@
 
 #include "common.h"
 #include "camera.h"
+#include "chunk.h"
 #include "config.h"
 #include "glx.h"
 #include "lighting.h"
 #include "map.h"
 #include "matrix.h"
 #include "network.h"
+#include "flashlight_ext.h"
 #include "player.h"
 #include "shadow.h"
 #include "texture.h"
 #include "window.h"
 
+/* A single atomic byte avoids a worker-thread race on fog_color[] while
+ * meshing. GPU-lit geometry reads the new level each frame without a rebuild. */
+static unsigned int sky_level = 255U;
+static unsigned int last_baked_level = 255U;
+static double last_sky_remesh = -1000.0;
+
 float lighting_sunlight_scale(void) {
-        return settings.sunlight_intensity * 0.01F;
+        unsigned int level = __atomic_load_n(&sky_level, __ATOMIC_RELAXED);
+        return settings.sunlight_intensity * 0.01F * ((float)level / 255.0F);
+}
+
+void lighting_update_sky_color(float r, float g, float b) {
+        unsigned int level = lighting_sky_level(r, g, b);
+        __atomic_store_n(&sky_level, level, __ATOMIC_RELAXED);
+        /* Only fallback meshes bake daylight. Throttle their rebuilds during
+         * gradual night/day transitions; Core/programmable paths are live. */
+        if(!lighting_world_supported() && network_connected && !network_map_transfer
+           && (level > last_baked_level ? level - last_baked_level : last_baked_level - level) >= 20U) {
+                double now = window_time();
+                if(now - last_sky_remesh >= 5.0) {
+                        last_baked_level = level;
+                        last_sky_remesh = now;
+                        chunk_rebuild_all();
+                }
+        } else if(lighting_world_supported()) {
+                last_baked_level = level;
+        }
 }
 
 #define LIGHTING_FLASH_CAPACITY 32
@@ -48,10 +75,12 @@ struct lighting_frame_light {
         float radius;
         float intensity;
         float score;
-        /* A synthetic remote flashlight uses the point slot's negative radius
-           as a type tag and its RGB channels for direction, not color. This
-           keeps the four-light GLSL ES 2.0 uniform budget unchanged. */
+        /* A remote spotlight uses a negative radius as a type tag and its
+           light RGB slots for direction. The compact spot color/cone array
+           carries the server-defined beam parameters separately. */
         float direction[3];
+        float spot_color[3];
+        float cone_cos;
         bool spotlight;
 };
 
@@ -103,6 +132,7 @@ static GLint uniform_fog_color = -1;
 static GLint uniform_light_position_radius = -1;
 static GLint uniform_light_color_intensity = -1;
 static GLint uniform_flashlight_direction = -1;
+static GLint uniform_spot_color_cone = -1;
 
 #ifndef GLX_PROGRAMMABLE
 /* Desktop compatibility meshes use legacy glVertex/glNormal/glColor arrays, so
@@ -131,6 +161,7 @@ static const char* model_fragment_shader =
         "uniform float u_LightScale;\n"
         "uniform vec4 u_LightPositionRadius[4];\n"
         "uniform vec4 u_LightColorIntensity[4];\n"
+        "uniform vec4 u_SpotColorCone[4];\n"
         "uniform vec4 u_FlashlightDirection;\n"
         "uniform vec3 u_Camera;\n"
         "uniform float u_FogDistance;\n"
@@ -155,11 +186,11 @@ static const char* model_fragment_shader =
         "            vec3 direction = delta / max(distance_to_light, 0.0001);\n"
         "            float facing = 0.18 + 0.82 * max(dot(normal, direction), 0.0);\n"
         "            if(pr.w < 0.0) {\n"
-        "                float cone = smoothstep(0.70710678, 0.82710678,\n"
+        "                float cone = smoothstep(u_SpotColorCone[i].w, min(u_SpotColorCone[i].w + 0.12, 1.0),\n"
         "                                        dot(-direction, normalize(ci.rgb)));\n"
         "                float fill = clamp(1.0 - distance_to_light / 10.0, 0.0, 1.0);\n"
-        "                fill = 0.30 * fill * fill;\n"
-        "                light += vec3(1.0, 0.70, 0.50) * ci.a * (cone * attenuation + fill) * facing;\n"
+        "                fill = 0.30 * fill * fill * attenuation;\n"
+        "                light += u_SpotColorCone[i].rgb * ci.a * (cone * attenuation + fill) * facing;\n"
         "            } else {\n"
         "                light += ci.rgb * ci.a * attenuation * facing;\n"
         "            }\n"
@@ -171,14 +202,14 @@ static const char* model_fragment_shader =
         "        vec3 from_light = v_WorldPosition - pr.xyz;\n"
         "        float distance_to_light = length(from_light);\n"
         "        vec3 direction = from_light / max(distance_to_light, 0.0001);\n"
-        "        float cone = smoothstep(u_FlashlightDirection.w, min(u_FlashlightDirection.w + 0.12, 0.999),\n"
+        "        float cone = smoothstep(u_SpotColorCone[3].w, min(u_SpotColorCone[3].w + 0.12, 1.0),\n"
         "                                dot(direction, normalize(u_FlashlightDirection.xyz)));\n"
         "        float range = clamp(1.0 - distance_to_light / max(pr.w, 0.0001), 0.0, 1.0);\n"
         "        range *= range;\n"
         "        float diffuse = max(dot(normal, -direction), 0.0);\n"
         "        float fill = clamp(1.0 - distance_to_light / 10.0, 0.0, 1.0);\n"
-        "        fill = 0.30 * fill * fill;\n"
-        "        light += ci.rgb * ci.a * (cone * range + fill) * (0.18 + 0.82 * diffuse);\n"
+        "        fill = 0.30 * fill * fill * range;\n"
+        "        light += u_SpotColorCone[3].rgb * ci.a * (cone * range + fill) * (0.18 + 0.82 * diffuse);\n"
         "    }\n"
         "    vec3 color = v_Color.rgb * u_Tint * light;\n"
         "    float distance_fog = clamp(length(v_WorldPosition.xz - u_Camera.xz) * u_FogDistance, 0.0, 1.0);\n"
@@ -252,6 +283,7 @@ static const char* world_fragment_shader =
         "uniform vec3 u_FogColor;\n"
         "uniform vec4 u_LightPositionRadius[4];\n"
         "uniform vec4 u_LightColorIntensity[4];\n"
+        "uniform vec4 u_SpotColorCone[4];\n"
         "uniform vec4 u_FlashlightDirection;\n"
         "varying vec4 v_Color;\n"
         "varying vec2 v_TexCoord;\n"
@@ -286,11 +318,11 @@ static const char* world_fragment_shader =
         "            float diffuse = max(dot(normal, light_direction), 0.0);\n"
         "            float facing = 0.18 + 0.82 * diffuse;\n"
         "            if(position_radius.w < 0.0) {\n"
-        "                float cone = smoothstep(0.70710678, 0.82710678,\n"
+        "                float cone = smoothstep(u_SpotColorCone[i].w, min(u_SpotColorCone[i].w + 0.12, 1.0),\n"
         "                                        dot(-light_direction, normalize(color_intensity.rgb)));\n"
         "                float fill = clamp(1.0 - distance_ratio * radius / 10.0, 0.0, 1.0);\n"
-        "                fill = 0.30 * fill * fill;\n"
-        "                added += vec3(1.0, 0.70, 0.50) * color_intensity.a\n"
+        "                fill = 0.30 * fill * fill * attenuation;\n"
+        "                added += u_SpotColorCone[i].rgb * color_intensity.a\n"
         "                         * (cone * attenuation + fill) * facing;\n"
         "            } else {\n"
         "                added += color_intensity.rgb * color_intensity.a * attenuation * facing;\n"
@@ -303,14 +335,14 @@ static const char* world_fragment_shader =
         "        vec3 from_light = v_WorldPosition - pr.xyz;\n"
         "        float light_distance = length(from_light);\n"
         "        vec3 ray_direction = from_light / max(light_distance, 0.0001);\n"
-        "        float cone = smoothstep(u_FlashlightDirection.w, min(u_FlashlightDirection.w + 0.12, 0.999),\n"
+        "        float cone = smoothstep(u_SpotColorCone[3].w, min(u_SpotColorCone[3].w + 0.12, 1.0),\n"
         "                                dot(ray_direction, normalize(u_FlashlightDirection.xyz)));\n"
         "        float range = clamp(1.0 - light_distance / max(pr.w, 0.0001), 0.0, 1.0);\n"
         "        range *= range;\n"
         "        float diffuse = max(dot(normal, -ray_direction), 0.0);\n"
         "        float fill = clamp(1.0 - light_distance / 10.0, 0.0, 1.0);\n"
-        "        fill = 0.30 * fill * fill;\n"
-        "        added += ci.rgb * ci.a * (cone * range + fill) * (0.18 + 0.82 * diffuse);\n"
+        "        fill = 0.30 * fill * fill * range;\n"
+        "        added += u_SpotColorCone[3].rgb * ci.a * (cone * range + fill) * (0.18 + 0.82 * diffuse);\n"
         "    }\n"
         "    vec3 sun_direction = normalize(u_SunDirection);\n"
         "    float sun_diffuse = max(dot(normal, sun_direction), 0.0);\n"
@@ -362,6 +394,7 @@ static const char* world_fragment_shader_330 =
         "uniform vec3 u_FogColor;\n"
         "uniform vec4 u_LightPositionRadius[4];\n"
         "uniform vec4 u_LightColorIntensity[4];\n"
+        "uniform vec4 u_SpotColorCone[4];\n"
         "uniform vec4 u_FlashlightDirection;\n"
         "uniform sampler2D u_ShadowMap;\n"
         "uniform mat4 u_ShadowMatrix;\n"
@@ -424,11 +457,11 @@ static const char* world_fragment_shader_330 =
         "            float diffuse = max(dot(normal, light_direction), 0.0);\n"
         "            float facing = 0.18 + 0.82 * diffuse;\n"
         "            if(position_radius.w < 0.0) {\n"
-        "                float cone = smoothstep(0.70710678, 0.82710678,\n"
+        "                float cone = smoothstep(u_SpotColorCone[i].w, min(u_SpotColorCone[i].w + 0.12, 1.0),\n"
         "                                        dot(-light_direction, normalize(color_intensity.rgb)));\n"
         "                float fill = clamp(1.0 - distance_ratio * radius / 10.0, 0.0, 1.0);\n"
-        "                fill = 0.30 * fill * fill;\n"
-        "                added += vec3(1.0, 0.70, 0.50) * color_intensity.a\n"
+        "                fill = 0.30 * fill * fill * attenuation;\n"
+        "                added += u_SpotColorCone[i].rgb * color_intensity.a\n"
         "                         * (cone * attenuation + fill) * facing;\n"
         "            } else {\n"
         "                added += color_intensity.rgb * color_intensity.a * attenuation * facing;\n"
@@ -441,14 +474,14 @@ static const char* world_fragment_shader_330 =
         "        vec3 from_light = v_WorldPosition - pr.xyz;\n"
         "        float light_distance = length(from_light);\n"
         "        vec3 ray_direction = from_light / max(light_distance, 0.0001);\n"
-        "        float cone = smoothstep(u_FlashlightDirection.w, min(u_FlashlightDirection.w + 0.12, 0.999),\n"
+        "        float cone = smoothstep(u_SpotColorCone[3].w, min(u_SpotColorCone[3].w + 0.12, 1.0),\n"
         "                                dot(ray_direction, normalize(u_FlashlightDirection.xyz)));\n"
         "        float range = 1.0 - smoothstep(0.0, 1.0, light_distance / max(pr.w, 0.0001));\n"
         "        range *= range;\n"
         "        float diffuse = max(dot(normal, -ray_direction), 0.0);\n"
         "        float fill = clamp(1.0 - light_distance / 10.0, 0.0, 1.0);\n"
-        "        fill = 0.30 * fill * fill;\n"
-        "        added += ci.rgb * ci.a * (cone * range + fill) * (0.18 + 0.82 * diffuse);\n"
+        "        fill = 0.30 * fill * fill * range;\n"
+        "        added += u_SpotColorCone[3].rgb * ci.a * (cone * range + fill) * (0.18 + 0.82 * diffuse);\n"
         "    }\n"
         "    vec3 sun_direction = normalize(u_SunDirection);\n"
         "    float sun_diffuse = max(dot(normal, sun_direction), 0.0);\n"
@@ -482,6 +515,7 @@ static void lighting_cache_uniforms(void) {
         uniform_light_position_radius = glx_uniform_location(world_program, "u_LightPositionRadius[0]");
         uniform_light_color_intensity = glx_uniform_location(world_program, "u_LightColorIntensity[0]");
         uniform_flashlight_direction = glx_uniform_location(world_program, "u_FlashlightDirection");
+        uniform_spot_color_cone = glx_uniform_location(world_program, "u_SpotColorCone[0]");
 }
 
 static bool lighting_world_program_required(void) {
@@ -661,6 +695,15 @@ bool lighting_flashlight_toggle(void) {
 
 bool lighting_flashlight_enabled(void) { return flashlight.enabled; }
 
+void lighting_flashlight_set_server_state(bool enabled) {
+        if(flashlight.enabled == enabled) return;
+        flashlight.enabled = enabled;
+        flashlight.turned_on = window_time();
+        flashlight.frame_active = false;
+        flashlight.direction_initialized = false;
+}
+
+
 void lighting_flashlight_reset(void) {
         memset(&flashlight, 0, sizeof(flashlight));
 }
@@ -671,6 +714,10 @@ void lighting_flashlight_update(float dt, bool usable,
         flashlight.frame_active = false;
         if(!flashlight.enabled || !usable || !lighting_supported())
                 return;
+        if(flashlight_ext_negotiated()) {
+                struct flashlight_beam beam = flashlight_ext_beam(local_player_id);
+                if(!beam.reach || !beam.cone) return;
+        }
 
         float target_length = sqrtf(direction_x * direction_x + direction_y * direction_y
                                     + direction_z * direction_z);
@@ -878,15 +925,15 @@ void lighting_prepare_frame(double now, float view_x, float view_y, float view_z
         for(int i = 0; i < pending_count; i++)
                 lighting_consider_point(&submitted_lights[i], view_x, view_y, view_z);
 
-        if(settings.all_player_flashlights && network_connected && !network_map_transfer) {
-                /* No server flashlight state exists. This is strictly a local
-                   visual approximation of every living remote player's lamp;
-                   the existing four-slot relevance selection keeps GPU cost
-                   bounded even on servers with many players. */
+        if((settings.all_player_flashlights || flashlight_ext_negotiated()) && network_connected && !network_map_transfer) {
+                /* On V1 servers use only server-lit players; legacy servers
+                   retain the optional all-player approximation. Both use
+                   the existing four-slot relevance selection. */
                 float alpha = settings.render_interpolation ? physics_tick_alpha : 1.0F;
                 for(int i = 0; i < PLAYERS_MAX; i++) {
                         if(i == local_player_id || !players[i].connected || !players[i].alive
-                           || players[i].team == TEAM_SPECTATOR)
+                           || (flashlight_ext_negotiated() ? !flashlight_ext_on(i)
+                                                         : players[i].team == TEAM_SPECTATOR))
                                 continue;
                         const struct Player* p = &players[i];
                         float dx = p->orientation_smooth.x;
@@ -925,7 +972,13 @@ void lighting_prepare_frame(double now, float view_x, float view_y, float view_z
                         source.direction[0] = dx;
                         source.direction[1] = dy;
                         source.direction[2] = dz;
-                        source.radius = 60.0F;
+                        struct flashlight_beam beam = flashlight_ext_beam(i);
+                        if(!beam.reach || !beam.cone) continue;
+                        source.radius = beam.reach;
+                        source.spot_color[0] = beam.red / 255.0F;
+                        source.spot_color[1] = beam.green / 255.0F;
+                        source.spot_color[2] = beam.blue / 255.0F;
+                        source.cone_cos = cosf(beam.cone * (PI / 360.0F));
                         source.intensity = 1.5F;
 #ifdef OPENGL_CORE
                         if(settings.hdr_rendering)
@@ -950,7 +1003,7 @@ void lighting_prepare_frame(double now, float view_x, float view_y, float view_z
 
 bool lighting_remote_flashlight_position(int player_id, float position[3]) {
         if(!position || player_id < 0 || player_id >= PLAYERS_MAX
-           || !settings.all_player_flashlights || !lighting_supported()
+           || !(settings.all_player_flashlights || flashlight_ext_negotiated()) || !lighting_supported()
            || !network_connected || network_map_transfer
            || !remote_flashlights[player_id].active)
                 return false;
@@ -959,9 +1012,10 @@ bool lighting_remote_flashlight_position(int player_id, float position[3]) {
 }
 
 static void lighting_build_uniform_arrays(float* position_radius, float* color_intensity,
-                                          float flashlight_direction[4]) {
+                                          float flashlight_direction[4], float spot_color_cone[LIGHTING_SHADER_LIGHTS * 4]) {
         memset(position_radius, 0, sizeof(float) * LIGHTING_SHADER_LIGHTS * 4);
         memset(color_intensity, 0, sizeof(float) * LIGHTING_SHADER_LIGHTS * 4);
+        memset(spot_color_cone, 0, sizeof(float) * LIGHTING_SHADER_LIGHTS * 4);
         flashlight_direction[0] = 0.0F;
         flashlight_direction[1] = 0.0F;
         flashlight_direction[2] = 1.0F;
@@ -980,6 +1034,11 @@ static void lighting_build_uniform_arrays(float* position_radius, float* color_i
                         color_intensity[i * 4 + axis] = frame_lights[i].spotlight
                                 ? frame_lights[i].direction[axis] : frame_lights[i].color[axis];
                 color_intensity[i * 4 + 3] = frame_lights[i].intensity * intensity_multiplier;
+                if(frame_lights[i].spotlight) {
+                        for(int axis = 0; axis < 3; ++axis)
+                                spot_color_cone[i * 4 + axis] = frame_lights[i].spot_color[axis];
+                        spot_color_cone[i * 4 + 3] = frame_lights[i].cone_cos;
+                }
         }
 
         if(flashlight.frame_active) {
@@ -994,7 +1053,12 @@ static void lighting_build_uniform_arrays(float* position_radius, float* color_i
                 position_radius[i * 4 + 0] = flashlight.position[0];
                 position_radius[i * 4 + 1] = flashlight.position[1];
                 position_radius[i * 4 + 2] = flashlight.position[2];
-                position_radius[i * 4 + 3] = 60.0F;
+                struct flashlight_beam beam = flashlight_ext_beam(local_player_id);
+                position_radius[i * 4 + 3] = beam.reach;
+                spot_color_cone[i * 4 + 0] = beam.red / 255.0F;
+                spot_color_cone[i * 4 + 1] = beam.green / 255.0F;
+                spot_color_cone[i * 4 + 2] = beam.blue / 255.0F;
+                spot_color_cone[i * 4 + 3] = cosf(beam.cone * (PI / 360.0F));
                 color_intensity[i * 4 + 0] = 1.0F;
                 color_intensity[i * 4 + 1] = 0.70F;
                 color_intensity[i * 4 + 2] = 0.50F;
@@ -1002,7 +1066,7 @@ static void lighting_build_uniform_arrays(float* position_radius, float* color_i
                 flashlight_direction[0] = flashlight.direction[0];
                 flashlight_direction[1] = flashlight.direction[1];
                 flashlight_direction[2] = flashlight.direction[2];
-                flashlight_direction[3] = 0.70710678F; /* cos(90 degree cone / 2) */
+                flashlight_direction[3] = spot_color_cone[i * 4 + 3];
         }
 }
 
@@ -1016,13 +1080,17 @@ void lighting_apply_program(unsigned int program) {
         float position_radius[LIGHTING_SHADER_LIGHTS * 4];
         float color_intensity[LIGHTING_SHADER_LIGHTS * 4];
         float flashlight_direction[4];
-        lighting_build_uniform_arrays(position_radius, color_intensity, flashlight_direction);
+        float spot_color_cone[LIGHTING_SHADER_LIGHTS * 4];
+        lighting_build_uniform_arrays(position_radius, color_intensity, flashlight_direction, spot_color_cone);
         GLint location = glx_uniform_location((GLuint)program, "u_LightPositionRadius[0]");
         if(location >= 0)
                 glUniform4fv(location, LIGHTING_SHADER_LIGHTS, position_radius);
         location = glx_uniform_location((GLuint)program, "u_LightColorIntensity[0]");
         if(location >= 0)
                 glUniform4fv(location, LIGHTING_SHADER_LIGHTS, color_intensity);
+        location = glx_uniform_location((GLuint)program, "u_SpotColorCone[0]");
+        if(location >= 0)
+                glUniform4fv(location, LIGHTING_SHADER_LIGHTS, spot_color_cone);
         location = glx_uniform_location((GLuint)program, "u_FlashlightDirection");
         if(location >= 0)
                 glUniform4fv(location, 1, flashlight_direction);
@@ -1155,7 +1223,8 @@ bool lighting_world_begin(bool textured) {
         float position_radius[LIGHTING_SHADER_LIGHTS * 4];
         float color_intensity[LIGHTING_SHADER_LIGHTS * 4];
         float flashlight_direction[4];
-        lighting_build_uniform_arrays(position_radius, color_intensity, flashlight_direction);
+        float spot_color_cone[LIGHTING_SHADER_LIGHTS * 4];
+        lighting_build_uniform_arrays(position_radius, color_intensity, flashlight_direction, spot_color_cone);
 
         if(uniform_light_position_radius >= 0)
                 glUniform4fv(uniform_light_position_radius, LIGHTING_SHADER_LIGHTS, position_radius);
@@ -1163,6 +1232,8 @@ bool lighting_world_begin(bool textured) {
                 glUniform4fv(uniform_light_color_intensity, LIGHTING_SHADER_LIGHTS, color_intensity);
         if(uniform_flashlight_direction >= 0)
                 glUniform4fv(uniform_flashlight_direction, 1, flashlight_direction);
+        if(uniform_spot_color_cone >= 0)
+                glUniform4fv(uniform_spot_color_cone, LIGHTING_SHADER_LIGHTS, spot_color_cone);
         if(uniform_texture_enabled >= 0)
                 glUniform1f(uniform_texture_enabled, textured ? 1.0F : 0.0F);
         bool use_material_maps = has_material_maps;

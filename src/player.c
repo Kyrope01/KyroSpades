@@ -44,6 +44,7 @@
 #include "bloodmarks.h"
 #include "damagenumbers.h"
 #include "lighting.h"
+#include "flashlight_ext.h"
 #include <math.h>
 #include "cameracontroller.h"
 static float os_sprint_state=0, os_sprint_smooth=0, os_raise_state=1, os_last_time=0, os_aim_state=0, os_aim_smooth=0;
@@ -1407,7 +1408,14 @@ static void player_render_flashlight_tip(int id) {
 		float vertices[18];
 		for(int i = 0; i < 6; i++)
 			memcpy(&vertices[i * 3], corners[order[i]], 3 * sizeof(float));
-		glColor3f(1.0F, pass ? 0.95F : 0.70F, pass ? 0.80F : 0.45F);
+		if(flashlight_ext_negotiated()) {
+			struct flashlight_beam beam = flashlight_ext_beam(id);
+			float scale = pass ? 1.0F : 0.70F;
+			glColor3f(scale * beam.red / 255.0F, scale * beam.green / 255.0F,
+			            scale * beam.blue / 255.0F);
+		} else {
+			glColor3f(1.0F, pass ? 0.95F : 0.70F, pass ? 0.80F : 0.45F);
+		}
 		glx_draw_vertices_3d(vertices, 6, GL_TRIANGLES);
 	}
 	glColor4f(previous_color[0], previous_color[1], previous_color[2], previous_color[3]);

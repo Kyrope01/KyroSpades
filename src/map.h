@@ -33,8 +33,9 @@ extern int map_size_z;
 extern float fog_color[4];
 extern float sun_dir[3];
 
-/* fog_color_render: effective render-time sky/fog color (sunlight intensity
-   and filmic correction applied). The stored fog_color remains unchanged. */
+/* fog_color_render: effective render-time sky/fog color (local sunlight
+   setting and filmic correction applied). Night sky level is already in
+   fog_color itself, so it must not be multiplied in again. */
 void fog_color_render(float out[3]);
 
 struct Point {
