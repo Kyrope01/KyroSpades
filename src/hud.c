@@ -734,14 +734,14 @@ static void hud_ingame_render3D() {
                 if(gamestate.gamemode_type == GAMEMODE_CTF) {
                         switch(players[local_player_id].team) {
                                 case TEAM_1:
-                                        if(gamestate.gamemode.ctf.team_2_intel
+                                        if(TEAM_2_INTEL_HELD(gamestate.gamemode.ctf)
                                            && gamestate.gamemode.ctf.team_2_intel_location.held.player_id == local_player_id) {
                                                 rotating_model = &model_intel;
                                                 rotating_model_team = TEAM_2;
                                         }
                                         break;
                                 case TEAM_2:
-                                        if(gamestate.gamemode.ctf.team_1_intel
+                                        if(TEAM_1_INTEL_HELD(gamestate.gamemode.ctf)
                                            && gamestate.gamemode.ctf.team_1_intel_location.held.player_id == local_player_id) {
                                                 rotating_model = &model_intel;
                                                 rotating_model_team = TEAM_1;
@@ -2207,9 +2207,9 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                                                 450 * scalef - 8.F - (24 * (cntt[mul - 1] + 1)), 16, id_str);
                                 }
                                 if(gamestate.gamemode_type == GAMEMODE_CTF
-                                   && ((gamestate.gamemode.ctf.team_1_intel
+                                   && ((TEAM_1_INTEL_HELD(gamestate.gamemode.ctf)
                                                 && gamestate.gamemode.ctf.team_1_intel_location.held.player_id == pt[k].id)
-                                           || (gamestate.gamemode.ctf.team_2_intel
+                                           || (TEAM_2_INTEL_HELD(gamestate.gamemode.ctf)
                                                    && gamestate.gamemode.ctf.team_2_intel_location.held.player_id == pt[k].id))) {
                                         texture_draw(&texture_intel,
                                                                  x_offset + 300.F - font_length(16.F, id_str) - 8.F - 24.F,
@@ -2799,7 +2799,7 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 tracer_minimap(1, scalef, minimap_x, minimap_y, 512.0F);
 
                                 if(gamestate.gamemode_type == GAMEMODE_CTF) {
-                                        if(!gamestate.gamemode.ctf.team_1_intel) {
+                                        if(!TEAM_1_INTEL_HELD(gamestate.gamemode.ctf)) {
                                                 glColor3ub(gamestate.team_1.red, gamestate.team_1.green, gamestate.team_1.blue);
                                                 texture_draw_rotated(
                                                         &texture_intel, minimap_x + gamestate.gamemode.ctf.team_1_intel_location.dropped.x * scalef,
@@ -2819,7 +2819,7 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                                         minimap_y - gamestate.gamemode.ctf.team_1_base.y * scalef, 12 * scalef, 12 * scalef, 0.0F);
                                         }
 
-                                        if(!gamestate.gamemode.ctf.team_2_intel) {
+                                        if(!TEAM_2_INTEL_HELD(gamestate.gamemode.ctf)) {
                                                 glColor3ub(gamestate.team_2.red, gamestate.team_2.green, gamestate.team_2.blue);
                                                 texture_draw_rotated(
                                                         &texture_intel, minimap_x + gamestate.gamemode.ctf.team_2_intel_location.dropped.x * scalef,
@@ -2967,7 +2967,7 @@ texture_draw_empty_rotated(settings.window_width - 143 * scalef + tent1_x * map_
                                                 texture_draw_rotated(&texture_medical, settings.window_width - 143 * scalef + tent1_x * map_scale * scalef,
                                                                                          (585 - tent1_y * map_scale) * scalef, 12 * scalef, 12 * scalef, 0.0F);
                                         }
-                                        if(!gamestate.gamemode.ctf.team_1_intel) {
+                                        if(!TEAM_1_INTEL_HELD(gamestate.gamemode.ctf)) {
                                                 float intel_x
                                                         = min(max(gamestate.gamemode.ctf.team_1_intel_location.dropped.x, view_x), view_x + viewport)
                                                         - view_x;
@@ -2989,7 +2989,7 @@ texture_draw_empty_rotated(settings.window_width - 143 * scalef + tent2_x * map_
                                                 texture_draw_rotated(&texture_medical, settings.window_width - 143 * scalef + tent2_x * map_scale * scalef,
                                                                                          (585 - tent2_y * map_scale) * scalef, 12 * scalef, 12 * scalef, 0.0F);
                                         }
-                                        if(!gamestate.gamemode.ctf.team_2_intel) {
+                                        if(!TEAM_2_INTEL_HELD(gamestate.gamemode.ctf)) {
                                                 float intel_x
                                                         = min(max(gamestate.gamemode.ctf.team_2_intel_location.dropped.x, view_x), view_x + viewport)
                                                         - view_x;

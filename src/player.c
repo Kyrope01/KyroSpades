@@ -340,6 +340,7 @@ void player_reset(struct Player* p) {
 	p->input.buttons.packed = 0;
 	p->net_offset.x = p->net_offset.y = p->net_offset.z = 0.0F;
 	p->server_pos_time = 0.0F;
+	p->has_network_orientation = 0;
 }
 
 void player_on_held_item_change(struct Player* p) {
@@ -706,13 +707,38 @@ void player_local_correct(float nx, float ny, float nz) {
 	view_offset.z = rz - nz;
 }
 
+/* Time constant, in seconds, of the relaxation of a remote player's rendered
+   orientation towards the one the server last reported. Larger is smoother but
+   lags further behind. This value keeps 0.9 of the error per 1/60 s step
+   (tau = (1/60) / -ln 0.9), the rate the filter was originally tuned at, so
+   nobody loses smoothing relative to the old 60fps behaviour. */
+#define ORIENTATION_SMOOTHING_TIME_CONSTANT 0.158F
+
+void player_set_orientation(int id, float x, float y, float z) {
+	if(id < 0 || id >= PLAYERS_MAX)
+		return;
+
+	struct Player* p = &players[id];
+	p->orientation.x = x;
+	p->orientation.y = y;
+	p->orientation.z = z;
+
+	/* Players are created facing their team's default direction, which is
+	   unrelated to where they actually spawn looking. Adopt the first reported
+	   orientation outright so that arbitrary heading is never smoothed through
+	   on screen. */
+	if(!p->has_network_orientation) {
+		p->orientation_smooth = p->orientation;
+		p->has_network_orientation = 1;
+	}
+}
+
 void player_update(float dt, int locked) {
 	/* The fixed-step call only advances authoritative movement.  Smoothing
 	   and correction decay belong to the render-rate call, so calculating
 	   their transcendental factors for the fixed-step call was pure waste
 	   (and happened once per tick even when nobody was connected remotely). */
-	float smooth_decay = 1.0F;
-	float smooth_gain = 1.0F;
+	float smooth_blend = 0.0F;
 	float off_decay = 1.0F;
 	int smoothing_ready = 0;
 
@@ -726,19 +752,53 @@ void player_update(float dt, int locked) {
 						/* dt is identical for every player in this call, so these
 						   loop-invariant factors are only needed when a remote
 						   player actually exists. */
-						smooth_decay = powf(0.9F, dt * 60.0F);
-						smooth_gain = powf(0.1F, dt * 60.0F);
+						smooth_blend = 1.0F - expf(-dt / ORIENTATION_SMOOTHING_TIME_CONSTANT);
 						off_decay = expf(-dt * network_correction_rate());
 						smoothing_ready = 1;
 					}
 
-					// smooth out player orientation
-					players[k].orientation_smooth.x = players[k].orientation_smooth.x * smooth_decay
-						+ players[k].orientation.x * smooth_gain;
-					players[k].orientation_smooth.y = players[k].orientation_smooth.y * smooth_decay
-						+ players[k].orientation.y * smooth_gain;
-					players[k].orientation_smooth.z = players[k].orientation_smooth.z * smooth_decay
-						+ players[k].orientation.z * smooth_gain;
+					/* The smoothed orientation s relaxes towards the networked one o:
+
+					       ds/dt = -(s - o) / tau
+
+					   Over a step of dt with o held, the exact solution keeps
+					   exp(-dt / tau) of the error. Being exact rather than an
+					   Euler step it composes: two steps of dt / 2 land where one
+					   step of dt does, so the settling rate is the same however
+					   often this is called. The previous form blended with
+					   powf(0.9F, dt * 60) and powf(0.1F, dt * 60) as two
+					   independent weights, which only sum to 1 at exactly
+					   dt == 1/60 -- so high-framerate clients got far lighter
+					   smoothing than the filter was tuned for. */
+					if(dt > 0.0F) {
+						struct Orientation* s = &players[k].orientation_smooth;
+						struct Orientation* o = &players[k].orientation;
+
+						/* Near-antipodal orientations have no meaningful linear
+						   interpolation: the blend passes through the origin and the
+						   direction is lost. Snap, which is also the sanest depiction
+						   of an instant about-face. */
+						if(s->x * o->x + s->y * o->y + s->z * o->z <= -0.999F) {
+							*s = *o;
+						} else {
+							s->x += (o->x - s->x) * smooth_blend;
+							s->y += (o->y - s->y) * smooth_blend;
+							s->z += (o->z - s->z) * smooth_blend;
+
+							/* Guard the renormalization: a collapsed blend would
+							   otherwise leave a zero vector behind and every
+							   consumer would inherit it. */
+							float len = sqrtf(s->x * s->x + s->y * s->y + s->z * s->z);
+							if(len > 0.0F) {
+								float inv = 1.0F / len;
+								s->x *= inv;
+								s->y *= inv;
+								s->z *= inv;
+							} else {
+								*s = *o;
+							}
+						}
+					}
 
 					// decay correction-blend offset (view-only)
 					players[k].net_offset.x *= off_decay;
@@ -1570,9 +1630,9 @@ void player_render(struct Player* p, int id) {
 		matrix_pop(matrix_model);
 
 		if(gamestate.gamemode_type == GAMEMODE_CTF
-		   && ((gamestate.gamemode.ctf.team_1_intel
+		   && ((TEAM_1_INTEL_HELD(gamestate.gamemode.ctf)
 				&& gamestate.gamemode.ctf.team_1_intel_location.held.player_id == id)
-			   || (gamestate.gamemode.ctf.team_2_intel
+			   || (TEAM_2_INTEL_HELD(gamestate.gamemode.ctf)
 				   && gamestate.gamemode.ctf.team_2_intel_location.held.player_id == id))) {
 			matrix_push(matrix_model);
 			matrix_translate(matrix_model, p->physics.eye.x, p->physics.eye.y + height, p->physics.eye.z);
@@ -1588,9 +1648,9 @@ void player_render(struct Player* p, int id) {
 			}
 			matrix_upload();
 			int t = TEAM_SPECTATOR;
-			if(gamestate.gamemode.ctf.team_1_intel && gamestate.gamemode.ctf.team_1_intel_location.held.player_id == id)
+			if(TEAM_1_INTEL_HELD(gamestate.gamemode.ctf) && gamestate.gamemode.ctf.team_1_intel_location.held.player_id == id)
 				t = TEAM_1;
-			if(gamestate.gamemode.ctf.team_2_intel && gamestate.gamemode.ctf.team_2_intel_location.held.player_id == id)
+			if(TEAM_2_INTEL_HELD(gamestate.gamemode.ctf) && gamestate.gamemode.ctf.team_2_intel_location.held.player_id == id)
 				t = TEAM_2;
 			kv6_render(&model_intel, t);
 			matrix_pop(matrix_model);

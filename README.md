@@ -124,8 +124,8 @@ to the top of the server list.
 
 <dt>Glowing Blocks
 <dd>    The advanced colour selector can mark newly placed blocks as client-only,
-session-persistent coloured light sources. Their terrain-occluded volumetric rays
-fade from full strength nearby to zero at roughly fifty blocks.
+session-persistent coloured point lights. Their illumination fades smoothly
+with distance and remains independent of the water and post-processing passes.
 
 <dt>Water Shader and Waves
 <dd>    Water remains voxel-styled while adding animated waves and reflections.
@@ -133,9 +133,12 @@ The OpenGL Core renderer adds Fresnel shading, responsive wave normals, scene
 lights and terrain shadows, with the established compatibility fallback kept.
 
 <dt>Graphical Effects
-<dd>    Filmic tonemapping, chromatic aberration, volumetric lighting and lens flare.
+<dd>    Filmic tonemapping, chromatic aberration, smooth forward lighting and lens flare.
 OpenGL Core also supports a floating-point HDR scene and soft multipass bloom,
 with compatibility rendering retained when those resources are unavailable.
+Bloom defaults on for new installations; existing saved settings keep their own
+value. To check the actual GPU bright-pass and blur once, launch with
+`KS_BLOOM_TEST=1` and inspect the log for "Bloom GPU self-test passed".
 
 <dt>Blood Stains
 <dd>    Blood stains option added.

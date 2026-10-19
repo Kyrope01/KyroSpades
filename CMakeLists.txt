@@ -8,6 +8,7 @@ set(KYROSPADES_PATCH 5)
 option(ENABLE_TOUCH "Enable touch support including ingame overlay" OFF)
 option(ENABLE_ANDROID_FILE "Use SDL's file functions" OFF)
 option(ENABLE_OPENGLES "Build for OpenGL ES" OFF)
+option(ENABLE_OPENGL_CORE "Use the OpenGL 3.3 Core desktop renderer" OFF)
 option(ENABLE_SOUND "Enable sound support using OpenAL" ON)
 option(ENABLE_RPC "Enable Discord Rich Presence support" OFF)
 

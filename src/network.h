@@ -390,8 +390,14 @@ struct PacketStateData {
 			unsigned char team_1_score;
 			unsigned char team_2_score;
 			unsigned char capture_limit;
-			unsigned char team_1_intel : 1;
-			unsigned char team_2_intel : 1;
+			/* GameState intel flags, aosprotocol 0.75: bit 0 is set when
+			   team 1 is holding an intel, bit 1 when team 2 is. That is the
+			   inverse of this client's naming, where team_N_intel means
+			   team N's own intel is the one being carried. Reading the raw
+			   byte directly is how the client came to draw the intel on the
+			   wrong player after joining a game already in progress, so go
+			   through the TEAM_n_INTEL_HELD accessors below. */
+			unsigned char intels;
 			union intel_location {
 				struct {
 					unsigned char player_id;
@@ -419,6 +425,34 @@ struct PacketStateData {
 		} tc;
 	} gamemode_data;
 };
+
+#define HASBIT(value, bit) (((value) >> (bit)) & 1)
+#define SETBIT(value, bit) ((value) = (unsigned char)((value) | (1u << (bit))))
+#define CLEARBIT(value, bit) ((value) = (unsigned char)((value) & ~(1u << (bit))))
+
+/* Which team is carrying an intel, as the wire encodes it. */
+#define TEAM1_HAS_INTEL 0
+#define TEAM2_HAS_INTEL 1
+
+/* True while team N's *own* intel is being carried by the enemy -- the
+   inverse of the wire bits above, because team 1 carrying an intel means it
+   is team 2's intel that is gone. */
+#define TEAM_1_INTEL_HELD(ctf) HASBIT((ctf).intels, TEAM2_HAS_INTEL)
+#define TEAM_2_INTEL_HELD(ctf) HASBIT((ctf).intels, TEAM1_HAS_INTEL)
+#define SET_TEAM_1_INTEL_HELD(ctf, held)                                              \
+	do {                                                                              \
+		if(held)                                                                      \
+			SETBIT((ctf).intels, TEAM2_HAS_INTEL);                                    \
+		else                                                                          \
+			CLEARBIT((ctf).intels, TEAM2_HAS_INTEL);                                  \
+	} while(0)
+#define SET_TEAM_2_INTEL_HELD(ctf, held)                                              \
+	do {                                                                              \
+		if(held)                                                                      \
+			SETBIT((ctf).intels, TEAM1_HAS_INTEL);                                    \
+		else                                                                          \
+			CLEARBIT((ctf).intels, TEAM1_HAS_INTEL);                                  \
+	} while(0)
 
 #define PACKET_TERRITORYCAPTURE_ID 21
 struct PacketTerritoryCapture {

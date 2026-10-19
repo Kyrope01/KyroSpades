@@ -118,13 +118,17 @@ void matrix_lookAt(mat4 m, double eyex, double eyey, double eyez, double centerx
 }
 
 void matrix_upload() {
-#if defined(OPENGL_ES)
+#if defined(GLX_PROGRAMMABLE)
+#ifdef OPENGL_ES
 	if(gles_version >= 2) {
+#else
+	{
+#endif
 		/* ES 2.0: upload MVP uniform. If no shader is active (e.g. frame
 		   start, HUD setup), auto-bind the default shader so geometry
 		   always gets the correct transform. */
 		GLint prog;
-		glGetIntegerv(GL_CURRENT_PROGRAM, &prog);
+		prog = (GLint)glx_current_program();
 		if(!prog) {
 			glx_use_default_shader();
 			prog = glx_default_shader_program();
@@ -133,28 +137,36 @@ void matrix_upload() {
 			mat4 mv, mvp;
 			glmc_mat4_mul(matrix_view, matrix_model, mv);
 			glmc_mat4_mul(matrix_projection, mv, mvp);
-			GLint loc = glGetUniformLocation(prog, "u_MVP");
+			GLint loc = glx_uniform_location(prog, "u_MVP");
 			if(loc >= 0)
 				glUniformMatrix4fv(loc, 1, GL_FALSE, (float*)mvp);
-			GLint loc_model = glGetUniformLocation(prog, "u_Model");
+			GLint loc_model = glx_uniform_location(prog, "u_Model");
 			if(loc_model >= 0)
 				glUniformMatrix4fv(loc_model, 1, GL_FALSE, (float*)matrix_model);
 		}
 		return;
 	}
 #endif
+#ifndef OPENGL_CORE
 	glMatrixMode(GL_MODELVIEW);
 	glLoadMatrixf((float*)matrix_view);
 	glMultMatrixf((float*)matrix_model);
+#endif
 }
 
 void matrix_upload_p() {
-#if defined(OPENGL_ES)
+#if defined(GLX_PROGRAMMABLE)
+#ifdef OPENGL_ES
 	if(gles_version >= 2) {
+#else
+	{
+#endif
 		/* Projection is baked into MVP by matrix_upload(); nothing to do here */
 		return;
 	}
 #endif
+#ifndef OPENGL_CORE
 	glMatrixMode(GL_PROJECTION);
 	glLoadMatrixf((float*)matrix_projection);
+#endif
 }

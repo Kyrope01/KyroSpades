@@ -343,7 +343,7 @@ static void render_objective_models(void) {
            top surface.  The old code rendered it a full block up in the air
            (plus the model pivot offset), which is why it floated. */
         if(gamestate.gamemode_type == GAMEMODE_CTF) {
-                if(!gamestate.gamemode.ctf.team_1_intel) {
+                if(!TEAM_1_INTEL_HELD(gamestate.gamemode.ctf)) {
                         float x = gamestate.gamemode.ctf.team_1_intel_location.dropped.x;
                         float y = intel_drop_render_y(gamestate.gamemode.ctf.team_1_intel_location.dropped.x,
                                                       gamestate.gamemode.ctf.team_1_intel_location.dropped.y,
@@ -356,7 +356,7 @@ static void render_objective_models(void) {
                         kv6_render(&model_intel, TEAM_1);
                         matrix_pop(matrix_model);
                 }
-                if(!gamestate.gamemode.ctf.team_2_intel) {
+                if(!TEAM_2_INTEL_HELD(gamestate.gamemode.ctf)) {
                         float x = gamestate.gamemode.ctf.team_2_intel_location.dropped.x;
                         float y = intel_drop_render_y(gamestate.gamemode.ctf.team_2_intel_location.dropped.x,
                                                       gamestate.gamemode.ctf.team_2_intel_location.dropped.y,

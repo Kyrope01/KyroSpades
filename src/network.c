@@ -595,11 +595,15 @@ void read_PacketCreatePlayer(void* data, int len) {
                 if(p->player_id == local_player_id) {
                         view_offset.x = view_offset.y = view_offset.z = 0.0F;
                 }
-                strcpy(players[p->player_id].name, p->name);
-                players[p->player_id].orientation.x = players[p->player_id].orientation_smooth.x
-                        = (p->team == TEAM_1) ? 1.0F : -1.0F;
-                players[p->player_id].orientation.y = players[p->player_id].orientation_smooth.y = 0.0F;
-                players[p->player_id].orientation.z = players[p->player_id].orientation_smooth.z = 0.0F;
+		strcpy(players[p->player_id].name, p->name);
+		players[p->player_id].orientation.x = players[p->player_id].orientation_smooth.x
+			= (p->team == TEAM_1) ? 1.0F : -1.0F;
+		players[p->player_id].orientation.y = players[p->player_id].orientation_smooth.y = 0.0F;
+		players[p->player_id].orientation.z = players[p->player_id].orientation_smooth.z = 0.0F;
+		/* This is only the team's default spawn facing. Let the first
+		   orientation the server reports for this slot be adopted outright
+		   rather than smoothed towards from this arbitrary heading. */
+		players[p->player_id].has_network_orientation = 0;
 
                 players[p->player_id].block.red = 111;
                 players[p->player_id].block.green = 111;
@@ -747,9 +751,7 @@ void read_PacketWorldUpdate(void* data, int len) {
                                            > 0.1F * 0.1F) {
                                                 player_net_correct(k, p->x, 63.0F - p->z, p->y);
                                         }
-                                        players[k].orientation.x = p->ox;
-                                        players[k].orientation.y = -p->oz;
-                                        players[k].orientation.z = p->oy;
+					player_set_orientation(k, p->ox, -p->oz, p->oy);
                                 }
                         }
                 } else {
@@ -763,9 +765,7 @@ void read_PacketWorldUpdate(void* data, int len) {
                                                    > 0.1F * 0.1F) {
                                                         player_net_correct(p->player_id, p->x, 63.0F - p->z, p->y);
                                                 }
-                                                players[p->player_id].orientation.x = p->ox;
-                                                players[p->player_id].orientation.y = -p->oz;
-                                                players[p->player_id].orientation.z = p->oy;
+						player_set_orientation(p->player_id, p->ox, -p->oz, p->oy);
                                         }
                                 }
                         }
@@ -1079,13 +1079,13 @@ void read_PacketMoveObject(void* data, int len) {
                                 gamestate.gamemode.ctf.team_2_base.z = p->z;
                                 break;
                         case TEAM_1_FLAG:
-                                gamestate.gamemode.ctf.team_1_intel = 0;
+                                SET_TEAM_1_INTEL_HELD(gamestate.gamemode.ctf, 0);
                                 gamestate.gamemode.ctf.team_1_intel_location.dropped.x = p->x;
                                 gamestate.gamemode.ctf.team_1_intel_location.dropped.y = p->y;
                                 gamestate.gamemode.ctf.team_1_intel_location.dropped.z = p->z;
                                 break;
                         case TEAM_2_FLAG:
-                                gamestate.gamemode.ctf.team_2_intel = 0;
+                                SET_TEAM_2_INTEL_HELD(gamestate.gamemode.ctf, 0);
                                 gamestate.gamemode.ctf.team_2_intel_location.dropped.x = p->x;
                                 gamestate.gamemode.ctf.team_2_intel_location.dropped.y = p->y;
                                 gamestate.gamemode.ctf.team_2_intel_location.dropped.z = p->z;
@@ -1148,14 +1148,14 @@ void read_PacketIntelDrop(void* data, int len) {
                 char drop_str[128] = {0};
                 switch(players[p->player_id].team) {
                         case TEAM_1:
-                                gamestate.gamemode.ctf.team_2_intel = 0; // drop opposing team's intel
+                                SET_TEAM_2_INTEL_HELD(gamestate.gamemode.ctf, 0); // drop opposing team's intel
                                 gamestate.gamemode.ctf.team_2_intel_location.dropped.x = p->x;
                                 gamestate.gamemode.ctf.team_2_intel_location.dropped.y = p->y;
                                 gamestate.gamemode.ctf.team_2_intel_location.dropped.z = p->z;
                                 snprintf(drop_str, sizeof(drop_str), "\1%s\6 has dropped the \2%s\6 Intel", players[p->player_id].name, gamestate.team_2.name);
                                 break;
                         case TEAM_2:
-                                gamestate.gamemode.ctf.team_1_intel = 0;
+                                SET_TEAM_1_INTEL_HELD(gamestate.gamemode.ctf, 0);
                                 gamestate.gamemode.ctf.team_1_intel_location.dropped.x = p->x;
                                 gamestate.gamemode.ctf.team_1_intel_location.dropped.y = p->y;
                                 gamestate.gamemode.ctf.team_1_intel_location.dropped.z = p->z;
@@ -1176,12 +1176,12 @@ void read_PacketIntelPickup(void* data, int len) {
                 char pickup_str[128] = {0};
                 switch(players[p->player_id].team) {
                         case TEAM_1:
-                                gamestate.gamemode.ctf.team_2_intel = 1; // pickup opposing team's intel
+                                SET_TEAM_2_INTEL_HELD(gamestate.gamemode.ctf, 1); // pickup opposing team's intel
                                 gamestate.gamemode.ctf.team_2_intel_location.held.player_id = p->player_id;
                                 snprintf(pickup_str, sizeof(pickup_str), "\1%s\6 has the \2%s\6 Intel", players[p->player_id].name, gamestate.team_2.name);
                                 break;
                         case TEAM_2:
-                                gamestate.gamemode.ctf.team_1_intel = 1;
+                                SET_TEAM_1_INTEL_HELD(gamestate.gamemode.ctf, 1);
                                 gamestate.gamemode.ctf.team_1_intel_location.held.player_id = p->player_id;
                                 snprintf(pickup_str, sizeof(pickup_str), "\2%s\6 has the \1%s\6 Intel", players[p->player_id].name, gamestate.team_1.name);
                                 break;
