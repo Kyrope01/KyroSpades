@@ -1,6 +1,5 @@
-
 /*
-	Copyright (c) 2017-2020 ByteBit
+	Copyright (c) 2024 KyroSpades contributors
 
 	This file is part of KyroSpades.
 

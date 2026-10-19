@@ -613,13 +613,20 @@ void sound_update() {
 
         sound_frame++;
 
+        /* OpenAL builds the listener basis from a forward vector plus an up
+         * vector that must not be parallel to it. The up vector used to be
+         * hardcoded to (0, 1, 0), which is exactly the forward direction when
+         * looking straight up (camera_rot_y clamps to EPSILON) or straight down
+         * (clamps to 3.14), leaving OpenAL with a degenerate basis and garbage
+         * panning. Derive it from the same angles instead: it stays unit length
+         * and perpendicular at every pitch, and still reduces to (0, 1, 0) when
+         * looking horizontally, so nothing changes at normal pitch. */
+        float sh = sin(camera_rot_x), ch = cos(camera_rot_x);
+        float sv = sin(camera_rot_y), cv = cos(camera_rot_y);
+
         float orientation[] = {
-                sin(camera_rot_x) * sin(camera_rot_y),
-                cos(camera_rot_y),
-                cos(camera_rot_x) * sin(camera_rot_y),
-                0.0F,
-                1.0F,
-                0.0F,
+                +sh * sv, +cv, +ch * sv,
+                -sh * cv, +sv, -ch * cv,
         };
 
         alListener3f(AL_POSITION, camera_x * SOUND_SCALE, camera_y * SOUND_SCALE, camera_z * SOUND_SCALE);

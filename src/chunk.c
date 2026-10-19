@@ -37,7 +37,6 @@
 #include "chunk.h"
 #include "channel.h"
 #include "utils.h"
-#include "water.h"
 #include "lighting.h"
 #include "shadow.h"
 /* pthread_spinlock_t is Linux-only. macOS and Android's Bionic lack it.
@@ -361,8 +360,12 @@ void* chunk_generate(void* data) {
 void chunk_generate_greedy(struct libvxl_chunk_copy* blocks, size_t start_x, size_t start_z, struct tesselator* tess,
                                                    int* max_height) {
         *max_height = 0;
-        /* Keep one water-mesh policy for the complete worker job. */
-        bool separate_water_surface = water_shader_active();
+        /* Always mesh solid terrain, including the y=0 floor. The water pass
+           is asynchronous and may have no surface mesh yet; omitting this
+           layer leaves visible holes until its snapshot finishes. */
+        /* Match naive/AO meshes: shader-lit chunks keep raw colours, while
+           fixed-function chunks bake the current sky/sunlight level. */
+        float baked_sunlight = lighting_world_supported() ? 1.0F : lighting_sunlight_scale();
 
         int checked_voxels[2][CHUNK_SIZE * CHUNK_SIZE];
         int checked_voxels2[2][CHUNK_SIZE * map_size_y];
@@ -378,13 +381,10 @@ void chunk_generate_greedy(struct libvxl_chunk_copy* blocks, size_t start_x, siz
                                                 *max_height = y;
                                         }
 
-                                        if(separate_water_surface && (float)y < WATER_LEVEL)
-                                                continue;
-
                                         uint32_t col = libvxl_copy_chunk_get_color(blocks, x, z, map_size_y - 1 - y);
-                                        int r = blue(col);
-                                        int g = green(col);
-                                        int b = red(col);
+                                        int r = blue(col) * baked_sunlight;
+                                        int g = green(col) * baked_sunlight;
+                                        int b = red(col) * baked_sunlight;
 
                                         if((z == 0 && solid_array_isair(blocks, x, y, map_size_z - 1))
                                            || (z > 0 && solid_array_isair(blocks, x, y, z - 1))) {
@@ -489,9 +489,9 @@ void chunk_generate_greedy(struct libvxl_chunk_copy* blocks, size_t start_x, siz
                                         }
 
                                         unsigned int col = libvxl_copy_chunk_get_color(blocks, x, z, map_size_y - 1 - y);
-                                        int r = blue(col);
-                                        int g = green(col);
-                                        int b = red(col);
+                                        int r = blue(col) * baked_sunlight;
+                                        int g = green(col) * baked_sunlight;
+                                        int b = red(col) * baked_sunlight;
 
                                         if((x == 0 && solid_array_isair(blocks, map_size_x - 1, y, z))
                                            || (x > 0 && solid_array_isair(blocks, x - 1, y, z))) {
@@ -596,9 +596,9 @@ void chunk_generate_greedy(struct libvxl_chunk_copy* blocks, size_t start_x, siz
                                         }
 
                                         unsigned int col = libvxl_copy_chunk_get_color(blocks, x, z, map_size_y - 1 - y);
-                                        int r = blue(col);
-                                        int g = green(col);
-                                        int b = red(col);
+                                        int r = blue(col) * baked_sunlight;
+                                        int g = green(col) * baked_sunlight;
+                                        int b = red(col) * baked_sunlight;
 
                                         if(y == map_size_y - 1 || solid_array_isair(blocks, x, y + 1, z)) {
                                                 if(checked_voxels[0][(x - start_x) + (z - start_z) * CHUNK_SIZE] == 0) {
@@ -728,7 +728,6 @@ static void chunk_add_ao_face(struct tesselator* tess, int16_t coords[12],
 
 void chunk_generate_naive(struct libvxl_chunk_copy* blocks, struct tesselator* tess, int* max_height, int ao) {
         *max_height = 0;
-        bool separate_water_surface = water_shader_active();
         /* Zero is a valid user setting and means no AO darkening. The old
            fallback silently treated 0 as 1, making the slider's minimum lie. */
         float ao_mult = fmaxf(settings.ao_multiplier, 0.0F);
@@ -740,8 +739,12 @@ void chunk_generate_naive(struct libvxl_chunk_copy* blocks, struct tesselator* t
 
         /* Snapshot this decision so a settings change cannot unbalance the
            map lock while a worker is midway through a chunk. */
-        bool baked_shadows = shadow_baked_enabled();
-        float baked_shadow_intensity = settings.shadow_intensity;
+        /* Legacy terrain has baked vertex lighting; programmable terrain
+           applies the sun percentage per frame in its shader instead. */
+        float sun = lighting_sunlight_scale();
+        float baked_sunlight = lighting_world_supported() ? 1.0F : sun;
+        bool baked_shadows = shadow_baked_enabled() && sun > 0.0F;
+        float baked_shadow_intensity = settings.shadow_intensity * sun;
         if(baked_shadows)
                 map_read_lock();
 
@@ -754,15 +757,12 @@ void chunk_generate_naive(struct libvxl_chunk_copy* blocks, struct tesselator* t
 
                 *max_height = max(*max_height, y);
 
-                if(separate_water_surface && (float)y < WATER_LEVEL)
-                        continue;
-
                 uint32_t col = blk->color;
                 int r = blue(col);
                 int g = green(col);
                 int b = red(col);
 
-                float shade = solid_sunblock(blocks, x, y, z);
+                float shade = solid_sunblock(blocks, x, y, z) * baked_sunlight;
                 if(baked_shadows) {
                         float dir_shade = map_sun_shadow(x, y, z, 32);
                         float sf = (1.0F - baked_shadow_intensity) + baked_shadow_intensity * dir_shade;
@@ -967,9 +967,12 @@ static void emit_textured_face(struct tesselator* tess, enum tesselator_cube_fac
 void chunk_generate_textured(struct libvxl_chunk_copy* blocks, struct tesselator* tess, int* max_height) {
         *max_height = 0;
 
-        bool separate_water_surface = water_shader_active();
-        bool baked_shadows = shadow_baked_enabled();
-        float baked_shadow_intensity = settings.shadow_intensity;
+        /* Legacy terrain has baked vertex lighting; programmable terrain
+           applies the sun percentage per frame in its shader instead. */
+        float sun = lighting_sunlight_scale();
+        float baked_sunlight = lighting_world_supported() ? 1.0F : sun;
+        bool baked_shadows = shadow_baked_enabled() && sun > 0.0F;
+        float baked_shadow_intensity = settings.shadow_intensity * sun;
         if(baked_shadows)
                 map_read_lock();
 
@@ -982,9 +985,6 @@ void chunk_generate_textured(struct libvxl_chunk_copy* blocks, struct tesselator
 
                 *max_height = max(*max_height, y);
 
-                if(separate_water_surface && (float)y < WATER_LEVEL)
-                        continue;
-
                 uint32_t col = blk->color;
                 int br = blue(col);
                 int bg = green(col);
@@ -992,7 +992,7 @@ void chunk_generate_textured(struct libvxl_chunk_copy* blocks, struct tesselator
 
                 float shade;
                 {
-                        shade = solid_sunblock(blocks, x, y, z);
+                        shade = solid_sunblock(blocks, x, y, z) * baked_sunlight;
                         if(baked_shadows) {
                                 float dir_shade = map_sun_shadow(x, y, z, 32);
                                 float sf = (1.0F - baked_shadow_intensity) + baked_shadow_intensity * dir_shade;

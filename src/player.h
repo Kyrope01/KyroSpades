@@ -108,6 +108,11 @@ extern struct Player {
 	} orientation;
 	AABB bb_2d;
 	struct Orientation orientation_smooth;
+	/* Set once the server has reported a real orientation for this player.
+	   Until then orientation_smooth is only the team's default spawn facing,
+	   which is unrelated to where the player actually spawns looking, so the
+	   first reported orientation is adopted instead of smoothed towards. */
+	unsigned char has_network_orientation;
 	struct Position gun_pos;
 	struct Position casing_dir;
 	float gun_shoot_timer;
@@ -212,6 +217,7 @@ void player_render_interpolate_begin(void);
 void player_render_interpolate_end(void);
 void player_net_correct(int id, float nx, float ny, float nz); /* remote players */
 void player_local_correct(float nx, float ny, float nz);       /* local player (view_offset) */
+void player_set_orientation(int id, float x, float y, float z); /* remote players */
 float player_height(const struct Player* p);
 float player_height2(const struct Player* p);
 void player_reposition(struct Player* p);
