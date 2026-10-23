@@ -148,7 +148,8 @@ static bool damaged_voxel_update(void* key, void* value, void* user) {
         int y = pos_keyy(pos);
         int z = pos_keyz(pos);
 
-        if(window_time() - voxel->timer > 10.0F || map_isair(x, y, z))
+        if(window_time() - voxel->timer > 10.0F || map_isair(x, y, z)
+           || (water_surface_enabled() && (float)y < WATER_LEVEL))
                 return true;
 
         /* Terrain chunks wrap around the map near its X/Z seams. Draw the

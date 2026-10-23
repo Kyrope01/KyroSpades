@@ -1,24 +1,6 @@
-# .github/workflows/deep-audit.yml
-# KyroSpades deep audit. Manual trigger only. Every tool is free and installed
-# by this workflow at run time (apt / pip / public GitHub release downloads).
-# No secrets, no API keys, no licenses, no external services.
-#
-# Optional repo hooks, all free, all best-effort. The report states loudly
-# which tools were skipped and exactly which file would enable them:
-#   audit/build.sh          your build command, if autodetection gets it wrong
-#   audit/run-headless.sh   any smoke run (demo scene, config load, packet parse);
-#                           sanitizers, Valgrind and Heaptrack feed on this
-#   audit/fuzz-targets.txt  one libFuzzer source per line (else we glob *fuzz*.c)
-#   audit/eva-targets.txt   one C file per line for Frama-C EVA (else skipped)
-#   audit/esbmc/*.c         assertion harnesses for ESBMC (else skipped)
-#   audit/cbmc/*.c          assertion harnesses for CBMC (falls back to audit/esbmc/)
-#   audit/cocci/*.cocci     semantic patterns for Coccinelle (else a built-in
-#                           NaN-source rule for sqrt/asin/acos/log runs)
-#   .semgrep/custom.yml     your community-bug tripwire rules
-
 name: deep-audit
 
-on:
+"on":
   workflow_dispatch:
     inputs:
       fuzz_budget_seconds:
@@ -31,6 +13,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
   security-events: write
 
 concurrency:
@@ -41,13 +24,16 @@ env:
   DEBIAN_FRONTEND: noninteractive
 
 jobs:
-  # ------------------------------------------------------------- build gate
+  # ------------------------------------------------------------ build gate
   build-gate:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
       - name: Toolchain and project dependencies (best effort)
         run: |
           sudo apt-get update -qq
@@ -57,7 +43,8 @@ jobs:
             libenet-dev libdeflate-dev \
             libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev \
             libpulse-dev libopenal-dev || true
-          pip3 install --quiet lizard || true
+          pip3 install --break-system-packages --quiet lizard || pip3 install --quiet lizard || true
+
       - name: Build and capture compilation database
         run: |
           mkdir -p out
@@ -65,10 +52,10 @@ jobs:
           if [ -x audit/build.sh ]; then
             bear -- ./audit/build.sh > out/build.log 2>&1
           elif [ -f CMakeLists.txt ]; then
-            cmake -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON >> out/build.log 2>&1
-            bear -- cmake --build build -j"$(nproc)" >> out/build.log 2>&1
+            cmake -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON > out/build.log 2>&1
+            bear -- cmake --build build -j "$(nproc)" > out/build.log 2>&1
           elif [ -f Makefile ]; then
-            bear -- make -j"$(nproc)" -k >> out/build.log 2>&1
+            bear -- make -j "$(nproc)" -k > out/build.log 2>&1
           else
             echo "no known build system found" | tee out/build.log
           fi
@@ -78,6 +65,7 @@ jobs:
           if [ -f out/compile_commands.json ]; then echo ok > out/status.txt; else echo failed > out/status.txt; fi
           echo "$rc" >> out/status.txt
           echo "compilation database: $(test -f out/compile_commands.json && echo captured || echo MISSING)"
+
       - name: Warning and -fanalyzer pass over every translation unit
         run: |
           set +e
@@ -99,6 +87,7 @@ jobs:
                   print(f"=== {src}\n{r.stderr}")
           PY
           echo "warning pass finished"
+
       - name: Binary hardening check (best effort)
         run: |
           set +e
@@ -108,29 +97,33 @@ jobs:
             checksec --file="$b" >> out/hardening.log 2>&1 || hardening-check "$b" >> out/hardening.log 2>&1 || true
           done
           echo ok > /dev/null
+
       - uses: actions/upload-artifact@v4
         with: { name: out-build, path: out/ }
 
-  # ------------------------------------------- workflow configuration self-audit
+  # ------------------------------------------ workflow configuration self-audit
   workflow-lint:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
       - name: actionlint and zizmor over .github/workflows
         run: |
           mkdir -p out
           set +e
           AL=$(curl -s https://api.github.com/repos/rhysd/actionlint/releases/latest \
-               | grep -o 'https://[^"]*actionlint_[0-9.]*_linux_amd64\.tar\.gz' | head -1)
+            | grep -o 'https://[^"]*actionlint_[0-9.]*_linux_amd64.tar.gz' | head -1)
           if [ -n "$AL" ]; then
             curl -sL "$AL" | tar xz actionlint
             ./actionlint -color never .github/workflows/*.yml > out/actionlint.log 2>&1
           else
             echo "SKIPPED: could not resolve an actionlint release asset" > out/actionlint.log
           fi
-          pip3 install --quiet zizmor || true
+          pip3 install --break-system-packages --quiet zizmor || pip3 install --quiet zizmor || true
           if command -v zizmor >/dev/null 2>&1; then
             zizmor --format sarif . > out/zizmor.sarif 2> out/zizmor.log
             zrc=$?
@@ -140,40 +133,56 @@ jobs:
           fi
           if [ $zrc -le 1 ]; then echo ok > out/status.txt; else echo failed > out/status.txt; fi
           echo $zrc >> out/status.txt
+
       - uses: actions/upload-artifact@v4
         with: { name: out-workflow-lint, path: out/ }
 
-  # ----------------------------------------------------------------- CodeQL
+  # ---------------------------------------------------------------- CodeQL
   codeql:
     runs-on: ubuntu-24.04
     timeout-minutes: 180
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - uses: github/codeql-action/init@v3
         with:
           languages: c-cpp
-          build-mode: none   # build-free C/C++ scanning: works even when the build is broken
+          build-mode: none
+
       - uses: github/codeql-action/analyze@v3
         with:
           output: codeql-sarif
           category: deep-audit
+
       - name: Collect
         run: |
           mkdir -p out
           cp codeql-sarif/*.sarif out/codeql.sarif 2>/dev/null || true
           echo ok > out/status.txt; echo 0 >> out/status.txt
+
       - uses: actions/upload-artifact@v4
         with: { name: out-codeql, path: out/ }
 
-  # --------------------------------------------------------------- cppcheck
+  # -------------------------------------------------------------- cppcheck
   cppcheck:
+    needs: [build-gate]
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - uses: actions/download-artifact@v4
         with: { name: out-build, path: build-db }
         continue-on-error: true
+
       - name: Run cppcheck plus threadsafety and y2038 addons
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq cppcheck
@@ -190,18 +199,24 @@ jobs:
           done
           if [ $rc -eq 0 ]; then echo ok > out/status.txt; else echo failed > out/status.txt; fi
           echo $rc >> out/status.txt
+
       - uses: actions/upload-artifact@v4
         with: { name: out-cppcheck, path: out/ }
 
-  # ------------------------------------------------------------- clang-tidy
+  # ------------------------------------------------------------ clang-tidy
   clang-tidy:
+    needs: [build-gate]
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - uses: actions/download-artifact@v4
         with: { name: out-build, path: build-db }
         continue-on-error: true
+
       - name: Run clang-tidy over the compilation database
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq clang-tidy
@@ -212,19 +227,22 @@ jobs:
             echo skipped > out/status.txt; echo 0 >> out/status.txt; exit 0
           fi
           cp build-db/compile_commands.json .
-          find src -name '*.c' -o -name '*.cpp' | xargs -P"$(nproc)" -n1 -I{} \
-            clang-tidy -p . --checks='-*,bugprone-*,cert-*,misc-*,performance-*,clang-analyzer-*' {} \
-            >> out/clang-tidy.log 2>&1
+          find src -name '*.c' -o -name '*.cpp' | xargs -P "$(nproc)" -n1 -I{} \
+            clang-tidy -p . --checks='-,bugprone-,cert-,misc-,performance-,clang-analyzer-' {} >> out/clang-tidy.log 2>&1
           echo ok > out/status.txt; echo 0 >> out/status.txt
+
       - uses: actions/upload-artifact@v4
         with: { name: out-clang-tidy, path: out/ }
 
-  # ---------------------------------------------------- clang static analyser
+  # --------------------------------------------------- clang static analyser
   scan-build:
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - name: Run scan-build over a fresh build
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq clang-tools build-essential cmake \
@@ -238,24 +256,28 @@ jobs:
             scan-build -o out/sb-report ./audit/build.sh > out/scan-build.log 2>&1
           elif [ -f CMakeLists.txt ]; then
             scan-build -o out/sb-report cmake -B build-sb > /dev/null 2>&1
-            scan-build -o out/sb-report cmake --build build-sb -j"$(nproc)" >> out/scan-build.log 2>&1
+            scan-build -o out/sb-report cmake --build build-sb -j "$(nproc)" >> out/scan-build.log 2>&1
           elif [ -f Makefile ]; then
-            scan-build -o out/sb-report make -j"$(nproc)" -k >> out/scan-build.log 2>&1
+            scan-build -o out/sb-report make -j "$(nproc)" -k >> out/scan-build.log 2>&1
           else
             echo "SKIPPED: no build system" > out/scan-build.log
             echo skipped > out/status.txt; echo 0 >> out/status.txt; exit 0
           fi
           echo ok > out/status.txt; echo 0 >> out/status.txt
+
       - uses: actions/upload-artifact@v4
         with: { name: out-scan-build, path: out/ }
 
-  # ------------------------------------------------------------------- Infer
+  # ------------------------------------------------------------------ Infer
   infer:
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     if: ${{ inputs.run_heavy }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - name: Install and run Infer from its public release
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq default-jre-headless build-essential cmake \
@@ -264,7 +286,7 @@ jobs:
           mkdir -p out
           set +e
           URL=$(curl -s https://api.github.com/repos/facebook/infer/releases/latest \
-                | grep browser_download_url | grep -o 'https://[^"]*linux64[^"]*' | head -1)
+            | grep browser_download_url | grep -o 'https://[^"]*infer-linux[^"]*.tar.xz' | head -1)
           if [ -z "$URL" ]; then
             echo "SKIPPED: could not resolve an Infer release asset" > out/infer.log
             echo skipped > out/status.txt; echo 0 >> out/status.txt; exit 0
@@ -275,41 +297,49 @@ jobs:
             infer run -- ./audit/build.sh > out/infer.log 2>&1
           elif [ -f CMakeLists.txt ]; then
             infer run -- cmake -B build-infer > /dev/null 2>&1
-            infer run -- cmake --build build-infer -j"$(nproc)" >> out/infer.log 2>&1
+            infer run -- cmake --build build-infer -j "$(nproc)" >> out/infer.log 2>&1
           elif [ -f Makefile ]; then
-            infer run -- make -j"$(nproc)" -k >> out/infer.log 2>&1
+            infer run -- make -j "$(nproc)" -k >> out/infer.log 2>&1
           fi
           cp -r infer-out out/infer-out 2>/dev/null || true
           echo ok > out/status.txt; echo 0 >> out/status.txt
+
       - uses: actions/upload-artifact@v4
         with: { name: out-infer, path: out/ }
 
-  # ----------------------------------------------------------------- semgrep
+  # ---------------------------------------------------------------- semgrep
   semgrep:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - name: Run semgrep with public registry rules plus your custom tripwires
         run: |
-          pip3 install --quiet semgrep
           mkdir -p out
           set +e
+          pip3 install --break-system-packages --quiet semgrep || pip3 install --quiet semgrep || true
           CONFIGS="--config p/c --config p/security-audit"
           [ -f .semgrep/custom.yml ] && CONFIGS="$CONFIGS --config .semgrep/custom.yml"
           semgrep scan $CONFIGS --sarif -o out/semgrep.sarif --metrics=off src/ > out/semgrep.log 2>&1
           rc=$?
           if [ $rc -le 1 ]; then echo ok > out/status.txt; else echo failed > out/status.txt; fi
           echo $rc >> out/status.txt
+
       - uses: actions/upload-artifact@v4
         with: { name: out-semgrep, path: out/ }
 
-  # --------------------------------------------------------------- flawfinder
+  # -------------------------------------------------------------- flawfinder
   flawfinder:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - name: Dangerous-function scan
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq flawfinder
@@ -323,15 +353,19 @@ jobs:
           rc=$?
           if [ $rc -le 1 ]; then echo ok > out/status.txt; else echo failed > out/status.txt; fi
           echo $rc >> out/status.txt
+
       - uses: actions/upload-artifact@v4
         with: { name: out-flawfinder, path: out/ }
 
-  # ------------------------------------------------------------------ smatch
+  # ----------------------------------------------------------------- smatch
   smatch:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - name: Build and run smatch
         run: |
           sudo apt-get update -qq
@@ -343,23 +377,27 @@ jobs:
             echo skipped > out/status.txt; echo 0 >> out/status.txt; exit 0
           fi
           git clone --depth 1 https://github.com/error27/smatch.git /tmp/smatch > out/smatch.log 2>&1
-          make -C /tmp/smatch -j"$(nproc)" smatch >> out/smatch.log 2>&1
+          make -C /tmp/smatch -j "$(nproc)" smatch >> out/smatch.log 2>&1
           if [ ! -x /tmp/smatch/smatch ]; then
             echo "SKIPPED: smatch source build failed" >> out/smatch.log
             echo skipped > out/status.txt; echo 0 >> out/status.txt; exit 0
           fi
-          find src -name '*.c' | xargs -P"$(nproc)" -n1 -I{} \
+          find src -name '*.c' | xargs -P "$(nproc)" -n1 -I{} \
             /tmp/smatch/smatch -I src -I . {} >> out/smatch.log 2>&1
           echo ok > out/status.txt; echo 0 >> out/status.txt
+
       - uses: actions/upload-artifact@v4
         with: { name: out-smatch, path: out/ }
 
-  # --------------------------------------------------------------- coccinelle
+  # -------------------------------------------------------------- coccinelle
   coccinelle:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - name: Semantic patterns for NaN-producing math
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq coccinelle
@@ -401,15 +439,19 @@ jobs:
           fi
           spatch --sp-file $RULES --dir src -I src --very-quiet > out/coccinelle.log 2>&1
           echo ok > out/status.txt; echo 0 >> out/status.txt
+
       - uses: actions/upload-artifact@v4
         with: { name: out-coccinelle, path: out/ }
 
-  # -------------------------------------------------------------- Frama-C EVA
+  # ------------------------------------------------------------- Frama-C EVA
   frama-c:
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - name: Run EVA float alarms on the listed math and audio targets
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq frama-c || true
@@ -426,22 +468,26 @@ jobs:
             frama-c -eva "$f" -I src -I . >> out/frama-c.log 2>&1 | true
           done < audit/eva-targets.txt
           echo ok > out/status.txt; echo 0 >> out/status.txt
+
       - uses: actions/upload-artifact@v4
         with: { name: out-frama-c, path: out/ }
 
-  # ------------------------------------------------------------------- ESBMC
+  # ------------------------------------------------------------------ ESBMC
   esbmc:
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - name: Model-check the assertion harnesses from its public release
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq clang unzip || true
           mkdir -p out
           set +e
           URL=$(curl -s https://api.github.com/repos/esbmc/esbmc/releases/latest \
-                | grep browser_download_url | grep -io 'https://[^"]*ubuntu[^"]*\.zip' | head -1)
+            | grep browser_download_url | grep -i 'esbmc[^"]*linux[^"]*.zip' | grep -o 'https://[^"]*' | head -1)
           if [ -z "$URL" ]; then
             echo "SKIPPED: could not resolve an ESBMC release asset" > out/esbmc.log
             echo skipped > out/status.txt; echo 0 >> out/status.txt; exit 0
@@ -458,21 +504,25 @@ jobs:
             "$ESBMC" "$h" -I src -I . --floatbv --no-pointer-check >> out/esbmc.log 2>&1 | true
           done
           echo ok > out/status.txt; echo 0 >> out/status.txt
+
       - uses: actions/upload-artifact@v4
         with: { name: out-esbmc, path: out/ }
 
-  # -------------------------------------------------------------------- CBMC
+  # ------------------------------------------------------------------- CBMC
   cbmc:
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - name: Bounded model checking of assertion harnesses
         run: |
           mkdir -p out
           set +e
           URL=$(curl -s https://api.github.com/repos/diffblue/cbmc/releases/latest \
-                | grep browser_download_url | grep -o 'https://[^"]*ubuntu[^"]*\.deb' | head -1)
+            | grep browser_download_url | grep -o 'https://[^"]*ubuntu[^"]*.deb' | head -1)
           if [ -n "$URL" ]; then
             curl -sL "$URL" -o /tmp/cbmc.deb && sudo dpkg -i /tmp/cbmc.deb > out/cbmc.log 2>&1
             sudo apt-get install -y -f >> out/cbmc.log 2>&1
@@ -495,15 +545,19 @@ jobs:
               --signed-overflow-check --float-overflow-check --nan-check >> out/cbmc.log 2>&1
           done
           echo ok > out/status.txt; echo 0 >> out/status.txt
+
       - uses: actions/upload-artifact@v4
         with: { name: out-cbmc, path: out/ }
 
-  # -------------------------------------------------------------- sanitizers
+  # ------------------------------------------------------------- sanitizers
   sanitizers:
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - name: Build with ASan and UBSan and run the headless hook
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq build-essential cmake clang \
@@ -522,16 +576,20 @@ jobs:
           rc=$?
           if [ $rc -eq 0 ]; then echo ok > out/status.txt; else echo failed > out/status.txt; fi
           echo $rc >> out/status.txt
+
       - uses: actions/upload-artifact@v4
         with: { name: out-sanitizers, path: out/ }
 
-  # ---------------------------------------------------------------- valgrind
+  # --------------------------------------------------------------- valgrind
   valgrind:
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     if: ${{ inputs.run_heavy }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - name: Memcheck and Helgrind over the headless hook
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq build-essential cmake valgrind \
@@ -549,16 +607,20 @@ jobs:
           valgrind --tool=helgrind ./audit/run-headless.sh > out/valgrind-helgrind.log 2>&1
           cat out/valgrind-memcheck.log out/valgrind-helgrind.log > out/valgrind.log
           echo ok > out/status.txt; echo 0 >> out/status.txt
+
       - uses: actions/upload-artifact@v4
         with: { name: out-valgrind, path: out/ }
 
-  # --------------------------------------------------------------- heaptrack
+  # -------------------------------------------------------------- heaptrack
   heaptrack:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     if: ${{ inputs.run_heavy }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - name: Allocation profile over the headless hook
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq heaptrack build-essential cmake \
@@ -573,16 +635,22 @@ jobs:
           heaptrack -o out/heaptrack.data ./audit/run-headless.sh > out/heaptrack.log 2>&1
           heaptrack_print out/heaptrack.data* >> out/heaptrack.log 2>&1 || true
           echo ok > out/status.txt; echo 0 >> out/status.txt
+
       - uses: actions/upload-artifact@v4
         with: { name: out-heaptrack, path: out/ }
 
-  # ----------------------------------------------------------------- fuzzing
+  # ---------------------------------------------------------------- fuzzing
   fuzz:
     runs-on: ubuntu-24.04
     timeout-minutes: 330
     if: ${{ inputs.run_heavy }}
+    env:
+      FUZZ_BUDGET: ${{ inputs.fuzz_budget_seconds }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - name: libFuzzer over every target, crash inputs preserved
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq clang \
@@ -596,7 +664,7 @@ jobs:
             echo skipped > out/status.txt; echo 0 >> out/status.txt; exit 0
           fi
           : > out/fuzz.log
-          BUDGET=${{ inputs.fuzz_budget_seconds }}
+          BUDGET="$FUZZ_BUDGET"
           N=$(echo "$TARGETS" | wc -w)
           PER=$(( BUDGET / (N > 0 ? N : 1) ))
           for t in $TARGETS; do
@@ -607,16 +675,22 @@ jobs:
             "$bin" -max_total_time="$PER" -artifact_prefix=out/crashes/ >> out/fuzz.log 2>&1
           done
           echo ok > out/status.txt; echo 0 >> out/status.txt
+
       - uses: actions/upload-artifact@v4
         with: { name: out-fuzz, path: out/ }
 
-  # -------------------------------------------------------------------- AFL++
+  # ------------------------------------------------------------------ AFL++
   afl:
     runs-on: ubuntu-24.04
     timeout-minutes: 330
     if: ${{ inputs.run_heavy }}
+    env:
+      FUZZ_BUDGET: ${{ inputs.fuzz_budget_seconds }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - name: AFL++ over the same harnesses
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq afl++ clang \
@@ -635,7 +709,7 @@ jobs:
             echo skipped > out/status.txt; echo 0 >> out/status.txt; exit 0
           fi
           : > out/afl.log
-          BUDGET=${{ inputs.fuzz_budget_seconds }}
+          BUDGET="$FUZZ_BUDGET"
           N=$(echo "$TARGETS" | wc -w)
           PER=$(( BUDGET / (N > 0 ? N : 1) ))
           export AFL_SKIP_CPUFREQ=1 AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 AFL_NO_UI=1
@@ -652,6 +726,7 @@ jobs:
           done
           find out -path '*crashes*' -type f ! -name 'README.txt' 2>/dev/null | head -100 > out/afl-crashes.txt
           echo ok > out/status.txt; echo 0 >> out/status.txt
+
       - uses: actions/upload-artifact@v4
         with: { name: out-afl, path: out/ }
 
@@ -661,34 +736,41 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - name: osv-scanner over vendored C and C++
         run: |
           mkdir -p out
           set +e
           URL=$(curl -s https://api.github.com/repos/google/osv-scanner/releases/latest \
-                | grep browser_download_url | grep -o 'https://[^"]*linux_amd64[^"]*' | head -1)
+            | grep browser_download_url | grep -o 'https://[^"]*linux_amd64[^"]*' | head -1)
           curl -sL "$URL" -o osv-scanner && chmod +x osv-scanner
           ./osv-scanner scan --format sarif --output out/osv.sarif . > out/osv.log 2>&1
           rc=$?
           if [ $rc -le 1 ]; then echo ok > out/status.txt; else echo failed > out/status.txt; fi
           echo $rc >> out/status.txt
+
       - uses: actions/upload-artifact@v4
         with: { name: out-osv, path: out/ }
 
-  # ---------------------------------------------------------------------- SBOM
+  # ------------------------------------------------------------------- SBOM
   sbom:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - name: CycloneDX SBOM plus Grype CVE scan
         run: |
           mkdir -p out
           set +e
           SY=$(curl -s https://api.github.com/repos/anchore/syft/releases/latest \
-               | grep browser_download_url | grep -o 'https://[^"]*linux_amd64\.tar\.gz' | head -1)
+            | grep browser_download_url | grep -o 'https://[^"]*linux_amd64.tar.gz' | head -1)
           GR=$(curl -s https://api.github.com/repos/anchore/grype/releases/latest \
-               | grep browser_download_url | grep -o 'https://[^"]*linux_amd64\.tar\.gz' | head -1)
+            | grep browser_download_url | grep -o 'https://[^"]*linux_amd64.tar.gz' | head -1)
           if [ -n "$SY" ]; then
             curl -sL "$SY" | tar xz -C /tmp syft && sudo install /tmp/syft /usr/local/bin/
             syft . -o cyclonedx-json=out/sbom.cdx.json -q > out/sbom.log 2>&1
@@ -705,63 +787,69 @@ jobs:
           fi
           if [ $rc -le 1 ]; then echo ok > out/status.txt; else echo failed > out/status.txt; fi
           echo $rc >> out/status.txt
+
       - uses: actions/upload-artifact@v4
         with: { name: out-sbom, path: out/ }
 
-  # ----------------------------------------------------------------- secrets
+  # ---------------------------------------------------------------- secrets
   gitleaks:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
       - name: gitleaks over full history
         run: |
           mkdir -p out
           set +e
           URL=$(curl -s https://api.github.com/repos/gitleaks/gitleaks/releases/latest \
-                | grep browser_download_url | grep -o 'https://[^"]*linux_x64[^"]*tar\.gz' | head -1)
+            | grep browser_download_url | grep -o 'https://[^"]*linux_x64[^"]*tar.gz' | head -1)
           curl -sL "$URL" | tar xz gitleaks
-          ./gitleaks detect --source . --report-format sarif --report-path out/gitleaks.sarif \
-            > out/gitleaks.log 2>&1
+          ./gitleaks detect --source . --report-format sarif --report-path out/gitleaks.sarif > out/gitleaks.log 2>&1
           rc=$?
           if [ $rc -le 1 ]; then echo ok > out/status.txt; else echo failed > out/status.txt; fi
           echo $rc >> out/status.txt
+
       - uses: actions/upload-artifact@v4
         with: { name: out-gitleaks, path: out/ }
 
-  # ----------------------------------------------------------- secrets, part 2
+  # ---------------------------------------------------------- secrets, part 2
   secrets-extra:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
       - name: Verified secrets (trufflehog) and entropy scan (detect-secrets)
         run: |
           mkdir -p out
           set +e
-          pip3 install --quiet detect-secrets || true
+          pip3 install --break-system-packages --quiet detect-secrets || pip3 install --quiet detect-secrets || true
           if command -v detect-secrets >/dev/null 2>&1; then
-            detect-secrets scan --all-files --force-use-all-plugins \
-              > out/detect-secrets.json 2> out/detect-secrets.log
+            detect-secrets scan --all-files --force-use-all-plugins > out/detect-secrets.json 2> out/detect-secrets.log
           else
             echo "SKIPPED: detect-secrets install failed" > out/detect-secrets.log
           fi
           URL=$(curl -s https://api.github.com/repos/trufflesecurity/trufflehog/releases/latest \
-                | grep browser_download_url | grep -o 'https://[^"]*linux_amd64\.tar\.gz' | head -1)
+            | grep browser_download_url | grep -o 'https://[^"]*linux_amd64.tar.gz' | head -1)
           if [ -n "$URL" ]; then
             curl -sL "$URL" | tar xz trufflehog
-            ./trufflehog filesystem . --json --no-update --results=verified,unknown \
-              > out/trufflehog.json 2> out/trufflehog.log
+            ./trufflehog filesystem . --json --no-update --results=verified,unknown > out/trufflehog.json 2> out/trufflehog.log
           else
             echo "SKIPPED: could not resolve a trufflehog release asset" > out/trufflehog.log
           fi
           echo ok > out/status.txt; echo 0 >> out/status.txt
+
       - uses: actions/upload-artifact@v4
         with: { name: out-secrets-extra, path: out/ }
 
-  # ------------------------------------------------------------ the one file
+  # ----------------------------------------------------------- the one file
   report:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -771,17 +859,22 @@ jobs:
     if: always()
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
       - uses: actions/download-artifact@v4
         with:
           path: raw
           pattern: out-*
           merge-multiple: false
+
       - name: Merge every tool into KyroSpades-Audit.md
         run: |
-          pip3 install --quiet lizard || true
+          pip3 install --break-system-packages --quiet lizard || pip3 install --quiet lizard || true
           python3 - <<'PY'
           import json, os, re, glob, subprocess, collections
+
           RAW, OUT = 'raw', 'KyroSpades-Audit.md'
           SEV = {'error':'high','warning':'medium','note':'low','none':'info'}
           ORD = {'high':0,'medium':1,'low':2,'info':3}
@@ -795,12 +888,16 @@ jobs:
                       'semgrep','flawfinder','smatch','coccinelle','frama-c','esbmc','cbmc',
                       'sanitizers','valgrind','heaptrack','fuzz','afl','osv','sbom',
                       'gitleaks','secrets-extra']
+
           findings, sections, statuses = [], [], {}
+
           def add(tool, sev, rule, msg, file='', line=0):
               findings.append({'tool':tool,'severity':sev,'rule':rule,
                                'message':msg[:300],'file':file,'line':line})
+
           gccpat = re.compile(r'^(.+?\.[ch]):(\d+):(\d+): (warning|error|note): (.*)$')
           genpat = re.compile(r'^(.+?\.[A-Za-z]+):(\d+):(?:(\d+):)?\s*(?:warning|error|note)?:?\s*(.*)$')
+
           for d in sorted(glob.glob(RAW + '/out-*')):
               tool = os.path.basename(d)[4:]
               st, rc = 'unknown', ''
@@ -810,6 +907,7 @@ jobs:
                   st = L[0] if L else 'unknown'; rc = L[1] if len(L) > 1 else ''
               statuses[tool] = (st, rc)
               n0 = len(findings)
+
               for s in glob.glob(d + '/*.sarif'):
                   try: data = json.load(open(s, errors='replace'))
                   except Exception: continue
@@ -820,6 +918,7 @@ jobs:
                               res.get('ruleId','?'), res.get('message',{}).get('text',''),
                               pl.get('artifactLocation',{}).get('uri',''),
                               pl.get('region',{}).get('startLine',0))
+
               wl = os.path.join(d, 'warnings.log')
               if os.path.exists(wl):
                   for line in open(wl, errors='replace'):
@@ -828,6 +927,7 @@ jobs:
                           sev = {'warning':'medium','error':'high','note':'info'}[m.group(4)]
                           rule = 'gcc-fanalyzer' if '-Wanalyzer' in m.group(5) else 'gcc-' + m.group(4)
                           add('gcc-warnings', sev, rule, m.group(5), m.group(1), int(m.group(2)))
+
               for lg in ('sanitizers.log','valgrind.log','fuzz.log'):
                   lp = os.path.join(d, lg)
                   if not os.path.exists(lp): continue
@@ -837,6 +937,7 @@ jobs:
                                    ('ERROR: libFuzzer','high')):
                       for line in [l for l in txt.splitlines() if pat in l][:25]:
                           add(tool, sev, pat, line.strip())
+
               for lgname, pats in (
                   ('cbmc.log', [('VERIFICATION FAILED','high','cbmc-verification'),
                                 (': FAILURE','high','cbmc-failure')]),
@@ -851,6 +952,7 @@ jobs:
                           for pat, sev, rule in pats:
                               if pat in line:
                                   add(tool, sev, rule, line.strip())
+
               for lgname in ('actionlint.log','smatch.log','coccinelle.log'):
                   lp = os.path.join(d, lgname)
                   if not os.path.exists(lp): continue
@@ -860,6 +962,7 @@ jobs:
                           try: ln = int(m.group(2))
                           except ValueError: ln = 0
                           add(tool, 'medium', lgname.split('.')[0], m.group(4)[:300], m.group(1), ln)
+
               tj = os.path.join(d, 'trufflehog.json')
               if os.path.exists(tj):
                   for line in open(tj, errors='replace'):
@@ -868,6 +971,7 @@ jobs:
                       det = o.get('DetectorName') or 'secret'
                       fpath = ((o.get('SourceMetadata') or {}).get('Data') or {}).get('Filesystem',{}).get('file','')
                       add(tool, 'high', 'trufflehog', f'verified {det} credential', fpath)
+
               dj = os.path.join(d, 'detect-secrets.json')
               if os.path.exists(dj):
                   try: o = json.load(open(dj, errors='replace'))
@@ -877,15 +981,19 @@ jobs:
                           add(tool, 'medium', h.get('type','secret'),
                               f"possible {h.get('type','secret')}", fname,
                               h.get('line_number',0))
+
               logs = sorted(glob.glob(d + '/*.log'))
               excerpt = ''
               if logs:
                   t = open(logs[0], errors='replace').read().splitlines()
                   excerpt = '\n'.join(t[-200:])
               sections.append((tool, st, rc, len(findings) - n0, excerpt))
+
           for t in EXPECTED:
               statuses.setdefault(t, ('not run (job skipped or failed before upload)', ''))
+
           rank = sorted(findings, key=lambda f: (ORD[f['severity']], WEIGHT.get(f['tool'],4), f['tool']))
+
           hot = []
           try:
               csv = subprocess.run(['lizard','--csv','.'], capture_output=True, text=True,
@@ -905,10 +1013,12 @@ jobs:
               hot = sorted(hot, key=lambda x: -(x[0] * (1 + x[1]/200.0)))[:20]
           except Exception:
               hot = []
+
           sha = subprocess.run(['git','rev-parse','--short','HEAD'],
                                capture_output=True, text=True).stdout.strip()
           now = subprocess.run(['date','-u'], capture_output=True, text=True).stdout.strip()
           bs = statuses.get('build', ('unknown',''))[0]
+
           with open(OUT, 'w') as fh:
               fh.write(f"# KyroSpades deep audit\n\n")
               fh.write(f"Commit `{sha}` - {now}\n\n")
@@ -941,9 +1051,12 @@ jobs:
               fh.write("\nEnablers: audit/build.sh, audit/run-headless.sh, audit/fuzz-targets.txt, "
                        "audit/eva-targets.txt, audit/esbmc/*.c, audit/cbmc/*.c, audit/cocci/*.cocci, "
                        ".semgrep/custom.yml\n")
+
           print(f"report written: {len(findings)} findings, {len(sections)} tool sections")
           PY
+
       - uses: actions/upload-artifact@v4
         with: { name: audit-report, path: KyroSpades-Audit.md }
+
       - uses: actions/upload-artifact@v4
         with: { name: raw-tool-outputs, path: raw/ }

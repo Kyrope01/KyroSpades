@@ -34,6 +34,9 @@ void water_invalidate(void);
 /* Queue an incremental refresh after an individual terrain edit. */
 void water_map_changed(void);
 
+/* True whenever the dedicated water pass replaces y < WATER_LEVEL blocks in
+ * chunk meshes (camera-independent, safe to read on chunk worker threads). */
+bool water_surface_enabled(void);
 bool water_shader_active(void);
 
 void water_reflection_pass(void);

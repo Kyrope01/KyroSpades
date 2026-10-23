@@ -261,6 +261,7 @@ static struct {
         bool mesh_valid;
         bool mesh_had_waves;
         unsigned int mesh_snapshot_revision;
+        unsigned int mesh_map_revision;
         float mesh_render_distance;
         float mesh_camera_x, mesh_camera_y, mesh_camera_z;
         mat4 mesh_projection;
@@ -418,11 +419,18 @@ static unsigned int water_current_map_revision(void) {
 }
 
 void water_invalidate(void) {
+        water_map_changed();
         pthread_mutex_lock(&water_lock);
         if(wr.cache)
                 memset(wr.cache, 0, (size_t)wr.size_x * (size_t)wr.size_z * sizeof(uint32_t));
         if(wr.state)
                 memset(wr.state, 0, (size_t)wr.size_x * (size_t)wr.size_z * sizeof(uint8_t));
+        if(wr.render_cache && wr.render_size_x > 0 && wr.render_size_z > 0)
+                memset(wr.render_cache, 0,
+                       (size_t)wr.render_size_x * (size_t)wr.render_size_z * sizeof(uint32_t));
+        if(wr.render_state && wr.render_size_x > 0 && wr.render_size_z > 0)
+                memset(wr.render_state, 0,
+                       (size_t)wr.render_size_x * (size_t)wr.render_size_z * sizeof(uint8_t));
         if(wr.dirty_rows)
                 memset(wr.dirty_rows, 0, (size_t)wr.size_z * sizeof(uint8_t));
         wr.dirty_row_count = 0;
@@ -434,13 +442,17 @@ void water_invalidate(void) {
         pthread_mutex_unlock(&water_lock);
 }
 
-bool water_shader_active(void) {
+bool water_surface_enabled(void) {
         /* Keep the original BetterSpades fast path unless the user explicitly
-           enables enhanced water. Above-surface rendering also preserves the
-           established underwater terrain fallback. */
+           enables enhanced water or waves. Camera-independent so chunk workers
+           never bake transient eye height into static terrain VBOs. */
         if(!settings.water_shader && !settings.water_waves)
                 return false;
-        return camera_y > WATER_LEVEL + 0.05F && map_size_x > 0 && map_size_z > 0;
+        return map_size_x > 0 && map_size_z > 0;
+}
+
+bool water_shader_active(void) {
+        return water_surface_enabled();
 }
 
 static int water_span(void) {
@@ -621,6 +633,18 @@ static void water_mark_row_dirty(int z) {
         wr.dirty_row_count++;
 }
 
+static void water_gl_ensure(void) {
+        if(wr.gl_init)
+                return;
+        int has_normals = 0;
+#ifdef OPENGL_CORE
+        has_normals = water_program != 0;
+#endif
+        tesselator_create(&wr.tess, VERTEX_FLOAT, has_normals, 0);
+        glx_displaylist_create(&wr.dl, true, has_normals != 0);
+        wr.gl_init = true;
+}
+
 static bool water_buffers_ensure(void) {
         if(wr.cache && (wr.size_x != map_size_x || wr.size_z != map_size_z)) {
                 free(wr.cache);
@@ -670,15 +694,7 @@ static bool water_buffers_ensure(void) {
                 wr.dirty_row_count = 0;
         }
 
-        if(!wr.gl_init) {
-                int has_normals = 0;
-#ifdef OPENGL_CORE
-                has_normals = water_program != 0;
-#endif
-                tesselator_create(&wr.tess, VERTEX_FLOAT, has_normals, 0);
-                glx_displaylist_create(&wr.dl, true, has_normals != 0);
-                wr.gl_init = true;
-        }
+        water_gl_ensure();
 
         return true;
 }
@@ -868,8 +884,44 @@ static uint32_t water_sunlit_color(uint32_t color) {
         return rgba(red(color) * sun, green(color) * sun, blue(color) * sun, alpha(color));
 }
 
+static bool water_sample_surface_cell(int wx, int wz, int size_x, int size_z,
+                                      const float fog[3], uint32_t* out_color) {
+        /* Ground truth for an exposed water cell is air at WATER_LEVEL.
+           Probing geometry directly under map_read_lock() ensures frame-1 map
+           loads and live block edits never leave missing water holes while the
+           asynchronous reflection worker is still catching up. */
+        if(!map_isair_nolock(wx, (int)WATER_LEVEL, wz))
+                return false;
+
+        if(wr.render_cache && wr.render_state
+           && wr.render_size_x == size_x && wr.render_size_z == size_z) {
+                size_t idx = (size_t)wz * (size_t)size_x + (size_t)wx;
+                if(wr.render_state[idx] == WATER_CELL_SURFACE) {
+                        uint32_t cached = wr.render_cache[idx];
+                        if(cached >> 24) {
+                                *out_color = cached;
+                                return true;
+                        }
+                }
+        }
+
+        uint32_t wc = water_seabed_color(wx, wz);
+        float h = cell_hash(wx, wz);
+        float shimmer = 0.85F + 0.22F * h;
+        float wr_ = (float)red(wc) * shimmer;
+        float wg_ = (float)green(wc) * shimmer;
+        float wb_ = (float)blue(wc) * shimmer;
+        float w = 0.20F + 0.70F * 0.25F;
+        float r = wr_ + (fog[0] * 255.0F - wr_) * w;
+        float g = wg_ + (fog[1] * 255.0F - wg_) * w;
+        float b = wb_ + (fog[2] * 255.0F - wb_) * w;
+        *out_color = rgba((int)fminf(r, 255.0F), (int)fminf(g, 255.0F), (int)fminf(b, 255.0F), 255);
+        return true;
+}
+
 static void water_render_tile(int tx, int tz, int x0, int x1, int z0, int z1,
-                              float rd, float y, float render_time, size_t* n) {
+                              int size_x, int size_z, float rd, float y,
+                              float render_time, const float fog[3], size_t* n) {
         int za = max(tz, z0);
         int zb = min(tz + WATER_TILE, z1);
 
@@ -883,28 +935,22 @@ static void water_render_tile(int tx, int tz, int x0, int x1, int z0, int z1,
                 int xa = max(max(tx, x0), (int)camera_x - hw);
                 int xb = min(min(tx + WATER_TILE, x1), (int)camera_x + hw + 1);
 
-                int wrapped_z = water_wrap(z, wr.render_size_z);
-                uint32_t* row = wr.render_cache + (size_t)wrapped_z * wr.render_size_x;
-                uint8_t* state_row = wr.render_state + (size_t)wrapped_z * wr.render_size_x;
+                int wrapped_z = water_wrap(z, size_z);
 
                 for(int x = xa; x < xb; x++) {
-                        int wrapped_x = water_wrap(x, wr.render_size_x);
+                        int wrapped_x = water_wrap(x, size_x);
                         bool tile_waves = settings.water_waves && settings.water_wave_mode == 1;
-                        if(!tile_waves && state_row[wrapped_x] != WATER_CELL_SURFACE)
-                                continue;
-
-                        uint32_t c = row[wrapped_x];
-                        /* A known water cell can temporarily have no fresh
-                           reflection color after camera movement. Render a safe
-                           water tint rather than exposing a hole. */
-                        if(!(c >> 24))
-                                c = rgba(60, 100, 160, 255);
+                        uint32_t c = 0;
+                        if(!tile_waves) {
+                                if(!water_sample_surface_cell(wrapped_x, wrapped_z, size_x, size_z, fog, &c))
+                                        continue;
 #ifdef OPENGL_CORE
-                        if(!water_program)
-                                c = water_sunlit_color(water_animated_color(c, (float)wrapped_x, (float)wrapped_z, render_time));
+                                if(!water_program)
+                                        c = water_sunlit_color(water_animated_color(c, (float)wrapped_x, (float)wrapped_z, render_time));
 #else
-                        c = water_sunlit_color(water_animated_color(c, (float)wrapped_x, (float)wrapped_z, render_time));
+                                c = water_sunlit_color(water_animated_color(c, (float)wrapped_x, (float)wrapped_z, render_time));
 #endif
+                        }
 
                         if(settings.water_waves) {
                                 float t = render_time * settings.water_wave_speed;
@@ -928,16 +974,12 @@ static void water_render_tile(int tx, int tz, int x0, int x1, int z0, int z1,
                                         /* Compute tile-averaged color from all blocks in this tile */
                                         int ar = 0, ag = 0, ab = 0, acount = 0;
                                         for(int dz2 = 0; dz2 < ts && (z + dz2) < zb; dz2++) {
-                                                int sample_z = water_wrap(z + dz2, wr.render_size_z);
-                                                uint32_t* row2 = wr.render_cache + (size_t)sample_z * wr.render_size_x;
-                                                uint8_t* state_row2 = wr.render_state + (size_t)sample_z * wr.render_size_x;
+                                                int sample_z = water_wrap(z + dz2, size_z);
                                                 for(int dx2 = 0; dx2 < ts && (x + dx2) < xb; dx2++) {
-                                                        int sample_x = water_wrap(x + dx2, wr.render_size_x);
-                                                        if(state_row2[sample_x] != WATER_CELL_SURFACE)
+                                                        int sample_x = water_wrap(x + dx2, size_x);
+                                                        uint32_t bc = 0;
+                                                        if(!water_sample_surface_cell(sample_x, sample_z, size_x, size_z, fog, &bc))
                                                                 continue;
-                                                        uint32_t bc = row2[sample_x];
-                                                        if(!(bc >> 24))
-                                                                bc = rgba(60, 100, 160, 255);
                                                         ar += red(bc);
                                                         ag += green(bc);
                                                         ab += blue(bc);
@@ -1096,24 +1138,29 @@ static bool water_mesh_view_changed(void) {
 #endif
 
 void water_render(void) {
-        if(!water_shader_active() || !wr.gl_init || !wr.render_cache || !wr.render_state)
+        if(!water_shader_active())
                 return;
 
-        /* water_reflection_pass() publishes completed rows before it queues the
-           next worker slice. Rendering only the stable snapshot here avoids a
-           second mutex race in the hot draw path and never waits on raycasts. */
-        if(wr.render_size_x <= 0 || wr.render_size_z <= 0)
+        int size_x = map_size_x;
+        int size_z = map_size_z;
+        if(size_x <= 0 || size_z <= 0)
                 return;
+
+        water_gl_ensure();
 
         float rd = settings.render_distance;
         float render_time = (float)window_time();
         bool waves_enabled = settings.water_waves != 0;
+        unsigned int map_revision = water_current_map_revision();
+        float fog[3];
+        fog_color_render(fog);
 #ifdef OPENGL_CORE
         float mesh_dx = camera_x - wr.mesh_camera_x;
         float mesh_dz = camera_z - wr.mesh_camera_z;
         bool rebuild_mesh = !water_program || waves_enabled || !wr.mesh_valid
                 || wr.mesh_had_waves != waves_enabled
                 || wr.mesh_snapshot_revision != wr.snapshot_revision
+                || wr.mesh_map_revision != map_revision
                 || wr.mesh_render_distance != rd
                 || mesh_dx * mesh_dx + mesh_dz * mesh_dz
                            >= WATER_MESH_RECENTER_DISTANCE * WATER_MESH_RECENTER_DISTANCE
@@ -1124,6 +1171,7 @@ void water_render(void) {
         /* Fixed-function paths have no time uniform; rebuild their colors so
            the established shimmer remains continuous rather than freezing. */
         bool rebuild_mesh = true;
+        (void)map_revision;
 #endif
 
         if(rebuild_mesh) {
@@ -1137,10 +1185,14 @@ void water_render(void) {
                 tesselator_clear(&wr.tess);
                 size_t n = 0;
 
-                for(int tz = z0 & ~(WATER_TILE - 1); tz < z1; tz += WATER_TILE)
-                        for(int tx = x0 & ~(WATER_TILE - 1); tx < x1; tx += WATER_TILE)
-                                if(camera_CubeInFrustum(tx + WATER_TILE / 2, 0.0F, tz + WATER_TILE / 2, WATER_TILE / 2, 2.0F))
-                                        water_render_tile(tx, tz, x0, x1, z0, z1, rd, y, render_time, &n);
+                map_read_lock();
+                if(map_size_x == size_x && map_size_z == size_z) {
+                        for(int tz = z0 & ~(WATER_TILE - 1); tz < z1; tz += WATER_TILE)
+                                for(int tx = x0 & ~(WATER_TILE - 1); tx < x1; tx += WATER_TILE)
+                                        if(camera_CubeInFrustum(tx + WATER_TILE / 2, 0.0F, tz + WATER_TILE / 2, WATER_TILE / 2, 2.0F))
+                                                water_render_tile(tx, tz, x0, x1, z0, z1, size_x, size_z, rd, y, render_time, fog, &n);
+                }
+                map_read_unlock();
 
                 if(!n) {
                         wr.mesh_valid = false;
@@ -1165,11 +1217,9 @@ void water_render(void) {
 
 #ifdef OPENGL_CORE
         if(custom_shader) {
-                float fog[3];
-                fog_color_render(fog);
                 glUniform1f(water_uniform_enhanced, settings.water_shader ? 1.0F : 0.0F);
                 glUniform3f(water_uniform_camera, camera_x, camera_y, camera_z);
-                glUniform2f(water_uniform_map_size, (float)wr.render_size_x, (float)wr.render_size_z);
+                glUniform2f(water_uniform_map_size, (float)size_x, (float)size_z);
                 glUniform1f(water_uniform_fog_distance,
                             glx_fog && settings.render_distance > 0.0F ? 1.0F / settings.render_distance : 0.0F);
                 glUniform3f(water_uniform_fog_color, fog[0], fog[1], fog[2]);
@@ -1194,11 +1244,18 @@ void water_render(void) {
         glEnable(GL_POLYGON_OFFSET_FILL);
         glPolygonOffset(-2.0F, -2.0F);
 
+        float max_crest = WATER_LEVEL + 0.05F
+                + (waves_enabled ? 0.27F * fmaxf(settings.water_wave_intensity, 0.0F) : 0.0F);
+        GLboolean cull_was_enabled = glIsEnabled(GL_CULL_FACE);
+        if(cull_was_enabled && camera_y <= max_crest)
+                glDisable(GL_CULL_FACE);
+
         if(rebuild_mesh) {
                 tesselator_glx(&wr.tess, &wr.dl);
                 wr.mesh_valid = true;
                 wr.mesh_had_waves = waves_enabled;
                 wr.mesh_snapshot_revision = wr.snapshot_revision;
+                wr.mesh_map_revision = map_revision;
                 wr.mesh_render_distance = rd;
                 wr.mesh_camera_x = camera_x;
                 wr.mesh_camera_y = camera_y;
@@ -1207,6 +1264,9 @@ void water_render(void) {
                 memcpy(wr.mesh_view, matrix_view, sizeof(mat4));
         }
         glx_displaylist_draw(&wr.dl, GLX_DISPLAYLIST_ENHANCED);
+
+        if(cull_was_enabled && camera_y <= max_crest)
+                glEnable(GL_CULL_FACE);
 
         glPolygonOffset(previous_polygon_factor, previous_polygon_units);
         if(polygon_offset_was_enabled)

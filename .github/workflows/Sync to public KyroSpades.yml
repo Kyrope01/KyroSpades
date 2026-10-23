@@ -2,17 +2,6 @@ name: Sync to public KyroSpades
 
 on:
   workflow_dispatch:
-    inputs:
-      branch:
-        description: "KS-Dev branch to send to the public repo"
-        required: true
-        default: "main"
-        type: string
-      dry_run:
-        description: "Dry run - show what would be sent, push nothing"
-        required: false
-        default: true
-        type: boolean
 
 permissions:
   contents: read
@@ -30,41 +19,30 @@ jobs:
           TOKEN: ${{ secrets.KYROSPADES_PAT }}
         run: |
           if [ -z "$TOKEN" ]; then
-            echo "::error::The KYROSPADES_PAT secret is not set, so this cannot write to KyroSpades."
-            echo "Add it in this repo: Settings > Secrets and variables > Actions > New repository secret."
-            echo "Name it exactly KYROSPADES_PAT."
+            echo "::error::The KYROSPADES_PAT secret is not set."
             exit 1
           fi
-          echo "KYROSPADES_PAT is set."
 
-      - name: Check out KS-Dev
+      - name: Check out KS-Dev main
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.event.inputs.branch }}
-          # Do not store Actions' own token in the git config. It applies to
-          # every github.com URL and outranks the token in PUBLIC_URL, so the
-          # push below would run as github-actions[bot] and get a 403.
+          ref: main
           persist-credentials: false
 
-      - name: Build the sync branch and open the pull request
+      - name: Build sync branch and open pull request
         env:
           GH_TOKEN: ${{ secrets.KYROSPADES_PAT }}
           PUBLIC_URL: https://x-access-token:${{ secrets.KYROSPADES_PAT }}@github.com/Kyrope01/KyroSpades.git
-          SRC: ${{ github.event.inputs.branch }}
-          DRY: ${{ github.event.inputs.dry_run }}
         run: |
           set -euo pipefail
 
           PUBLIC_REPO="Kyrope01/KyroSpades"
           BASE="main"
-          BRANCH="sync/from-ks-dev"
+          BRANCH="sync/from-ks-dev-main"
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          # Belt and braces: drop any leftover github.com auth header so the
-          # only credential git can use is the one inside PUBLIC_URL.
           git config --local --unset-all "http.https://github.com/.extraheader" 2>/dev/null || true
 
           echo "==> fetching $PUBLIC_REPO"
@@ -72,30 +50,25 @@ jobs:
           git fetch --quiet public
           BASE_SHA="$(git rev-parse "public/$BASE")"
 
-          # The two repos share no history, so a plain merge is impossible.
-          # Build on top of KyroSpades' main instead, which gives the PR a real
-          # common ancestor and keeps the diff down to the actual changes.
-          echo "==> building '$BRANCH' on top of $PUBLIC_REPO/$BASE (${BASE_SHA:0:7})"
+          echo "==> building '$BRANCH' on top of $PUBLIC_REPO/$BASE"
           WT="$(mktemp -d)/wt"
           git worktree add --quiet --detach "$WT" "$BASE_SHA"
 
-          # Empty first so files deleted in KS-Dev are deleted here too.
           find "$WT" -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
-          git archive "$SRC" | tar -x -C "$WT"
+          git archive main | tar -x -C "$WT"
 
           cd "$WT"
           git add -A
 
-          WANT_TREE="$(git rev-parse "${SRC}^{tree}")"
+          WANT_TREE="$(git rev-parse "main^{tree}")"
           GOT_TREE="$(git write-tree)"
           if [ "$WANT_TREE" != "$GOT_TREE" ]; then
-            echo "::error::staged tree $GOT_TREE does not match ${SRC} tree $WANT_TREE"
+            echo "::error::staged tree does not match main tree"
             exit 1
           fi
-          echo "==> tree matches ${SRC} exactly (${GOT_TREE:0:7})"
 
           if git diff --quiet --cached HEAD; then
-            echo "==> nothing to sync: $PUBLIC_REPO/$BASE already matches ${SRC}"
+            echo "==> nothing to sync: $PUBLIC_REPO/$BASE already matches main"
             exit 0
           fi
 
@@ -103,19 +76,14 @@ jobs:
           git diff --stat HEAD
           CHANGED="$(git diff --name-only HEAD | wc -l | tr -d ' ')"
 
-          git commit --quiet -m "Sync from KS-Dev ${SRC}"
+          git commit --quiet -m "Sync from KS-Dev main"
           echo "==> ${CHANGED} file(s) changed"
-
-          if [ "$DRY" = "true" ]; then
-            echo "==> DRY RUN: verified, nothing pushed. Untick 'dry run' to send it."
-            exit 0
-          fi
 
           echo "==> pushing $BRANCH"
           git push --quiet --force public "HEAD:refs/heads/${BRANCH}"
 
           {
-            echo "Synced from the private \`KS-Dev\` repo, branch \`${SRC}\`."
+            echo "Synced from the private \`KS-Dev\` repo, branch \`main\`."
             echo
             echo "**${CHANGED} file(s) changed.**"
             git diff --name-status HEAD~1
@@ -125,9 +93,8 @@ jobs:
             && [ -n "$EXISTING" ]; then
             echo "==> updating existing pull request #${EXISTING}"
             gh pr edit "$EXISTING" --repo "$PUBLIC_REPO" --body-file /tmp/pr-body.md
-            echo "https://github.com/${PUBLIC_REPO}/pull/${EXISTING}"
           else
             gh pr create --repo "$PUBLIC_REPO" --base "$BASE" --head "$BRANCH" \
-              --title "Sync from KS-Dev ${SRC}" --body-file /tmp/pr-body.md
+              --title "Sync from KS-Dev main" --body-file /tmp/pr-body.md
           fi
           echo "==> done"
