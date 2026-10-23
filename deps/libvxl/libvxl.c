@@ -50,6 +50,18 @@ static int cmp(const void* a, const void* b) {
 	return (aa->position > bb->position) - (aa->position < bb->position);
 }
 
+static struct libvxl_block* libvxl_chunk_find(struct libvxl_chunk* chunk,
+											 uint32_t pos) {
+	/* Use a named key: fortified libc implementations can expose bsearch as a
+	   function-like macro, where commas in a compound literal are parsed as
+	   argument separators. */
+	struct libvxl_block key = {
+		.position = pos,
+	};
+	return bsearch(&key, chunk->blocks, chunk->index,
+				   sizeof(struct libvxl_block), cmp);
+}
+
 static bool libvxl_chunk_put(struct libvxl_chunk* chunk, uint32_t pos,
 							 uint32_t color) {
 	libvxl_assert(chunk, "chunk pointer is null");
@@ -261,18 +273,12 @@ bool libvxl_create(struct libvxl_map* map, size_t w, size_t h, size_t d,
 			bool B = libvxl_geometry_get(map, x, map->height - 1, z);
 
 			struct libvxl_chunk* c1 = chunk_fposition(map, x, 0);
-			struct libvxl_block* b1 = bsearch(
-				&(struct libvxl_block) {
-					.position = pos_key(x, 0, z),
-				},
-				c1->blocks, c1->index, sizeof(struct libvxl_block), cmp);
+			struct libvxl_block* b1
+				= libvxl_chunk_find(c1, pos_key(x, 0, z));
 
 			struct libvxl_chunk* c2 = chunk_fposition(map, x, map->height - 1);
-			struct libvxl_block* b2 = bsearch(
-				&(struct libvxl_block) {
-					.position = pos_key(x, map->height - 1, z),
-				},
-				c2->blocks, c2->index, sizeof(struct libvxl_block), cmp);
+			struct libvxl_block* b2
+				= libvxl_chunk_find(c2, pos_key(x, map->height - 1, z));
 
 			if(A && !B && !b1 && !libvxl_chunk_insert(c1, pos_key(x, 0, z),
 									DEFAULT_COLOR(x, 0, z))) goto fail;
@@ -286,18 +292,12 @@ bool libvxl_create(struct libvxl_map* map, size_t w, size_t h, size_t d,
 			bool B = libvxl_geometry_get(map, map->width - 1, y, z);
 
 			struct libvxl_chunk* c1 = chunk_fposition(map, 0, y);
-			struct libvxl_block* b1 = bsearch(
-				&(struct libvxl_block) {
-					.position = pos_key(0, y, z),
-				},
-				c1->blocks, c1->index, sizeof(struct libvxl_block), cmp);
+			struct libvxl_block* b1
+				= libvxl_chunk_find(c1, pos_key(0, y, z));
 
 			struct libvxl_chunk* c2 = chunk_fposition(map, map->width - 1, y);
-			struct libvxl_block* b2 = bsearch(
-				&(struct libvxl_block) {
-					.position = pos_key(map->width - 1, y, z),
-				},
-				c2->blocks, c2->index, sizeof(struct libvxl_block), cmp);
+			struct libvxl_block* b2
+				= libvxl_chunk_find(c2, pos_key(map->width - 1, y, z));
 
 			if(A && !B && !b1 && !libvxl_chunk_insert(c1, pos_key(0, y, z),
 									DEFAULT_COLOR(0, y, z))) goto fail;
@@ -602,11 +602,7 @@ uint32_t libvxl_map_get(struct libvxl_map* map, int x, int y, int z) {
 	if(!libvxl_geometry_get(map, x, y, z))
 		return 0;
 	struct libvxl_chunk* chunk = chunk_fposition(map, x, y);
-	struct libvxl_block* loc = bsearch(
-		&(struct libvxl_block) {
-			.position = pos_key(x, y, z),
-		},
-		chunk->blocks, chunk->index, sizeof(struct libvxl_block), cmp);
+	struct libvxl_block* loc = libvxl_chunk_find(chunk, pos_key(x, y, z));
 	return loc ? loc->color : DEFAULT_COLOR(x, y, z);
 }
 
@@ -677,12 +673,7 @@ static void libvxl_map_setair_internal(struct libvxl_map* map, int x, int y,
 		return;
 
 	struct libvxl_chunk* chunk = chunk_fposition(map, x, y);
-
-	struct libvxl_block* loc = bsearch(
-		&(struct libvxl_block) {
-			.position = pos_key(x, y, z),
-		},
-		chunk->blocks, chunk->index, sizeof(struct libvxl_block), cmp);
+	struct libvxl_block* loc = libvxl_chunk_find(chunk, pos_key(x, y, z));
 
 	if(loc) {
 		memmove(loc, loc + 1,
