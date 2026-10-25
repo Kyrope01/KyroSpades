@@ -362,6 +362,8 @@ void config_save() {
         config_setf("client", "contrast", settings.contrast);
         config_setf("client", "vignette", settings.vignette);
         config_seti("client", "lens_flare", settings.lens_flare);
+        config_seti("client", "object_outlines", settings.object_outlines);
+        config_setf("client", "object_outline_thickness", settings.object_outline_thickness);
         config_seti("client", "chromatic_aberration", settings.chromatic_aberration);
         config_setf("client", "chromatic_aberration_strength", settings.chromatic_aberration_strength);
         config_seti("client", "filmic_tonemapping", settings.filmic_tonemapping);
@@ -543,6 +545,9 @@ IMPORT_SETTING(settings.camera_movement, camera_movement, atoi(value));
                 IMPORT_SETTING(settings.contrast, contrast, fmaxf(-100.0F, fminf(100.0F, atof(value))));
                 IMPORT_SETTING(settings.vignette, vignette, fmaxf(0.0F, fminf(100.0F, atof(value))));
                 IMPORT_SETTING(settings.lens_flare, lens_flare, atoi(value));
+                IMPORT_SETTING(settings.object_outlines, object_outlines, atoi(value));
+                IMPORT_SETTING(settings.object_outline_thickness, object_outline_thickness,
+                               fmaxf(0.5F, fminf(8.0F, atof(value))));
                 IMPORT_SETTING(settings.chromatic_aberration, chromatic_aberration, atoi(value));
                 IMPORT_SETTING(settings.chromatic_aberration_strength, chromatic_aberration_strength,
                                fmaxf(0.0F, fminf(10.0F, atof(value))));
@@ -1336,6 +1341,31 @@ void config_reload() {
                                  .name = "Lens flare",
                                  .category = "Visual Effects",
                                  .subcategory = "Lighting",
+                         });
+        list_add(&config_settings,
+                         &(struct config_setting) {
+                                 .value = &settings_tmp.object_outlines,
+                                 .type = CONFIG_TYPE_INT,
+                                 .min = 0,
+                                 .max = 1,
+                                 .help = "Draw dark contours around map and player depth edges; unavailable on iOS",
+                                 .name = "Object outlines",
+                                 .category = "Visual Effects",
+                                 .subcategory = "Post Processing",
+                         });
+        list_add(&config_settings,
+                         &(struct config_setting) {
+                                 .value = &settings_tmp.object_outline_thickness,
+                                 .type = CONFIG_TYPE_FLOAT,
+                                 .min = 0,
+                                 .max = 8,
+                                 .float_min = 0.5F,
+                                 .float_max = 8.0F,
+                                 .numeric_input = 1,
+                                 .help = "Enter 0.5 to 8 pixels; edges fade with scene fog",
+                                 .name = "Outline thickness (px)",
+                                 .category = "Visual Effects",
+                                 .subcategory = "Post Processing",
                          });
         list_add(&config_settings,
                          &(struct config_setting) {

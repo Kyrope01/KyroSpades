@@ -24,15 +24,17 @@ stub = r'''
 #define EXT_256PLAYERS 192
 #define EXT_MESSAGES 193
 #define EXT_KICKREASON 194
+#define EXT_PLAYER_OUTFIT 0x35
 #pragma pack(push,1)
 struct PacketExtInfoEntry {uint8_t id,version;};
 struct PacketExtInfo {uint8_t length;struct PacketExtInfoEntry entries[256];};
 #pragma pack(pop)
-static bool negotiated, flashlight_negotiated;
+static bool negotiated, flashlight_negotiated, outfit_negotiated;
 static int sends, sent_id, sent_len;
 static struct PacketExtInfo reply;
 static void teamplay_set_negotiated(bool yes) {negotiated=yes;}
 static void flashlight_ext_set_negotiated(bool yes) {flashlight_negotiated=yes;}
+static void player_outfit_ext_set_negotiated(bool yes) {outfit_negotiated=yes;}
 static void network_send(int id,void* data,int len) {
     sent_id=id;sent_len=len;sends++;memcpy(&reply,data,(size_t)len);
 }
@@ -66,7 +68,21 @@ int main(void) {
     pkt.entries[0].version=0;
     read_PacketExtInfo(&pkt,5);
     assert(negotiated && !flashlight_negotiated && reply.length==5);
-    puts("Teamplay and Flashlight extension v1 handshake tests passed");
+    pkt.length=1;pkt.entries[0]=(struct PacketExtInfoEntry){EXT_PLAYER_OUTFIT,1};
+    read_PacketExtInfo(&pkt,3);
+    assert(outfit_negotiated && reply.length==5 && sent_len==11);
+    assert(reply.entries[4].id==EXT_PLAYER_OUTFIT && reply.entries[4].version==1);
+    pkt.length=3;
+    pkt.entries[0]=(struct PacketExtInfoEntry){TEAMPLAY_EXTENSION_ID,1};
+    pkt.entries[1]=(struct PacketExtInfoEntry){FLASHLIGHT_EXT_ID,1};
+    pkt.entries[2]=(struct PacketExtInfoEntry){EXT_PLAYER_OUTFIT,1};
+    read_PacketExtInfo(&pkt,7);
+    assert(negotiated && flashlight_negotiated && outfit_negotiated);
+    assert(reply.length==7 && sent_len==15);
+    assert(reply.entries[4].id==TEAMPLAY_EXTENSION_ID);
+    assert(reply.entries[5].id==FLASHLIGHT_EXT_ID);
+    assert(reply.entries[6].id==EXT_PLAYER_OUTFIT);
+    puts("Teamplay, Flashlight, and Player Outfit extension v1 handshake tests passed");
 }
 '''
 with tempfile.TemporaryDirectory() as d:

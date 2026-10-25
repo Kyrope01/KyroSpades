@@ -494,6 +494,7 @@ enum Extension {
 	EXT_256PLAYERS = 0xC0,
 	EXT_MESSAGES = 0xC1,
 	EXT_KICKREASON = 0xC2,
+	EXT_PLAYER_OUTFIT = 0x35,
 };
 
 #pragma pack(pop)

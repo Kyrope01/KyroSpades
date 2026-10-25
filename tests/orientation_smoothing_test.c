@@ -10,6 +10,7 @@
  */
 #include <math.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "config.h"
 #include "player.h"
@@ -83,6 +84,16 @@ static void report(const char* what, float got, float want, float tol) {
 int main(void) {
 	struct Orientation start = {1.0F, 0.0F, 0.0F};
 	struct Orientation target = {0.0F, 1.0F, 0.0F}; /* 90 degrees away */
+
+	printf("zombie team identification\n");
+	strcpy(gamestate.team_1.name, "  ZOMBIES ");
+	strcpy(gamestate.team_2.name, "Survivors");
+	check("Zombie name matches case-insensitively with whitespace",
+	      player_team_is_zombie(TEAM_1));
+	check("ordinary team names are not zombies", !player_team_is_zombie(TEAM_2));
+	check("spectators are not zombies", !player_team_is_zombie(TEAM_SPECTATOR));
+	strcpy(gamestate.team_1.name, "Zombie");
+	check("singular Zombie team name is supported", player_team_is_zombie(TEAM_1));
 
 	/* player.c tentatively defines local_player_id as 0, and the smoothing
 	 * branch skips the local player. Park it in the sentinel slot the engine

@@ -7,7 +7,7 @@ hud = (root / 'src/hud.c').read_text()
 lighting = (root / 'src/lighting.c').read_text()
 main = (root / 'src/main.c').read_text()
 assert 'packets[FLASHLIGHT_PACKET_ID] = read_PacketFlashlight;' in network
-assert 'reply.entries[4 + (supports_teamplay ? 1 : 0)]' in network
+assert 'reply.entries[next_entry++] = (struct PacketExtInfoEntry){ FLASHLIGHT_EXT_ID, 1 };' in network
 assert 'flashlight_ext_reset_player(p->player_id, false);' in network
 assert 'flashlight_ext_reset_player(p->player_id, true);' in network
 assert network.index('flashlight_ext_reset_map();', network.index('void read_PacketMapStart(')) < network.index('if(demo_is_seeking()) return;', network.index('void read_PacketMapStart('))

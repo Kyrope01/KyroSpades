@@ -5787,9 +5787,11 @@ static void render_setting_row(mu_Context* ctx, struct config_setting* a, int wi
                         break;
                 case CONFIG_TYPE_FLOAT:
                         mu_text(ctx, a->name);
-                        if(a->max == INT_MAX) {
+                        if(a->max == INT_MAX || a->numeric_input) {
                                 mu_number(ctx, a->value, 0.1F);
-                                *(float*)a->value = max(a->min, *(float*)a->value);
+                                float minimum = a->numeric_input ? a->float_min : (float)a->min;
+                                float maximum = a->numeric_input ? a->float_max : (float)a->max;
+                                *(float*)a->value = max(minimum, min(maximum, *(float*)a->value));
                         } else {
                                 mu_slider(ctx, a->value, a->min, a->max);
                         }

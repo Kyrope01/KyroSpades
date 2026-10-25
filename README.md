@@ -51,6 +51,15 @@ server and ability to select and copy text.
 <dt>Player Counter
 <dd>    A live display of the number of players alive on both teams.
 
+<dt>Zombie Team Models
+<dd>    Teams named <code>Zombie</code> or <code>Zombies</code> use the dedicated
+ZeroSpades zombie player models, including separate standing, crouching, and
+corpse models. The current draft Player Outfit extension is also supported:
+server-assigned outfit <code>Undead</code> uses these models regardless of team.
+
+<dt>Object Outlines
+<dd>    Optional dark depth-edge outlines around visible map geometry and players (when a sampleable scene-depth buffer is available; unavailable on iOS copy mode). Defaults to 1 px; enter a thickness from 0.5 to 8 px under Visual Effects → Post Processing. Outlines fade with scene fog.
+
 <dt>Dynamic Wallpapers
 <dd>    Sets a random image from the <code>png/bg/</code> folder as your
 background on startup.

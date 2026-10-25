@@ -59,6 +59,18 @@ extern struct kv6_t model_playertorsoc;
 extern struct kv6_t model_playerarms;
 extern struct kv6_t model_playerleg;
 extern struct kv6_t model_playerlegc;
+
+/* Alternate ZeroSpades zombie-team player models. Missing assets are optional:
+   the renderer falls back to the regular model for that body part. */
+extern struct kv6_t model_zombie_dead;
+extern struct kv6_t model_zombie_head;
+extern struct kv6_t model_zombie_torso;
+extern struct kv6_t model_zombie_torsoc;
+extern struct kv6_t model_zombie_arms;
+extern struct kv6_t model_zombie_leg;
+extern struct kv6_t model_zombie_legc;
+extern struct kv6_t model_zombie_legright;
+extern struct kv6_t model_zombie_legrightc;
 extern struct kv6_t model_intel;
 extern struct kv6_t model_tent;
 
@@ -78,6 +90,7 @@ extern struct kv6_t model_smg_casing;
 extern struct kv6_t model_shotgun_casing;
 
 void kv6_calclight(int x, int y, int z);
+void kv6_calclight_viewmodel(void);
 void kv6_rebuild_complete(void);
 void kv6_rebuild(struct kv6_t* kv6);
 void kv6_render(struct kv6_t* kv6, unsigned char team);

@@ -545,6 +545,7 @@ void read_PacketExistingPlayer(void* data, int len) {
                 players[p->player_id].connected = 1;
                 players[p->player_id].alive = 1;
                 players[p->player_id].team = p->team;
+                player_outfit_ext_apply_player(p->player_id);
                 players[p->player_id].weapon = p->weapon;
                 players[p->player_id].held_item = p->held_item;
                 player_on_held_item_change(&players[p->player_id]);
@@ -582,6 +583,7 @@ void read_PacketCreatePlayer(void* data, int len) {
                 players[p->player_id].connected = 1;
                 players[p->player_id].alive = 1;
                 players[p->player_id].team = p->team;
+                player_outfit_ext_apply_player(p->player_id);
                 teamplay_player_spawned(p->player_id);
                 players[p->player_id].held_item = TOOL_GUN;
                 player_on_held_item_change(&players[p->player_id]);
@@ -648,6 +650,7 @@ void read_PacketPlayerLeft(void* data, int len) {
                 players[p->player_id].connected = 0;
                 players[p->player_id].alive = 0;
                 players[p->player_id].score = 0;
+                player_outfit_ext_reset_player(p->player_id);
                 char s[32];
                 char team_color = team_color_char(players[p->player_id].team);
 
@@ -659,6 +662,7 @@ void read_PacketPlayerLeft(void* data, int len) {
 void read_PacketMapStart(void* data, int len) {
         /* Seeking skips map decompression, not the extension's state reset. */
         flashlight_ext_reset_map();
+        player_outfit_ext_reset_map();
         if(demo_is_seeking()) return;
         teamplay_reset_map();
         lighting_flashlight_reset();
@@ -1399,6 +1403,30 @@ void read_PacketVersionGet(void* data, int len) {
         network_send(PACKET_VERSIONSEND_ID, &ver, sizeof(ver) - sizeof(ver.operatingsystem) + strlen(os));
 }
 
+static void read_PacketPlayerOutfit(void* data, int len) {
+        if(!data || len < 1) return;
+        const unsigned char* packet = (const unsigned char*)data;
+        switch(packet[0]) {
+                case 0: /* Set Outfit: sub-id, player-id, outfit */
+                        if(len != 3) {
+                                log_warn("Invalid Player Outfit Set Outfit packet size: %d", len + 1);
+                                return;
+                        }
+                        player_outfit_ext_set_player(packet[1], packet[2]);
+                        break;
+                case 1: /* Team Outfits: sub-id followed by team-id/outfit pairs */
+                        if(((len - 1) % 2) != 0) {
+                                log_warn("Invalid Player Outfit Team Outfits packet size: %d", len + 1);
+                                return;
+                        }
+                        player_outfit_ext_set_teams(packet + 1, len - 1);
+                        break;
+                default:
+                        log_debug("Ignoring unknown Player Outfit sub-packet %u", packet[0]);
+                        break;
+        }
+}
+
 void read_PacketExtInfo(void* data, int len) {
         if(len < 1 || !data) return;
         struct PacketExtInfo* p = (struct PacketExtInfo*)data;
@@ -1427,8 +1455,14 @@ void read_PacketExtInfo(void* data, int len) {
                         if(p->entries[k].id == FLASHLIGHT_EXT_ID && p->entries[k].version >= 1)
                                 supports_flashlight = true;
                 flashlight_ext_set_negotiated(supports_flashlight);
+                bool supports_player_outfit = false;
+                for(int k = 0; k < p->length; k++)
+                        if(p->entries[k].id == EXT_PLAYER_OUTFIT && p->entries[k].version >= 1)
+                                supports_player_outfit = true;
+                player_outfit_ext_set_negotiated(supports_player_outfit);
                 struct PacketExtInfo reply;
-                reply.length = 4 + (supports_teamplay ? 1 : 0) + (supports_flashlight ? 1 : 0);
+                reply.length = 4 + (supports_teamplay ? 1 : 0) + (supports_flashlight ? 1 : 0)
+                        + (supports_player_outfit ? 1 : 0);
                 reply.entries[0] = (struct PacketExtInfoEntry) {
                         .id = EXT_PLAYER_PROPERTIES,
                         .version = 1,
@@ -1445,9 +1479,13 @@ void read_PacketExtInfo(void* data, int len) {
                         .id = EXT_KICKREASON,
                         .version = 1,
                 };
-                if(supports_teamplay) reply.entries[4] = (struct PacketExtInfoEntry){ TEAMPLAY_EXTENSION_ID, 1 };
-                if(supports_flashlight) reply.entries[4 + (supports_teamplay ? 1 : 0)]
-                        = (struct PacketExtInfoEntry){ FLASHLIGHT_EXT_ID, 1 };
+                int next_entry = 4;
+                if(supports_teamplay)
+                        reply.entries[next_entry++] = (struct PacketExtInfoEntry){ TEAMPLAY_EXTENSION_ID, 1 };
+                if(supports_flashlight)
+                        reply.entries[next_entry++] = (struct PacketExtInfoEntry){ FLASHLIGHT_EXT_ID, 1 };
+                if(supports_player_outfit)
+                        reply.entries[next_entry++] = (struct PacketExtInfoEntry){ EXT_PLAYER_OUTFIT, 1 };
                 network_send(PACKET_EXTINFO_ID, &reply, reply.length * sizeof(struct PacketExtInfoEntry) + 1);
         }
 }
@@ -1532,6 +1570,8 @@ unsigned int network_ping() {
 void network_disconnect() {
         teamplay_reset_connection();
         flashlight_ext_reset_connection();
+        player_outfit_ext_set_negotiated(false);
+        player_outfit_ext_reset_map();
         lighting_flashlight_reset();
         glowing_blocks_clear();
         if(demo_is_playing()) {
@@ -1608,6 +1648,8 @@ int network_connect_sub(char* ip, int port, int version) {
 int network_connect(char* ip, int port) {
         teamplay_reset_connection();
         flashlight_ext_reset_connection();
+        player_outfit_ext_set_negotiated(false);
+        player_outfit_ext_reset_map();
         log_info("Connecting to %s at port %i", ip, port);
         if(network_connected) {
                 network_disconnect();
@@ -1725,6 +1767,8 @@ void network_service(void) {
                                 network_map_transfer_end = 0;
                                 teamplay_reset_connection();
                                 flashlight_ext_reset_connection();
+                                player_outfit_ext_set_negotiated(false);
+                                player_outfit_ext_reset_map();
                                 lighting_flashlight_reset();
                                 glowing_blocks_clear();
                                 player_clear_corpses();
@@ -1870,6 +1914,8 @@ static void read_PacketTeamplay(void* data, int len) {
 }
 
 void network_init() {
+        player_outfit_ext_set_negotiated(false);
+        player_outfit_ext_reset_map();
         enet_initialize();
         client = enet_host_create(NULL, 1, 1, 0, 0); // limit bandwidth here if you want to
         enet_host_compress_with_range_coder(client);
@@ -1911,4 +1957,5 @@ void network_init() {
         packets[TEAMPLAY_PACKET_ID] = read_PacketTeamplay;
         packets[FLASHLIGHT_PACKET_ID] = read_PacketFlashlight;
         packets[PACKET_EXT_BASE + EXT_PLAYER_PROPERTIES] = read_PacketPlayerProperties;
+        packets[PACKET_EXT_BASE + EXT_PLAYER_OUTFIT] = read_PacketPlayerOutfit;
 }
