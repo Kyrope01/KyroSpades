@@ -119,6 +119,8 @@ extern struct RENDER_OPTIONS {
         float contrast;
         float vignette;
         int   lens_flare;
+        int   object_outlines;                 /* depth-edge outlines for map and players */
+        float object_outline_thickness;         /* outline radius in screen pixels */
         /* ── New visual shaders (chromatic aberration / filmic) ── */
         int   chromatic_aberration;           /* 0 = off, 1 = on */
         float chromatic_aberration_strength;  /* 0..10 — pixel offset at screen edge */
@@ -199,6 +201,9 @@ struct config_setting {
         int type;
         int min;
         int max;
+        float float_min;
+        float float_max;
+        int numeric_input; /* use a numeric entry rather than a slider */
         char name[48];
         char help[128];
         char category[32];

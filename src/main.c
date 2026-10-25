@@ -113,6 +113,12 @@ static struct {
         int uni_pp_texel;
         int uni_pp_bloom_texture;
         int uni_pp_dmg; /* damage feedback: red edge vignette (0..1) */
+        int uni_pp_outlines;
+        int uni_pp_depthmap;
+        int uni_pp_outline_thickness;
+        int uni_pp_fog_range;
+        int uni_pp_depth_near;
+        int uni_pp_depth_far;
         /* Lens flare uses a separate auxiliary target. */
         unsigned int flare_tex;
         unsigned int flare_fbo;
@@ -503,13 +509,22 @@ void display() {
            alone must not force a no-op pass on non-Core or 2.1 fallback paths. */
         int hdr_postproc = settings.hdr_rendering && postprocess_hdr_supported();
         int bloom_postproc = settings.bloom && settings.bloom_strength > 0.001F;
+        float outline_fog_range = camera_mode == CAMERAMODE_SPECTATOR
+                ? settings.spectator_fog_distance : settings.render_distance;
+        if(outline_fog_range < 1.0F)
+                outline_fog_range = 1.0F;
+        int outlines_postproc = settings.object_outlines;
+#if defined(OS_IOS)
+        /* iOS uses a direct-to-drawable copy path without a sampleable depth attachment. */
+        outlines_postproc = 0;
+#endif
         int needs_postproc = ((glx_version || gles_version >= 2)
                               && (settings.exposure < -0.5F || settings.exposure > 0.5F
                                   || settings.saturation < -0.5F || settings.saturation > 0.5F
                                   || settings.contrast < -0.5F || settings.contrast > 0.5F
                                   || settings.vignette > 0.5F
                                   || settings.lens_flare || settings.chromatic_aberration || settings.filmic_tonemapping
-                                  || hdr_postproc || bloom_postproc
+                                  || hdr_postproc || bloom_postproc || outlines_postproc
                                   || damagefx_vignette() > 0.003F));
         int desired_hdr = postprocess_hdr_supported()
                 && (settings.hdr_rendering || bloom_postproc);
@@ -722,7 +737,11 @@ void display() {
                                                 "    gl_Position = vec4(a_Position, 0.0, 1.0);\n"
                                                 "}\n";
                                         const char* frag =
+                                                "#ifdef GL_FRAGMENT_PRECISION_HIGH\n"
+                                                "precision highp float;\n"
+                                                "#else\n"
                                                 "precision mediump float;\n"
+                                                "#endif\n"
                                                 "varying vec2 v_TexCoord;\n"
                                                 // pp_scale = (1+exposure/100)*(1+contrast/100), pp_bias = 0.5*(1-(1+contrast/100))
                                                 // exposure folded into contrast: (e*x-0.5)*ct+0.5 == x*(e*ct)+0.5*(1-ct)
@@ -738,6 +757,12 @@ void display() {
                                                 "uniform float pp_bloom_separate;\n"
                                                 "uniform vec2 pp_texel;\n"
                                                 "uniform float pp_dmg;\n"
+                                                "uniform float pp_outlines;\n"
+                                                "uniform float pp_outline_thickness;\n"
+                                                "uniform float pp_fog_range;\n"
+                                                "uniform float pp_depth_near;\n"
+                                                "uniform float pp_depth_far;\n"
+                                                "uniform sampler2D depthmap;\n"
                                                 "uniform sampler2D tex;\n"
                                                 "uniform sampler2D pp_bloom_texture;\n"
                                                 "vec3 acesFilm(vec3 x){\n"
@@ -787,6 +812,25 @@ void display() {
                                                 "        c = mix(c, vec3(0.55, 0.04, 0.04), dm * 0.22);\n"
                                                 "        c += vec3(0.42, 0.03, 0.03) * dm;\n"
                                                 "    }\n"
+                                                "    if(pp_outlines > 0.5){\n"
+                                                "        float thickness = clamp(pp_outline_thickness, 0.5, 8.0);\n"
+                                                "        float sample_radius = max(thickness * 0.5, 1.0);\n"
+                                                "        vec2 step_uv = pp_texel * sample_radius;\n"
+                                                "        float d = texture2D(depthmap, uv).r;\n"
+                                                "        float dx1 = texture2D(depthmap, uv + vec2(step_uv.x, 0.0)).r;\n"
+                                                "        float dx2 = texture2D(depthmap, uv - vec2(step_uv.x, 0.0)).r;\n"
+                                                "        float dy1 = texture2D(depthmap, uv + vec2(0.0, step_uv.y)).r;\n"
+                                                "        float dy2 = texture2D(depthmap, uv - vec2(0.0, step_uv.y)).r;\n"
+                                                "        float denom = max(1.0 - min(d, 0.9999), 0.0001);\n"
+                                                "        float edge = max(max(abs(d - dx1), abs(d - dx2)), max(abs(d - dy1), abs(d - dy2))) / denom;\n"
+                                                "        float edge_depth = min(d, min(min(dx1, dx2), min(dy1, dy2)));\n"
+                                                "        float ndc_depth = edge_depth * 2.0 - 1.0;\n"
+                                                "        float view_depth = (2.0 * pp_depth_near * pp_depth_far) / max(pp_depth_far + pp_depth_near - ndc_depth * (pp_depth_far - pp_depth_near), 0.0001);\n"
+                                                "        float fog = clamp(view_depth / max(pp_fog_range, 1.0), 0.0, 1.0);\n"
+                                                "        fog = fog * fog * (3.0 - 2.0 * fog);\n"
+                                                "        float line = smoothstep(0.025, 0.08, edge) * min(thickness * 0.5, 1.0) * (1.0 - fog);\n"
+                                                "        c *= 1.0 - line;\n"
+                                                "    }\n"
                                                 "    gl_FragColor = vec4(c, 1.0);\n"
                                                 "}\n";
                                         postproc.shader = glx_shader(vert, frag);
@@ -806,6 +850,12 @@ void display() {
                                         "uniform float pp_bloom_separate;"
                                         "uniform vec2 pp_texel;"
                                         "uniform float pp_dmg;"
+                                        "uniform float pp_outlines;"
+                                        "uniform float pp_outline_thickness;"
+                                        "uniform float pp_fog_range;"
+                                        "uniform float pp_depth_near;"
+                                        "uniform float pp_depth_far;"
+                                        "uniform sampler2D depthmap;"
                                         "uniform sampler2D tex;"
                                         "uniform sampler2D pp_bloom_texture;"
                                         "vec3 acesFilm(vec3 x){"
@@ -847,6 +897,14 @@ void display() {
                                         "if(pp_filmic>0.5)c=acesFilm(c);"
                                         "c*=clamp(1.0-pp_vig*r2,0.0,1.0);"
                                         "if(pp_dmg>0.001){float dm=smoothstep(0.04,0.45,r2)*pp_dmg;c=mix(c,vec3(0.55,0.04,0.04),dm*0.22);c+=vec3(0.42,0.03,0.03)*dm;}"
+                                        "if(pp_outlines>0.5){float thick=clamp(pp_outline_thickness,0.5,8.0);float radius=max(thick*0.5,1.0);vec2 st=pp_texel*radius;float d=texture2D(depthmap,uv).r;"
+                                        "float x1=texture2D(depthmap,uv+vec2(st.x,0.0)).r;float x2=texture2D(depthmap,uv-vec2(st.x,0.0)).r;"
+                                        "float y1=texture2D(depthmap,uv+vec2(0.0,st.y)).r;float y2=texture2D(depthmap,uv-vec2(0.0,st.y)).r;"
+                                        "float den=max(1.0-min(d,0.9999),0.0001);float e=max(max(abs(d-x1),abs(d-x2)),max(abs(d-y1),abs(d-y2)))/den;"
+                                        "float ed=min(d,min(min(x1,x2),min(y1,y2)));float nd=ed*2.0-1.0;"
+                                        "float vd=(2.0*pp_depth_near*pp_depth_far)/max(pp_depth_far+pp_depth_near-nd*(pp_depth_far-pp_depth_near),0.0001);"
+                                        "float fog=clamp(vd/max(pp_fog_range,1.0),0.0,1.0);fog=fog*fog*(3.0-2.0*fog);"
+                                        "float line=smoothstep(0.025,0.08,e)*min(thick*0.5,1.0)*(1.0-fog);c*=1.0-line;}"
                                         "gl_FragColor=vec4(c,1.0);}";
                                 postproc.shader = glx_shader(vert, frag);
 #if defined(GLX_PROGRAMMABLE)
@@ -864,6 +922,12 @@ void display() {
                                         postproc.uni_pp_bloom_separate = glx_uniform_location(postproc.shader, "pp_bloom_separate");
                                         postproc.uni_pp_texel = glx_uniform_location(postproc.shader, "pp_texel");
                                         postproc.uni_pp_dmg = glx_uniform_location(postproc.shader, "pp_dmg");
+                                        postproc.uni_pp_outlines = glx_uniform_location(postproc.shader, "pp_outlines");
+                                        postproc.uni_pp_outline_thickness = glx_uniform_location(postproc.shader, "pp_outline_thickness");
+                                        postproc.uni_pp_fog_range = glx_uniform_location(postproc.shader, "pp_fog_range");
+                                        postproc.uni_pp_depth_near = glx_uniform_location(postproc.shader, "pp_depth_near");
+                                        postproc.uni_pp_depth_far = glx_uniform_location(postproc.shader, "pp_depth_far");
+                                        postproc.uni_pp_depthmap = glx_uniform_location(postproc.shader, "depthmap");
                                         postproc.uni_pp_bloom_texture = glx_uniform_location(postproc.shader, "pp_bloom_texture");
                                         GLint scene_sampler = glx_uniform_location(postproc.shader, "tex");
                                         if(postproc.uni_pp_sat < 0 || postproc.uni_pp_scale < 0 || postproc.uni_pp_bias < 0
@@ -871,6 +935,9 @@ void display() {
                                            || postproc.uni_pp_filmic < 0 || postproc.uni_pp_bloom < 0
                                            || postproc.uni_pp_bloom_threshold < 0 || postproc.uni_pp_bloom_separate < 0
                                            || postproc.uni_pp_texel < 0 || postproc.uni_pp_dmg < 0
+                                           || postproc.uni_pp_outlines < 0 || postproc.uni_pp_depthmap < 0
+                                           || postproc.uni_pp_outline_thickness < 0 || postproc.uni_pp_fog_range < 0
+                                           || postproc.uni_pp_depth_near < 0 || postproc.uni_pp_depth_far < 0
                                            || postproc.uni_pp_bloom_texture < 0 || scene_sampler < 0) {
                                                 log_error("Post-process shader contract is incomplete; rendering without post-processing");
                                                 glx_delete_program(postproc.shader);
@@ -883,6 +950,7 @@ void display() {
                                                 glx_use_program(postproc.shader);
                                                 glUniform1i(scene_sampler, 0);
                                                 glUniform1i(postproc.uni_pp_bloom_texture, 1);
+                                                glUniform1i(postproc.uni_pp_depthmap, 2);
                                                 glx_use_program((GLuint)previous_program);
                                         }
                                 }
@@ -1365,6 +1433,7 @@ void display() {
                                 GLint previous_viewport[4] = {0, 0, settings.window_width, settings.window_height};
                                 GLint previous_texture0 = 0;
                                 GLint previous_texture1 = 0;
+                                GLint previous_texture2 = 0;
                                 GLint previous_blend_src_rgb = GL_ONE;
                                 GLint previous_blend_dst_rgb = GL_ZERO;
                                 GLint previous_blend_src_alpha = GL_ONE;
@@ -1385,6 +1454,8 @@ void display() {
                                 glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous_texture0);
                                 glActiveTexture(GL_TEXTURE1);
                                 glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous_texture1);
+                                glActiveTexture(GL_TEXTURE2);
+                                glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous_texture2);
                                 glActiveTexture(GL_TEXTURE0);
 
                                 glDisable(GL_DEPTH_TEST);
@@ -1519,6 +1590,11 @@ void display() {
                                         glBindTexture(GL_TEXTURE_2D, bloom_texture);
                                         glActiveTexture(GL_TEXTURE0);
                                 }
+                                if(postproc.depth_tex && postproc.fbo) {
+                                        glActiveTexture(GL_TEXTURE2);
+                                        glBindTexture(GL_TEXTURE_2D, postproc.depth_tex);
+                                        glActiveTexture(GL_TEXTURE0);
+                                }
 
                                 if(postproc.shader) {
                                         // derive final shader factors on CPU once per frame
@@ -1537,6 +1613,13 @@ void display() {
                                         glUniform1f(postproc.uni_pp_bloom_separate, bloom_texture ? 1.0F : 0.0F);
                                         glUniform2f(postproc.uni_pp_texel, 1.0F / settings.window_width, 1.0F / settings.window_height);
                                         glUniform1f(postproc.uni_pp_dmg, damagefx_vignette()); // pp_dmg
+                                        glUniform1f(postproc.uni_pp_outlines,
+                                                    settings.object_outlines && postproc.depth_tex && postproc.fbo ? 1.0F : 0.0F);
+                                        glUniform1f(postproc.uni_pp_outline_thickness,
+                                                    fmaxf(0.5F, fminf(8.0F, settings.object_outline_thickness)));
+                                        glUniform1f(postproc.uni_pp_fog_range, outline_fog_range);
+                                        glUniform1f(postproc.uni_pp_depth_near, 0.1F);
+                                        glUniform1f(postproc.uni_pp_depth_far, outline_fog_range + CHUNK_SIZE * 4.0F);
 
 #if defined(GLX_PROGRAMMABLE)
                                         if(glx_version) {
@@ -1572,6 +1655,8 @@ void display() {
                                 if(cull_was_on) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);
                                 glActiveTexture(GL_TEXTURE1);
                                 glBindTexture(GL_TEXTURE_2D, (GLuint)previous_texture1);
+                                glActiveTexture(GL_TEXTURE2);
+                                glBindTexture(GL_TEXTURE_2D, (GLuint)previous_texture2);
                                 glActiveTexture(GL_TEXTURE0);
                                 glBindTexture(GL_TEXTURE_2D, (GLuint)previous_texture0);
                                 glActiveTexture((GLenum)previous_active_texture);
@@ -2223,7 +2308,7 @@ static void ios_stage_resources_and_chdir(void) {
 int main(int argc, char** argv) {
         settings.opengl14 = 1;
         settings.color_correction = 0;
-        settings.multisamples = 0;
+        settings.multisamples = 2;
         settings.shadow_entities = 0;
         settings.ambient_occlusion = 1;
         settings.ao_multiplier = 1.0F;
@@ -2287,15 +2372,17 @@ int main(int argc, char** argv) {
         settings.skin_player = 0;
         settings.skin_intel = 0;
         settings.skin_tent = 0;
-        /* Color grading / vignette stay off by default; filmic tone mapping
-           and chromatic aberration are on (they are part of the intended
-           look).  All of them run through a full-screen FBO + shader pass. */
-        settings.exposure = 0.0F;
+        /* Start with a modest exposure lift and slightly restrained
+           saturation; both remain user-adjustable in Graphics settings. */
+        settings.exposure = 20.0F;
+        settings.saturation = -15.0F;
         settings.contrast = 0.0F;
         settings.vignette = 0.0F;
         /* ── Post-processing ─────────────────────────────────────────────────
            Bloom is enabled for new installations; each saved client setting
            remains independently configurable. */
+        settings.object_outlines = 0; /* optional dark contours from the scene depth buffer */
+        settings.object_outline_thickness = 1.0F;
         settings.chromatic_aberration = 1; /* edge chromatic fringe, on by default */
         settings.chromatic_aberration_strength = 1.5F;
         /* Filmic tone mapping and chromatic aberration retain the established

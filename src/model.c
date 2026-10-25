@@ -43,6 +43,17 @@ struct kv6_t model_playertorsoc;
 struct kv6_t model_playerarms;
 struct kv6_t model_playerleg;
 struct kv6_t model_playerlegc;
+
+struct kv6_t model_zombie_dead;
+struct kv6_t model_zombie_head;
+struct kv6_t model_zombie_torso;
+struct kv6_t model_zombie_torsoc;
+struct kv6_t model_zombie_arms;
+struct kv6_t model_zombie_leg;
+struct kv6_t model_zombie_legc;
+struct kv6_t model_zombie_legright;
+struct kv6_t model_zombie_legrightc;
+
 struct kv6_t model_intel;
 struct kv6_t model_tent;
 
@@ -83,6 +94,15 @@ int model_loaded_count(void) {
 	if(model_playerarms.voxels) count++;
 	if(model_playerleg.voxels) count++;
 	if(model_playerlegc.voxels) count++;
+	if(model_zombie_dead.voxels) count++;
+	if(model_zombie_head.voxels) count++;
+	if(model_zombie_torso.voxels) count++;
+	if(model_zombie_torsoc.voxels) count++;
+	if(model_zombie_arms.voxels) count++;
+	if(model_zombie_leg.voxels) count++;
+	if(model_zombie_legc.voxels) count++;
+	if(model_zombie_legright.voxels) count++;
+	if(model_zombie_legrightc.voxels) count++;
 	if(model_intel.voxels) count++;
 	if(model_tent.voxels) count++;
 	if(model_semi.voxels) count++;
@@ -104,7 +124,12 @@ int model_total_voxels(void) {
 	return model_playerdead.voxel_count + model_playerhead.voxel_count
 		+ model_playertorso.voxel_count + model_playertorsoc.voxel_count
 		+ model_playerarms.voxel_count + model_playerleg.voxel_count
-		+ model_playerlegc.voxel_count + model_intel.voxel_count
+		+ model_playerlegc.voxel_count + model_zombie_dead.voxel_count
+		+ model_zombie_head.voxel_count + model_zombie_torso.voxel_count
+		+ model_zombie_torsoc.voxel_count + model_zombie_arms.voxel_count
+		+ model_zombie_leg.voxel_count + model_zombie_legc.voxel_count
+		+ model_zombie_legright.voxel_count + model_zombie_legrightc.voxel_count
+		+ model_intel.voxel_count
 		+ model_tent.voxel_count + model_semi.voxel_count
 		+ model_smg.voxel_count + model_shotgun.voxel_count
 		+ model_spade.voxel_count + model_block.voxel_count
@@ -129,6 +154,16 @@ void kv6_init() {
 	kv6_load_file(&model_playerarms, "kv6/playerarms.kv6", 0.1F);
 	kv6_load_file(&model_playerleg, "kv6/playerleg.kv6", 0.1F);
 	kv6_load_file(&model_playerlegc, "kv6/playerlegc.kv6", 0.1F);
+
+	kv6_load_file(&model_zombie_dead, "kv6/zombie/Dead.kv6", 0.1F);
+	kv6_load_file(&model_zombie_head, "kv6/zombie/Head.kv6", 0.1F);
+	kv6_load_file(&model_zombie_torso, "kv6/zombie/Torso.kv6", 0.1F);
+	kv6_load_file(&model_zombie_torsoc, "kv6/zombie/TorsoCrouch.kv6", 0.1F);
+	kv6_load_file(&model_zombie_arms, "kv6/zombie/Arms.kv6", 0.1F);
+	kv6_load_file(&model_zombie_leg, "kv6/zombie/Leg.kv6", 0.1F);
+	kv6_load_file(&model_zombie_legc, "kv6/zombie/LegCrouch.kv6", 0.1F);
+	kv6_load_file(&model_zombie_legright, "kv6/zombie/LegRight.kv6", 0.1F);
+	kv6_load_file(&model_zombie_legrightc, "kv6/zombie/LegRightCrouch.kv6", 0.1F);
 
 	kv6_load_file(&model_intel, "kv6/intel.kv6", 0.2F);
 	kv6_load_file(&model_tent, "kv6/cp.kv6", 0.278F);
@@ -172,6 +207,15 @@ void kv6_rebuild_complete() {
 	kv6_rebuild(&model_playerarms);
 	kv6_rebuild(&model_playerleg);
 	kv6_rebuild(&model_playerlegc);
+	kv6_rebuild(&model_zombie_dead);
+	kv6_rebuild(&model_zombie_head);
+	kv6_rebuild(&model_zombie_torso);
+	kv6_rebuild(&model_zombie_torsoc);
+	kv6_rebuild(&model_zombie_arms);
+	kv6_rebuild(&model_zombie_leg);
+	kv6_rebuild(&model_zombie_legc);
+	kv6_rebuild(&model_zombie_legright);
+	kv6_rebuild(&model_zombie_legrightc);
 	kv6_rebuild(&model_intel);
 	kv6_rebuild(&model_tent);
 	kv6_rebuild(&model_semi);
@@ -275,23 +319,34 @@ void kv6_rebuild(struct kv6_t* kv6) {
 	}
 }
 
-void kv6_calclight(int x, int y, int z) {
-	float f = 1.0F;
-
-	if(x >= 0 && y >= 0 && z >= 0)
-		f = map_sunblock(x, y, z);
-
-	kv6_light_scale = f;
+static void kv6_set_light_scale(float scale) {
+	kv6_light_scale = scale;
 #ifdef OPENGL_CORE
-	glx_default_shader_set_light_scale(f);
+	glx_default_shader_set_light_scale(scale);
 #endif
 #ifndef OPENGL_CORE
-	float daylight = 0.5F * f * lighting_sunlight_scale();
+	float daylight = 0.5F * scale * lighting_sunlight_scale();
 	float lambient[4] = {daylight, daylight, daylight, 1.0F};
 	float ldiffuse[4] = {daylight, daylight, daylight, 1.0F};
 	glLightfv(GL_LIGHT0, GL_AMBIENT, lambient);
 	glLightfv(GL_LIGHT0, GL_DIFFUSE, ldiffuse);
 #endif
+}
+
+void kv6_calclight(int x, int y, int z) {
+	float scale = 1.0F;
+
+	if(x >= 0 && y >= 0 && z >= 0)
+		scale = map_sunblock(x, y, z);
+
+	kv6_set_light_scale(scale);
+}
+
+void kv6_calclight_viewmodel(void) {
+	/* Viewmodels live in camera space, not beneath the player's world-space
+	   sunblock sample. Keep directional/daylight shading, but discard that
+	   unrelated block-shadow occlusion for the held arms and weapon. */
+	kv6_set_light_scale(1.0F);
 }
 
 static int kv6_voxel_cmp(const void* a, const void* b) {

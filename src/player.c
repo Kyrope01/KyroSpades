@@ -20,6 +20,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include "demo.h"
 #include <math.h>
 #include <limits.h>
@@ -47,6 +48,101 @@
 #include "flashlight_ext.h"
 #include <math.h>
 #include "cameracontroller.h"
+bool player_team_is_zombie(unsigned char team) {
+	const char* source;
+	char name[sizeof(gamestate.team_1.name) + 1];
+	size_t start = 0, end, length;
+
+	if(team == TEAM_1)
+		source = gamestate.team_1.name;
+	else if(team == TEAM_2)
+		source = gamestate.team_2.name;
+	else
+		return false;
+
+	length = strlen(source);
+	end = length;
+	while(start < end && isspace((unsigned char)source[start]))
+		start++;
+	while(end > start && isspace((unsigned char)source[end - 1]))
+		end--;
+	length = end - start;
+	if(length >= sizeof(name))
+		return false;
+	for(size_t i = 0; i < length; i++)
+		name[i] = (char)tolower((unsigned char)source[start + i]);
+	name[length] = '\0';
+	return strcmp(name, "zombie") == 0 || strcmp(name, "zombies") == 0;
+}
+
+/* Draft ZeroSpades Player Outfit extension state. The override is kept
+   separately from Player so Set Outfit can arrive before Create/Existing
+   Player, as the extension requires. 255 means "use the current team outfit". */
+static unsigned char player_outfit_overrides[PLAYERS_MAX];
+static unsigned char player_team_outfits[256];
+static bool player_outfit_extension_negotiated;
+static bool player_team_outfits_received;
+
+static unsigned char player_outfit_resolve(unsigned char player_id, unsigned char team) {
+	unsigned char outfit = player_outfit_overrides[player_id];
+	if(outfit == 255) {
+		if(player_outfit_extension_negotiated || player_team_outfits_received)
+			outfit = player_team_outfits[team];
+		else
+			outfit = player_team_is_zombie(team) ? 1 : 0;
+	}
+	/* This client currently ships art only for Soldier (0) and Undead (1).
+	   Unknown or unimplemented outfits must render as the normal model. */
+	return outfit == 1 ? 1 : 0;
+}
+
+void player_outfit_ext_set_negotiated(bool supported) {
+	player_outfit_extension_negotiated = supported;
+	if(!supported) {
+		player_team_outfits_received = false;
+		memset(player_team_outfits, 0, sizeof(player_team_outfits));
+	}
+}
+
+void player_outfit_ext_reset_map(void) {
+	/* Team Outfits lasts for the connection; Map Start only clears per-player
+	   outfit overrides, as specified by the draft extension. */
+	memset(player_outfit_overrides, 255, sizeof(player_outfit_overrides));
+	for(int i = 0; i < PLAYERS_MAX; i++)
+		players[i].outfit = 0;
+}
+
+void player_outfit_ext_reset_player(unsigned char player_id) {
+	player_outfit_overrides[player_id] = 255;
+	players[player_id].outfit = 0;
+}
+
+void player_outfit_ext_set_player(unsigned char player_id, unsigned char outfit) {
+	player_outfit_overrides[player_id] = outfit == 255 ? 255 : (outfit == 1 ? 1 : 0);
+	if(players[player_id].connected)
+		players[player_id].outfit = player_outfit_resolve(player_id, players[player_id].team);
+}
+
+void player_outfit_ext_set_teams(const unsigned char* entries, int length) {
+	if(length < 0 || (length % 2) != 0 || (length > 0 && !entries))
+		return;
+	memset(player_team_outfits, 0, sizeof(player_team_outfits));
+	for(int i = 0; i < length; i += 2) {
+		unsigned char team = entries[i];
+		unsigned char outfit = entries[i + 1];
+		player_team_outfits[team] = outfit == 1 ? 1 : 0;
+	}
+	player_team_outfits_received = true;
+}
+
+void player_outfit_ext_apply_player(unsigned char player_id) {
+	players[player_id].outfit = player_outfit_resolve(player_id, players[player_id].team);
+}
+
+bool player_uses_undead_outfit(const struct Player* p) {
+	return p && p->outfit == 1;
+}
+
 static float os_sprint_state=0, os_sprint_smooth=0, os_raise_state=1, os_last_time=0, os_aim_state=0, os_aim_smooth=0;
 float tactical_sprint_amount = 0.0f; // exposed for HUD crosshair hide
 /* First-person look sway state. Keeping this across render frames lets mouse
@@ -233,6 +329,7 @@ void player_save_corpse(int player_id) {
 	corpses[slot].orientation_smooth = p->orientation_smooth;
 	corpses[slot].velocity = p->physics.velocity;
 	corpses[slot].team = p->team;
+	corpses[slot].is_zombie = player_uses_undead_outfit(p);
 }
 
 void player_clear_corpses(void) {
@@ -307,7 +404,8 @@ void player_render_corpses(void) {
 		if(c->velocity.y < 0.05F && c->pos.y < 1.5F)
 			matrix_translate(matrix_model, 0.0F, (sin(game_time() * 1.5F) - 1.0F) * 0.1F, 0.0F);
 		matrix_upload();
-		kv6_render(&model_playerdead, c->team);
+		kv6_render(c->is_zombie && model_zombie_dead.voxels
+			? &model_zombie_dead : &model_playerdead, c->team);
 		matrix_pop(matrix_model);
 	}
 }
@@ -324,6 +422,7 @@ void player_init() {
 void player_reset(struct Player* p) {
 	p->connected = 0;
 	p->alive = 0;
+	p->outfit = 0;
 	p->held_item = TOOL_GUN;
 	p->weapon = 0;
 	p->weapon_last_shot = 0;
@@ -1546,7 +1645,8 @@ void player_render(struct Player* p, int id) {
 				}
 				glDisable(GL_DEPTH_TEST);
 			}
-			kv6_render(&model_playerdead, p->team);
+			kv6_render(player_uses_undead_outfit(p) && model_zombie_dead.voxels
+				? &model_zombie_dead : &model_playerdead, p->team);
 			if(esp_active) {
 				glEnable(GL_DEPTH_TEST);
 			}
@@ -1558,8 +1658,16 @@ void player_render(struct Player* p, int id) {
 
 	float time = game_time() * 1000.0F;
 
-	struct kv6_t* torso = p->input.keys.crouch ? &model_playertorsoc : &model_playertorso;
-	struct kv6_t* leg = p->input.keys.crouch ? &model_playerlegc : &model_playerleg;
+	bool zombie_team = player_uses_undead_outfit(p);
+	struct kv6_t* torso = p->input.keys.crouch
+		? (zombie_team && model_zombie_torsoc.voxels ? &model_zombie_torsoc : &model_playertorsoc)
+		: (zombie_team && model_zombie_torso.voxels ? &model_zombie_torso : &model_playertorso);
+	struct kv6_t* leg_left = p->input.keys.crouch
+		? (zombie_team && model_zombie_legc.voxels ? &model_zombie_legc : &model_playerlegc)
+		: (zombie_team && model_zombie_leg.voxels ? &model_zombie_leg : &model_playerleg);
+	struct kv6_t* leg_right = p->input.keys.crouch
+		? (zombie_team && model_zombie_legrightc.voxels ? &model_zombie_legrightc : leg_left)
+		: (zombie_team && model_zombie_legright.voxels ? &model_zombie_legright : leg_left);
 	float height = player_height(p);
 	if(id != local_player_id)
 		height -= 0.25F;
@@ -1618,7 +1726,8 @@ void player_render(struct Player* p, int id) {
 		matrix_pointAt(matrix_model, ox, oy, oz);
 		matrix_rotate(matrix_model, 90.0F, 0.0F, 1.0F, 0.0F);
 		matrix_upload();
-		kv6_render(&model_playerhead, p->team);
+		kv6_render(zombie_team && model_zombie_head.voxels
+			? &model_zombie_head : &model_playerhead, p->team);
 		matrix_pop(matrix_model);
 
 		matrix_push(matrix_model);
@@ -1660,31 +1769,35 @@ void player_render(struct Player* p, int id) {
 		matrix_translate(matrix_model, p->physics.eye.x, p->physics.eye.y + height, p->physics.eye.z);
 		matrix_pointAt(matrix_model, ox, 0.0F, oz);
 		matrix_rotate(matrix_model, 90.0F, 0.0F, 1.0F, 0.0F);
-		matrix_translate(matrix_model, torso->xsiz * 0.1F * 0.5F - leg->xsiz * 0.1F * 0.5F,
+		matrix_translate(matrix_model, torso->xsiz * 0.1F * 0.5F - leg_left->xsiz * 0.1F * 0.5F,
 						 -torso->zsiz * 0.1F * (p->input.keys.crouch ? 0.6F : 1.0F),
 						 p->input.keys.crouch ? (-torso->zsiz * 0.1F * 0.75F) : 0.0F);
 		matrix_rotate(matrix_model, 45.0F * foot_function(p) * a, 1.0F, 0.0F, 0.0F);
 		matrix_rotate(matrix_model, 45.0F * foot_function(p) * b, 0.0F, 0.0F, 1.0F);
 		matrix_upload();
-		kv6_render(leg, p->team);
+		kv6_render(leg_left, p->team);
 		matrix_pop(matrix_model);
 
 		matrix_push(matrix_model);
 		matrix_translate(matrix_model, p->physics.eye.x, p->physics.eye.y + height, p->physics.eye.z);
 		matrix_pointAt(matrix_model, ox, 0.0F, oz);
 		matrix_rotate(matrix_model, 90.0F, 0.0F, 1.0F, 0.0F);
-		matrix_translate(matrix_model, -torso->xsiz * 0.1F * 0.5F + leg->xsiz * 0.1F * 0.5F,
+		matrix_translate(matrix_model, -torso->xsiz * 0.1F * 0.5F + leg_right->xsiz * 0.1F * 0.5F,
 						 -torso->zsiz * 0.1F * (p->input.keys.crouch ? 0.6F : 1.0F),
 						 p->input.keys.crouch ? (-torso->zsiz * 0.1F * 0.75F) : 0.0F);
 		matrix_rotate(matrix_model, -45.0F * foot_function(p) * a, 1.0F, 0.0F, 0.0F);
 		matrix_rotate(matrix_model, -45.0F * foot_function(p) * b, 0.0F, 0.0F, 1.0F);
 		matrix_upload();
-		kv6_render(leg, p->team);
+		kv6_render(leg_right, p->team);
 		matrix_pop(matrix_model);
 		if(esp_active) {
 			glEnable(GL_DEPTH_TEST);
 		}
 	}
+
+	bool unshadowed_viewmodel = id == local_player_id && camera_mode == CAMERAMODE_FPS;
+	if(unshadowed_viewmodel)
+		kv6_calclight_viewmodel();
 
 	matrix_push(matrix_model);
 	if(id == local_player_id && camera_mode == CAMERAMODE_FPS) {
@@ -1852,7 +1965,8 @@ void player_render(struct Player* p, int id) {
 			glDisable(GL_DEPTH_TEST);
 		}
 		matrix_upload();
-		kv6_render(&model_playerarms, p->team);
+		kv6_render(zombie_team && model_zombie_arms.voxels
+			? &model_zombie_arms : &model_playerarms, p->team);
 		if(esp_active) {
 			glEnable(GL_DEPTH_TEST);
 		}
@@ -1914,6 +2028,8 @@ void player_render(struct Player* p, int id) {
 	p->casing_dir.z = v[2] - v2[2];
 
 	matrix_pop(matrix_model);
+	if(unshadowed_viewmodel)
+		kv6_calclight(p->pos.x, p->pos.y, p->pos.z);
 	/* A bodyview camera is at that player's eyes; don't put its lamp tip
 	   directly in front of the spectator's lens. */
 	if(!render_fpv)

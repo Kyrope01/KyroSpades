@@ -96,6 +96,9 @@ struct player_intersection {
 
 bool player_intersection_exists(struct player_intersection* s);
 int player_intersection_choose(struct player_intersection* s, float* distance);
+/* Legacy ZeroSpades servers identify the undead by team name. The Player Outfit
+   extension provides an explicit Undead outfit when the server supports it. */
+bool player_team_is_zombie(unsigned char team);
 
 extern float tactical_sprint_amount;
 extern struct Player {
@@ -121,6 +124,7 @@ extern struct Player {
 	unsigned char spade_used, spade_use_type;
 	unsigned int score;
 	unsigned char team, weapon, held_item;
+	unsigned char outfit; /* resolved Player Outfit ID; 1 is Undead */
 	unsigned char alive, connected;
 	float item_showup, item_disabled, items_show_start, weapon_last_shot;
 	unsigned char items_show;
@@ -199,6 +203,7 @@ struct CorpseEntry {
 	struct Orientation orientation_smooth;
 	struct Velocity velocity;
 	unsigned char team;
+	unsigned char is_zombie;
 };
 
 extern struct CorpseEntry corpses[CORPSE_MAX];
@@ -226,6 +231,13 @@ void player_render_all(void);
 void player_render(struct Player* p, int id);
 void player_collision(const struct Player* p, Ray* ray, struct player_intersection* intersects);
 void player_reset(struct Player* p);
+void player_outfit_ext_set_negotiated(bool supported);
+void player_outfit_ext_reset_map(void);
+void player_outfit_ext_reset_player(unsigned char player_id);
+void player_outfit_ext_set_player(unsigned char player_id, unsigned char outfit);
+void player_outfit_ext_set_teams(const unsigned char* entries, int length);
+void player_outfit_ext_apply_player(unsigned char player_id);
+bool player_uses_undead_outfit(const struct Player* p);
 int player_move(struct Player* p, float fsynctics, int id);
 int player_uncrouch(struct Player* p);
 int overlaps_with_player(int bx, int by, int bz);
