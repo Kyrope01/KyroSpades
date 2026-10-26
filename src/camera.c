@@ -652,11 +652,16 @@ int camera_CubeInFrustum(float x, float y, float z, float size, float size_y) {
 	int c;
 	int c2 = 0;
 
+	/* The tested AABB is [x-size, x+size] x [y, y+size_y] x [z-size, z+size].
+	   Chunks and water tiles pass their real bottom (y = 0), so the bottom
+	   corners must use y itself. The old (y - size) extended the cube eight
+	   blocks below the terrain and only avoided false culls while no geometry
+	   existed underneath y = 0. */
 	for(p = 0; p < 6; p++) {
 		c = 0;
-		if(frustum[p][0] * (x - size) + frustum[p][1] * (y - size) + frustum[p][2] * (z - size) + frustum[p][3] > 0)
+		if(frustum[p][0] * (x - size) + frustum[p][1] * (y) + frustum[p][2] * (z - size) + frustum[p][3] > 0)
 			c++;
-		if(frustum[p][0] * (x + size) + frustum[p][1] * (y - size) + frustum[p][2] * (z - size) + frustum[p][3] > 0)
+		if(frustum[p][0] * (x + size) + frustum[p][1] * (y) + frustum[p][2] * (z - size) + frustum[p][3] > 0)
 			c++;
 		if(frustum[p][0] * (x - size) + frustum[p][1] * (y + size_y) + frustum[p][2] * (z - size) + frustum[p][3] > 0)
 			c++;

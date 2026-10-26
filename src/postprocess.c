@@ -27,7 +27,11 @@
 
 #ifdef OPENGL_CORE
 
-#define BLOOM_BLUR_PASSES 8
+/* Three horizontal/vertical Gaussian pairs (six full-screen passes). The old
+   eight-pass schedule cost two extra screen-sized ping-pongs per frame for a
+   barely perceptible widening; three pairs already spread energy well beyond
+   the half-resolution bloom target at this 9-tap kernel. */
+#define BLOOM_BLUR_PASSES 6
 
 static const char* postprocess_vertex_shader =
         "#version 330 core\n"
@@ -114,8 +118,14 @@ static void postprocess_restore_capability(GLenum capability, GLboolean enabled)
 }
 
 static void postprocess_state_capture(struct postprocess_gl_state* state) {
-        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &state->draw_fbo);
-        glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &state->read_fbo);
+        /* The engine only ever binds GL_FRAMEBUFFER (which sets both DRAW and
+           READ); the shadow pass and the optional bloom readback restore their
+           own scoped bindings before we get here. One query therefore covers
+           both targets and saves a driver-synchronising glGet per frame. */
+        GLint current_fbo = 0;
+        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &current_fbo);
+        state->draw_fbo = current_fbo;
+        state->read_fbo = current_fbo;
         state->program = (GLint)glx_current_program();
         glGetIntegerv(GL_ACTIVE_TEXTURE, &state->active_texture);
         glActiveTexture(GL_TEXTURE0);
@@ -327,7 +337,7 @@ void postprocess_bloom_debug_test(void) {
         tested = true;
 
         /* A single 8x HDR texel should survive extraction and spread into
-           neighbouring pixels after the eight real GPU blur passes. Run only
+           neighbouring pixels after the real GPU blur passes. Run only
            on request, since reading back a framebuffer stalls the pipeline. */
         struct postprocess_gl_state state;
         postprocess_state_capture(&state);
@@ -344,8 +354,8 @@ void postprocess_bloom_debug_test(void) {
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
                 GLuint result = postprocess_bloom_render(source, 32, 32, 1.0F);
                 if(result) {
-                        /* Eight passes end on buffer 0; reading near the centre
-                           tests the blur, not merely the original bright texel. */
+                        /* An even pass count ends on buffer 0; reading near the
+                           centre tests the blur, not merely the original texel. */
                         GLfloat center[4] = {0}, neighbor[4] = {0};
                         glBindFramebuffer(GL_READ_FRAMEBUFFER, bloom.fbo[0]);
                         glReadPixels(8, 8, 1, 1, GL_RGBA, GL_FLOAT, center);

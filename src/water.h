@@ -34,8 +34,10 @@ void water_invalidate(void);
 /* Queue an incremental refresh after an individual terrain edit. */
 void water_map_changed(void);
 
-/* True whenever the dedicated water pass replaces y < WATER_LEVEL blocks in
- * chunk meshes (camera-independent, safe to read on chunk worker threads). */
+/* True whenever the dedicated water surface/wave pass is active. The pass
+ * only draws columns that contain water (air at WATER_LEVEL); terrain meshes
+ * keep their solid y < WATER_LEVEL blocks regardless of this value.
+ * Camera-independent, safe to read on chunk worker threads. */
 bool water_surface_enabled(void);
 bool water_shader_active(void);
 

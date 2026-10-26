@@ -44,7 +44,9 @@
 #define WATER_TILE 16
 #define WATER_VIEW_REFRESH_DISTANCE 0.25F
 #define WATER_HEIGHT_REFRESH_DISTANCE 0.10F
-#define WATER_MESH_RECENTER_DISTANCE 1.0F
+/* Two blocks instead of one: crossing a single block while walking no longer
+   invalidates the whole cached water mesh (its span always covers this ring). */
+#define WATER_MESH_RECENTER_DISTANCE 2.0F
 #define WATER_MESH_HEIGHT_DISTANCE 0.25F
 #define WATER_MESH_ORIENTATION_EPSILON 0.01F
 
@@ -68,15 +70,39 @@ static const char* water_vertex_shader =
         "layout(location = 3) in vec3 a_Normal;\n"
         "uniform mat4 u_MVP;\n"
         "uniform mat4 u_Model;\n"
+        "uniform float u_Time;\n"
+        "uniform float u_WavesEnabled;\n"
+        "uniform float u_WaveIntensity;\n"
+        "uniform float u_WaveSpeed;\n"
+        "uniform float u_WaveMode;\n"
         "out vec4 v_Color;\n"
         "out vec3 v_WorldPosition;\n"
         "out vec3 v_WorldNormal;\n"
+        /* Must match the CPU WAVE3 formula in water_render_tile() exactly, so
+           GPU- and CPU-animated surfaces never diverge. */
+        "float wave_displacement(vec2 p) {\n"
+        "    float t = u_Time * u_WaveSpeed;\n"
+        "    float amp = clamp(u_WaveIntensity, 0.0, 5.0);\n"
+        "    return (sin(t * 0.9 + p.x * 0.7 + p.y * 0.5) * 0.08\n"
+        "          + sin(t * 1.3 + p.x * 0.4 + p.y * 1.1) * 0.06\n"
+        "          + sin(t * 1.8 + p.x * 1.5 + p.y * 0.2) * 0.04) * amp;\n"
+        "}\n"
         "void main(void) {\n"
         "    vec4 world = u_Model * vec4(a_Position, 1.0);\n"
+        "    float dy = 0.0;\n"
+        "    if(u_WavesEnabled > 0.5 && u_WaveMode < 0.5) {\n"
+        /* Vertex mode only: tiled waves are baked on the CPU as solid units.
+           Same clamp as the CPU path (base y - 1.0 + 0.05), so a trough can
+           never sink into the seabed zone or interpenetrate shoreline faces. */
+        "        float wave_floor = world.y - 0.95;\n"
+        "        float displaced = max(world.y + wave_displacement(world.xz), wave_floor);\n"
+        "        dy = displaced - world.y;\n"
+        "        world.y = displaced;\n"
+        "    }\n"
         "    v_Color = a_Color;\n"
         "    v_WorldPosition = world.xyz;\n"
         "    v_WorldNormal = normalize((u_Model * vec4(a_Normal, 0.0)).xyz);\n"
-        "    gl_Position = u_MVP * vec4(a_Position, 1.0);\n"
+        "    gl_Position = u_MVP * vec4(a_Position + vec3(0.0, dy, 0.0), 1.0);\n"
         "}\n";
 
 static const char* water_fragment_shader =
@@ -260,6 +286,7 @@ static struct {
            and VBO replacement are cached. CPU-animated paths rebuild. */
         bool mesh_valid;
         bool mesh_had_waves;
+        int mesh_had_wave_mode;
         unsigned int mesh_snapshot_revision;
         unsigned int mesh_map_revision;
         float mesh_render_distance;
@@ -1064,22 +1091,43 @@ static void water_render_tile(int tx, int tz, int x0, int x1, int z0, int z1,
 
                                         tesselator_set_color(&wr.tess, tile_color);
                                 } else {
-                                        /* Vertex mode (default): each vertex gets its own
-                                           wave height — smooth per-vertex displacement. */
-                                        tesselator_set_color(&wr.tess, c);
-                                        tesselator_set_normal(&wr.tess, 0, 127, 0);
-                                        #define WAVE3(vx, vz) \
-                                            ((sinf(t * 0.9F + (float)(vx) * 0.7F + (float)(vz) * 0.5F) * 0.08F \
-                                           + sinf(t * 1.3F + (float)(vx) * 0.4F + (float)(vz) * 1.1F) * 0.06F \
-                                           + sinf(t * 1.8F + (float)(vx) * 1.5F + (float)(vz) * 0.2F) * 0.04F) * amp)
-                                        float y0 = y + WAVE3(x    , z    );
-                                        float y1 = y + WAVE3(x    , z + 1);
-                                        float y2 = y + WAVE3(x + 1, z + 1);
-                                        float y3 = y + WAVE3(x + 1, z    );
-                                        #undef WAVE3
-                                        tesselator_addf_simple(&wr.tess,
-                                                (float[]){x, y0, z, x, y1, z + 1.0F, x + 1.0F, y2, z + 1.0F, x + 1.0F, y3, z});
-                                        (*n)++;
+#ifdef OPENGL_CORE
+                                        if(water_program) {
+                                                /* GPU vertex waves: bake the flat cell and let the
+                                                   Core vertex shader displace (and clamp) every
+                                                   corner per frame. The mesh is then reusable across
+                                                   frames, so the ~50k-cell CPU rebuild and full VBO
+                                                   re-upload no longer happen just to advance waves. */
+                                                tesselator_set_color(&wr.tess, c);
+                                                tesselator_set_normal(&wr.tess, 0, 127, 0);
+                                                tesselator_addf_simple(&wr.tess,
+                                                        (float[]){x, y, z, x, y, z + 1.0F, x + 1.0F, y, z + 1.0F, x + 1.0F, y, z});
+                                                (*n)++;
+                                        } else
+#endif
+                                        {
+                                                /* CPU vertex waves (GLES/legacy, or Core without a
+                                                   water program): each vertex gets its own clamped
+                                                   wave height. The floor matches the tiled path, so
+                                                   troughs never sink into the seabed zone or
+                                                   interpenetrate shoreline terrain. */
+                                                tesselator_set_color(&wr.tess, c);
+                                                tesselator_set_normal(&wr.tess, 0, 127, 0);
+                                                #define WAVE3(vx, vz) \
+                                                    ((sinf(t * 0.9F + (float)(vx) * 0.7F + (float)(vz) * 0.5F) * 0.08F \
+                                                   + sinf(t * 1.3F + (float)(vx) * 0.4F + (float)(vz) * 1.1F) * 0.06F \
+                                                   + sinf(t * 1.8F + (float)(vx) * 1.5F + (float)(vz) * 0.2F) * 0.04F) * amp)
+                                                /* Matches tiled mode: never invert below yb + 0.05. */
+                                                float wave_floor = y - 1.0F + 0.05F;
+                                                float y0 = fmaxf(y + WAVE3(x    , z    ), wave_floor);
+                                                float y1 = fmaxf(y + WAVE3(x    , z + 1), wave_floor);
+                                                float y2 = fmaxf(y + WAVE3(x + 1, z + 1), wave_floor);
+                                                float y3 = fmaxf(y + WAVE3(x + 1, z    ), wave_floor);
+                                                #undef WAVE3
+                                                tesselator_addf_simple(&wr.tess,
+                                                        (float[]){x, y0, z, x, y1, z + 1.0F, x + 1.0F, y2, z + 1.0F, x + 1.0F, y3, z});
+                                                (*n)++;
+                                        }
                                 }
                         } else {
                                 tesselator_set_color(&wr.tess, c);
@@ -1157,8 +1205,16 @@ void water_render(void) {
 #ifdef OPENGL_CORE
         float mesh_dx = camera_x - wr.mesh_camera_x;
         float mesh_dz = camera_z - wr.mesh_camera_z;
-        bool rebuild_mesh = !water_program || waves_enabled || !wr.mesh_valid
+        /* Per-frame CPU rebuilds are only needed while the CPU itself has to
+           animate geometry: legacy/no-shader runs, or tiled waves (solid tile
+           units with stretched side faces). Vertex-mode waves on the Core
+           program are displaced in the vertex shader from a cached flat mesh,
+           so advancing wave time costs no tessellation and no VBO re-upload. */
+        bool cpu_wave_animation = waves_enabled
+                && (!water_program || settings.water_wave_mode == 1);
+        bool rebuild_mesh = cpu_wave_animation || !wr.mesh_valid
                 || wr.mesh_had_waves != waves_enabled
+                || wr.mesh_had_wave_mode != settings.water_wave_mode
                 || wr.mesh_snapshot_revision != wr.snapshot_revision
                 || wr.mesh_map_revision != map_revision
                 || wr.mesh_render_distance != rd
@@ -1242,7 +1298,18 @@ void water_render(void) {
         glGetFloatv(GL_POLYGON_OFFSET_FACTOR, &previous_polygon_factor);
         glGetFloatv(GL_POLYGON_OFFSET_UNITS, &previous_polygon_units);
         glEnable(GL_POLYGON_OFFSET_FILL);
-        glPolygonOffset(-2.0F, -2.0F);
+        if(waves_enabled) {
+                /* Waves already separate the surface from the seabed geometrically.
+                   A negative bias here pushes sub-pixel, far-range water fragments
+                   past nearly touching ground in the coarse far-plane depth buffer,
+                   producing the flickering water-colored dots and streaks. With waves
+                   on, let the real depth contest decide. */
+                glPolygonOffset(0.0F, 0.0F);
+        } else {
+                /* Flat water rests only 0.008 above the seabed top, inside far-range
+                   depth precision, so the coplanar surface still needs a forward bias. */
+                glPolygonOffset(-2.0F, -2.0F);
+        }
 
         float max_crest = WATER_LEVEL + 0.05F
                 + (waves_enabled ? 0.27F * fmaxf(settings.water_wave_intensity, 0.0F) : 0.0F);
@@ -1254,6 +1321,7 @@ void water_render(void) {
                 tesselator_glx(&wr.tess, &wr.dl);
                 wr.mesh_valid = true;
                 wr.mesh_had_waves = waves_enabled;
+                wr.mesh_had_wave_mode = settings.water_wave_mode;
                 wr.mesh_snapshot_revision = wr.snapshot_revision;
                 wr.mesh_map_revision = map_revision;
                 wr.mesh_render_distance = rd;
