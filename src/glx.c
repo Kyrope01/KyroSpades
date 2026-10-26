@@ -747,7 +747,11 @@ void glx_displaylist_update(struct glx_displaylist* x, size_t size, int type, vo
                 glBindBuffer(GL_ARRAY_BUFFER, x->modern);
 
                 if(grow_buffer) {
-                        glBufferData(GL_ARRAY_BUFFER, required_bytes, NULL, GL_STATIC_DRAW);
+                        /* These buffers are re-streamed with glBufferSubData on every
+                           displaylist update (per-frame water, chunk remeshes), so ask
+                           the driver for write-combined dynamic memory instead of
+                           static VRAM that can stall on orphaning/rewrite. */
+                        glBufferData(GL_ARRAY_BUFFER, required_bytes, NULL, GL_DYNAMIC_DRAW);
                         x->buffer_size = required_bytes;
                 }
 

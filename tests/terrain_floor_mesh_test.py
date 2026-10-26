@@ -1,21 +1,28 @@
-"""Behavioral + source regression test for hiding blocks below water (y < WATER_LEVEL).
+"""Behavioral + source regression test for the y = 0 terrain floor hole bug.
 
 Run: python3 tests/terrain_floor_mesh_test.py
 
 Verifies by compiling and executing the real src/chunk.c, src/water.c, src/map.c,
 src/tesselator.c, and deps/libvxl/libvxl.c:
 1. Both legacy and OPENGL_CORE translation units compile cleanly.
-2. When water_waves or water_shader is enabled, blocks below WATER_LEVEL (y = 0)
-   are omitted (0 quads) across ALL terrain meshers (greedy, naive, AO, textured),
-   independent of camera_y, while terrain at y >= 1 still renders normally.
-3. When both water_waves and water_shader are off, all terrain meshers still
-   emit the y = 0 floor for the classic flat-water path.
-4. water_render() emits water geometry immediately on Frame 1 even before the
+2. Solid blocks below WATER_LEVEL (y = 0) are ALWAYS meshed by every terrain
+   mesher (greedy, naive, AO, textured), with water_waves/water_shader enabled
+   or not and independent of camera_y. The animated water pass only covers
+   columns that actually contain water (air at WATER_LEVEL), so stripping floor
+   blocks opened see-through gaps under dry ground, shoreline edges, cave floors
+   and placed blocks that had no replacement geometry.
+3. Enabling the water features must not change the terrain mesh at all: the
+   quad counts with water on equal those with water off.
+4. A missing bedrock block (the floor gaps real .vxl cave maps can contain;
+   the bottom layer cannot be removed through map_set) exposes y = 0 side faces
+   on the neighbouring blocks while the water surface is active, and a block
+   placed at y = 1 (which turns its column DRY, so water_render skips it) still
+   leaves the y = 0 floor beneath it in the mesh.
+5. water_render() emits water geometry immediately on Frame 1 even before the
    asynchronous reflection worker has populated render_cache/render_state, and
    keeps rendering (with backface culling temporarily lifted) at low camera_y.
-5. map_damaged_voxels_render() drops y < WATER_LEVEL entries when the separate
-   water surface is active so shooting water never draws opaque-looking damage
-   cubes through wave troughs.
+6. map_damaged_voxels_render() keeps damage tints on y = 0 floor blocks while
+   the water surface is active, matching the terrain that now renders there.
 """
 import subprocess
 import tempfile
@@ -32,16 +39,25 @@ for name, end in (
     ("textured", "void chunk_update_all"),
 ):
     body = chunk_src.split(f"void chunk_generate_{name}(", 1)[1].split(end, 1)[0]
-    assert "water_surface_enabled()" in body, f"{name} missing water_surface_enabled()"
-    assert "(float)y < WATER_LEVEL" in body, f"{name} missing WATER_LEVEL skip"
+    # The water pass only fills real water columns, so no mesher may strip
+    # solid floor blocks: doing so leaves permanent see-through gaps wherever
+    # the separate water plane is not drawn (dry columns, placed blocks, digs).
+    assert "water_surface_enabled()" not in body, f"{name} must not strip floor blocks"
+    assert "(float)y < WATER_LEVEL" not in body, f"{name} still skips y < WATER_LEVEL"
     assert "camera_y" not in body, f"{name} must not read camera_y on worker threads"
 
-# Greedy meshing has 3 separate face passes (Z, X, Y); all 3 must skip y < WATER_LEVEL.
-greedy_body = chunk_src.split("void chunk_generate_greedy(", 1)[1].split(
-    "static void chunk_add_ao_face", 1
+# No face loop anywhere in chunk.c may discard blocks below WATER_LEVEL.
+assert "(float)y < WATER_LEVEL" not in chunk_src, (
+    "chunk.c must never skip solid y < WATER_LEVEL blocks"
+)
+
+# The damage overlay has to stay consistent with the restored floor geometry.
+map_src = (root / "src/map.c").read_text()
+damage_body = map_src.split("static bool damaged_voxel_update(", 1)[1].split(
+    "void map_damaged_voxels_render(", 1
 )[0]
-assert greedy_body.count("(float)y < WATER_LEVEL") == 3, (
-    "All three greedy-meshing face loops (Z, X, Y) must skip y < WATER_LEVEL"
+assert "water_surface_enabled()" not in damage_body, (
+    "damage tints on y = 0 floor blocks must not be dropped with the water pass active"
 )
 
 water_surface_fn = water_src.split("bool water_surface_enabled(void) {", 1)[1].split("}", 1)[0]
@@ -335,6 +351,33 @@ void sound_create(enum sound_space local, struct Sound_wav* w, float x, float y,
     (void)local; (void)w; (void)x; (void)y; (void)z;
 }
 
+/* libvxl refuses to dig the bottom layer through map_set() (permanent bedrock),
+   but maps loaded from .vxl data can contain gaps there — e.g. low cave floors.
+   Recreate that geometry directly inside an immutable chunk copy: clear the
+   solidity bit and drop the matching sorted block entry so every mesher treats
+   the cell exactly like missing floor geometry. */
+static void copy_remove_floor_block(struct libvxl_chunk_copy* copy, int x, int z) {
+    size_t lx = ((size_t)x + copy->width - copy->geo_x) % copy->width;
+    size_t ly = ((size_t)z + copy->height - copy->geo_y) % copy->height;
+    size_t bottom = copy->depth - 1; /* engine y = 0 */
+    assert(lx < copy->geo_w && ly < copy->geo_h);
+    size_t off = bottom + (lx + ly * copy->geo_w) * copy->depth;
+    copy->geometry[off / (sizeof(size_t) * 8)] &= ~((size_t)1 << (off % (sizeof(size_t) * 8)));
+
+    /* map.h #undefs libvxl's pos_key macro, so pack the key with its layout:
+       (column-z << 20) | (column-x << 8) | libvxl-depth-z. */
+    uint32_t target = ((uint32_t)z << 20) | ((uint32_t)x << 8) | (uint32_t)bottom;
+    for (size_t i = 0; i < copy->blocks_sorted_count; i++) {
+        if (copy->blocks_sorted[i].position == target) {
+            memmove(copy->blocks_sorted + i, copy->blocks_sorted + i + 1,
+                    (copy->blocks_sorted_count - i - 1) * sizeof(struct libvxl_block));
+            copy->blocks_sorted_count--;
+            return;
+        }
+    }
+    assert(0); /* the default floor block must be present to remove */
+}
+
 static uint32_t run_mesher(int mode, struct libvxl_chunk_copy* copy, int16_t* min_y_out) {
     struct tesselator tess;
     int max_h = 0;
@@ -389,47 +432,59 @@ int main(void) {
     chunk_init();
     water_init();
 
-    /* 1. Pure water chunk (only y = 0 solid blocks exist in default map):
-          With water_waves / water_shader enabled, ALL meshers must emit 0 quads,
-          even if camera_y is underwater. */
+    /* 1. Default map: a solid y = 0 floor under every column. With the water
+          pass active every mesher MUST still emit that floor, even when the
+          camera is underwater — the old stripping left see-through gaps. */
     struct libvxl_chunk_copy copy;
     map_copy_blocks(&copy, 0, 0);
+    uint32_t quads_water_on[5] = {0};
     for (int cam_case = 0; cam_case < 2; cam_case++) {
         camera_y = (cam_case == 0) ? 12.0F : 0.4F;
         assert(water_surface_enabled());
         for (int mode = 0; mode <= 4; mode++) {
             uint32_t quads = run_mesher(mode, &copy, NULL);
-            assert(quads == 0);
+            assert(quads > 0);
+            if (cam_case == 0)
+                quads_water_on[mode] = quads;
+            else
+                assert(quads == quads_water_on[mode]); /* camera-independent */
         }
     }
 
-    /* 2. Classic path (both water_shader and water_waves disabled):
-          Every mesher must emit the y = 0 water floor again. */
+    /* 2. Classic path (both water_shader and water_waves disabled): the terrain
+          mesh must be byte-for-byte the same quad count — water settings must
+          not influence terrain geometry in either direction. */
     settings.water_shader = 0;
     settings.water_waves = 0;
     assert(!water_surface_enabled());
     for (int mode = 0; mode <= 4; mode++) {
         uint32_t quads = run_mesher(mode, &copy, NULL);
         assert(quads > 0);
+        assert(quads == quads_water_on[mode]);
     }
     libvxl_copy_chunk_destroy(&copy);
 
-    /* 3. Shoreline / elevated block at y = 1 with water enabled:
-          y = 1 block is rendered (quads > 0), and no vertex dips below y = 1
-          (i.e. zero faces from y = 0 blocks). */
+    /* 3. The two reported hole scenarios, water pass re-enabled:
+          (a) a block placed at y = 1 makes its column DRY (water_render skips
+              columns with solid geometry at WATER_LEVEL), so the y = 0 floor
+              beneath it is now the only geometry there and must remain meshed;
+          (b) a missing floor block (cave-map bedrock gap) must expose y = 0
+              side faces on the neighbouring blocks instead of opening an empty
+              see-through pit. */
     settings.water_shader = 1;
     settings.water_waves = 1;
-    map_set(4, 1, 4, rgb(80, 160, 60));
+    map_set(4, 1, 4, rgb(80, 160, 60)); /* dry column: solid at WATER_LEVEL */
     map_copy_blocks(&copy, 0, 0);
+    copy_remove_floor_block(&copy, 6, 6);
     for (int mode = 0; mode <= 4; mode++) {
-        int16_t min_y = 0;
+        int16_t min_y = 32767;
         uint32_t quads = run_mesher(mode, &copy, &min_y);
         assert(quads > 0);
-        assert(min_y >= 1);
+        assert(min_y == 0); /* y = 0 floor geometry survives next to the gap */
     }
     libvxl_copy_chunk_destroy(&copy);
 
-    /* 4. Frame-1 water_render() BEFORE water_reflection_pass() has ever run:
+    /* 5. Frame-1 water_render() BEFORE water_reflection_pass() has ever run:
           water geometry must render immediately in tile, vertex, and flat modes,
           and low-camera views must temporarily lift GL_CULL_FACE. */
     water_invalidate();
@@ -486,18 +541,29 @@ int main(void) {
     assert(last_uploaded_vertices == verts_before);
     settings.water_waves = 1;
 
-    /* 5. Damaged-voxel overlay must ignore y = 0 when water surface is active,
-          while still rendering damage on y >= 1 terrain blocks. */
+    /* 6. Damaged-voxel overlay stays consistent with the restored terrain:
+          damage on a y = 0 floor block renders while the water surface is
+          active, and damage on the y = 1 dry-column block still renders. */
     camera_y = 10.0F;
     immediate_draw_quads = 0;
     map_damage(2, 0, 2, 50);
     map_damaged_voxels_render();
-    assert(immediate_draw_quads == 0);
+    assert(immediate_draw_quads > 0);
 
     immediate_draw_quads = 0;
     map_damage(4, 1, 4, 50);
     map_damaged_voxels_render();
     assert(immediate_draw_quads > 0);
+    size_t two_entry_quads = immediate_draw_quads;
+
+    /* Damage on an air voxel is still discarded (block was never there). The
+       two solid entries above stay in the table and re-render every pass, so
+       the rebuilt overlay must contain exactly the same faces — none from the
+       air entry. */
+    map_damage(8, 5, 8, 50);
+    immediate_draw_quads = 0;
+    map_damaged_voxels_render();
+    assert(immediate_draw_quads == two_entry_quads);
 
     water_deinit();
     map_deinit();
@@ -567,4 +633,4 @@ with tempfile.TemporaryDirectory() as tmp:
         subprocess.run(cmd, check=True)
         subprocess.run([str(exe)], check=True)
 
-print("All terrain meshing modes omit y < WATER_LEVEL blocks when water is active and water_render covers frame 1")
+print("All terrain meshing modes keep y = 0 floor blocks with water active (no terrain holes), water settings never change terrain meshes, and water_render covers frame 1")

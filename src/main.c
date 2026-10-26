@@ -559,17 +559,10 @@ void display() {
         }
 
         if(hud_active->render_world || network_connected) {
-                /* Per-frame backup re-capture only when post-processing is on.
-                   glGetIntegerv can stall the pipeline, so keep it out of the
-                   default gameplay path. */
-                if(needs_postproc) {
-                        GLint fb = -1;
-                        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &fb);
-                        if(fb > 0) {
-                                window_gl_default_framebuffer = fb;
-                                live_screen_fbo = fb;
-                        }
-                }
+                /* live_screen_fbo was captured above; only glClearColor runs
+                   between the two points and it never changes the framebuffer
+                   binding, so a second glGetIntegerv here would just stall the
+                   driver for an identical value. Reuse the cached binding. */
 
 #if defined(OS_IOS)
                 /* Belt-and-braces: if we somehow still don't have a real drawable
@@ -1558,7 +1551,7 @@ void display() {
                                 unsigned int bloom_texture = 0;
                                 if(bloom_postproc && postproc.fbo && scene_texture) {
                                         /* Strict Core uses a half-resolution bright pass followed by
-                                           four horizontal/vertical Gaussian pairs. If allocation or
+                                           three horizontal/vertical Gaussian pairs. If allocation or
                                            compilation fails, a zero result selects the established
                                            single-pass compatibility bloom in the composite shader. */
                                         postprocess_bloom_debug_test();
