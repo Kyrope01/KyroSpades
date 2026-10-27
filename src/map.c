@@ -148,10 +148,11 @@ static bool damaged_voxel_update(void* key, void* value, void* user) {
         int y = pos_keyy(pos);
         int z = pos_keyz(pos);
 
-        /* y < WATER_LEVEL blocks stay in the terrain mesh even with the water
-           pass active (only real water columns receive water geometry), so
-           their damage tint must be drawn instead of being silently dropped. */
-        if(window_time() - voxel->timer > 10.0F || map_isair(x, y, z))
+        /* Match chunk meshing: submerged blocks have no static terrain to tint,
+           but damage on a floor below a solid, dry water-level block remains. */
+        if(window_time() - voxel->timer > 10.0F || map_isair(x, y, z)
+           || (water_surface_enabled() && (float)y < WATER_LEVEL
+               && map_isair(x, (int)WATER_LEVEL, z)))
                 return true;
 
         /* Terrain chunks wrap around the map near its X/Z seams. Draw the

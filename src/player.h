@@ -26,7 +26,12 @@
 #include "aabb.h"
 #include "network.h"
 
-#define PLAYERS_MAX 256 // just because 32 players are not enough
+/* Protocol player IDs run from 0 through 254. ID 255 is the server's
+   pseudo-player for actions such as kills, block changes and system messages.
+   Keep a storage slot for that sentinel, but never count it as a real player. */
+#define PLAYER_ID_SERVER 255
+#define PLAYER_COUNT_MAX PLAYER_ID_SERVER
+#define PLAYERS_MAX (PLAYER_ID_SERVER + 1)
 #define TEAM_1 0
 #define TEAM_2 1
 #define TEAM_SPECTATOR 255

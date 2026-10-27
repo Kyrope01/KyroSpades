@@ -54,6 +54,7 @@ extern float tactical_sprint_amount;
 #include "rpc.h"
 #include "map.h"
 #include "player.h"
+#include "scoreboard.h"
 #include "camera.h"
 #include "cameracontroller.h"
 #include "ping.h"
@@ -570,6 +571,46 @@ static int playertable_sort(const void* a, const void* b) {
         struct player_table* aa = (struct player_table*)a;
         struct player_table* bb = (struct player_table*)b;
         return bb->score - aa->score;
+}
+
+static int scoreboard_scroll_offset = 0;
+static int scoreboard_scroll_max = 0;
+static float scoreboard_scroll_accum = 0.0F;
+
+static int scoreboard_is_open(void) {
+        return (chat_input_mode == CHAT_NO_INPUT && window_key_down(WINDOW_KEY_TAB))
+               || camera_mode == CAMERAMODE_SELECTION;
+}
+
+/* Draw a genuinely solid HUD rectangle. Fixed-function rendering can inherit
+   a bound font/UI texture from an earlier draw; texture_draw_empty() is also
+   used by texture_draw() and therefore deliberately does not change that
+   state itself. Keep the untextured state change local to scoreboard framing. */
+static void scoreboard_draw_solid_rect(float x, float top, float width, float height) {
+        if(width <= 0.0F || height <= 0.0F)
+                return;
+#ifndef OPENGL_CORE
+#ifdef OPENGL_ES
+        if(gles_version < 2)
+#endif
+                glDisable(GL_TEXTURE_2D);
+#endif
+        texture_draw_empty(x, top, width, height);
+}
+
+/* Draw only the requested frame: no per-row rectangles or horizontal row
+   separators. The border stays inside the supplied rectangle so the calculated
+   scoreboard bounds and scroll clipping remain unchanged. */
+static void scoreboard_draw_box_outline(float x, float top, float width, float height) {
+        if(width <= 0.0F || height <= 0.0F)
+                return;
+        glColor4f(0.0F, 0.0F, 0.0F, 1.0F);
+        scoreboard_draw_solid_rect(x, top, width, SCOREBOARD_BORDER_WIDTH);
+        scoreboard_draw_solid_rect(x, top - height + SCOREBOARD_BORDER_WIDTH,
+                                   width, SCOREBOARD_BORDER_WIDTH);
+        scoreboard_draw_solid_rect(x, top, SCOREBOARD_BORDER_WIDTH, height);
+        scoreboard_draw_solid_rect(x + width - SCOREBOARD_BORDER_WIDTH, top,
+                                   SCOREBOARD_BORDER_WIDTH, height);
 }
 
 static void hud_ingame_render3D() {
@@ -2066,7 +2107,13 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                         }
                 }
 
-                if(chat_input_mode == CHAT_NO_INPUT && window_key_down(WINDOW_KEY_TAB) || camera_mode == CAMERAMODE_SELECTION) {
+                int scoreboard_open = scoreboard_is_open();
+                if(!scoreboard_open) {
+                        scoreboard_scroll_offset = 0;
+                        scoreboard_scroll_max = 0;
+                        scoreboard_scroll_accum = 0.0F;
+                }
+                if(scoreboard_open) {
                         if(network_connected && network_logged_in) {
                                 char ping_str[16];
                                 sprintf(ping_str, "PING: %ims", network_ping());
@@ -2075,10 +2122,10 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                         }
 
 
-                        int count_team1 = 1;
-                        int count_team2 = 1;
+                        int count_team1 = 0;
+                        int count_team2 = 0;
                         int count_spec = 0;
-                        for(int k = 0; k < PLAYERS_MAX; k++) {
+                        for(int k = 0; k < PLAYER_COUNT_MAX; k++) {
                                 if(players[k].connected) {
                                         if(players[k].team == TEAM_1) {
                                                 count_team1++;
@@ -2090,11 +2137,31 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 }
                         }
 
-                        float height = 24.F * max(count_team1, count_team2);
+                        float scoreboard_top = 450.0F * scalef;
+                        float scoreboard_bottom = 24.0F * scalef;
+                        struct scoreboard_layout layout = scoreboard_layout_calculate(
+                                count_team1, count_team2, count_spec, scoreboard_top, scoreboard_bottom);
+                        int section_counts[3] = {count_team1, count_team2, count_spec};
+                        int section_visible[3] = {layout.team_rows, layout.team_rows, layout.spectator_rows};
+                        int section_start[3] = {0};
+                        scoreboard_scroll_max = 0;
+                        for(int i = 0; i < 3; i++) {
+                                section_start[i] = scoreboard_scroll_start(
+                                        scoreboard_scroll_offset, section_counts[i], section_visible[i]);
+                                scoreboard_scroll_max = scoreboard_max_int(
+                                        scoreboard_scroll_max,
+                                        scoreboard_scroll_limit(section_counts[i], section_visible[i]));
+                        }
+                        scoreboard_scroll_offset = scoreboard_scroll_start(
+                                scoreboard_scroll_offset, scoreboard_scroll_max, 0);
+                        int spectator_panel_drawn = 0;
+
                         for(int i = 0; i < 3; i++) {
                                 if(i == 2 && count_spec == 0) {
                                         continue;
                                 }
+                                if(i == 2)
+                                        spectator_panel_drawn = 1;
 
                                 struct Team team;
                                 float x_offset;
@@ -2105,7 +2172,7 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 switch(i) {
                                         case 0: team = gamestate.team_1; x_offset = settings.window_width / 2.F - 300.F; break;
                                         case 1: team = gamestate.team_2; x_offset = settings.window_width / 2.F; break;
-                                        case 2: x_offset = settings.window_width / 2.F - 150.F; y_offset = height + 32.F; break;
+                                        case 2: x_offset = settings.window_width / 2.F - 150.F; y_offset = layout.spectator_offset; break;
                                 }
 
                                 if(i != 2) {
@@ -2119,7 +2186,6 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 }
 
                                 char score_str[8];
-                                glColor3ub(team.red, team.green, team.blue);
 
                                 if(i != 2) {
                                         switch(gamestate.gamemode_type) {
@@ -2140,29 +2206,40 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                         }
                                 }
 
-                                glColor4f(0, 0, 0, 0.5F);
+                                float panel_top = scoreboard_top - y_offset;
                                 glEnable(GL_BLEND);
                                 glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-                                glColor4f(r, g, b, 1.F);
-                                texture_draw_empty(x_offset, 450 * scalef - y_offset, 300, 24.F);
-                                glColor4f(r * 0.75F, g * 0.75F, b * 0.75F, 0.75F);
-                                texture_draw_empty(x_offset, 450 * scalef - y_offset, 300, i == 2 ? (24.F * (count_spec + 1)): height);
+                                glColor4f(r, g, b, 1.0F);
+                                texture_draw_empty(x_offset, panel_top, 300.0F, SCOREBOARD_HEADER_HEIGHT);
+                                for(int row = 0; row < section_visible[i]; row++) {
+                                        /* Absolute row parity keeps a player's shade stable while
+                                           scrolling instead of repainting the visible rows. */
+                                        float shade = ((section_start[i] + row) & 1) ? 0.45F : 0.75F;
+                                        glColor4f(r * shade, g * shade, b * shade, 0.80F);
+                                        texture_draw_empty(x_offset,
+                                                           panel_top - SCOREBOARD_HEADER_HEIGHT
+                                                                   - SCOREBOARD_ROW_HEIGHT * row,
+                                                           300.0F, SCOREBOARD_ROW_HEIGHT);
+                                }
                                 glDisable(GL_BLEND);
 
                                 glColor3ub(255, 255, 255);
+                                float header_text_y = panel_top - scoreboard_center_offset(
+                                        SCOREBOARD_HEADER_HEIGHT, SCOREBOARD_TEXT_HEIGHT);
                                 if(i != 2) {
-                                        font_render(x_offset + 300.F - font_length(16.F, score_str) - 8.F, 447 * scalef, 16.0F, score_str);
-                                        font_render(x_offset + 8.F,
-                                                        450 * scalef - 6.F, 16.0F, team.name);
+                                        char header_str[64];
+                                        snprintf(header_str, sizeof(header_str), "%s (%s)", team.name, score_str);
+                                        font_centered(x_offset + 150.0F, header_text_y,
+                                                      SCOREBOARD_TEXT_HEIGHT, header_str);
                                 } else {
-                                        font_centered(x_offset + 150.F,
-                                                        450 * scalef - y_offset - 4.F, 16.0F, "Spectator");
+                                        font_centered(x_offset + 150.0F, header_text_y,
+                                                      SCOREBOARD_TEXT_HEIGHT, "Spectator");
                                 }
                         }
 
-                        struct player_table pt[PLAYERS_MAX];
+                        struct player_table pt[PLAYER_COUNT_MAX];
                         int connected = 0;
-                        for(int k = 0; k < PLAYERS_MAX; k++) {
+                        for(int k = 0; k < PLAYER_COUNT_MAX; k++) {
                                 if(players[k].connected) {
                                         pt[connected].id = k;
                                         pt[connected++].score = players[k].score;
@@ -2170,18 +2247,27 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                         }
                         qsort(pt, connected, sizeof(struct player_table), playertable_sort);
 
-                        int cntt[3] = {0};
+                        int section_rows[3] = {0};
                         for(int k = 0; k < connected; k++) {
-                                int mul = 0;
+                                int section;
                                 float x_offset;
                                 float y_offset = 0.F;
 
                                 switch(players[pt[k].id].team) {
-                                        case TEAM_1: mul = 1; x_offset = settings.window_width / 2.F - 300.F; break;
-                                        case TEAM_2: mul = 3; x_offset = settings.window_width / 2.F; break;
+                                        case TEAM_1: section = 0; x_offset = settings.window_width / 2.F - 300.F; break;
+                                        case TEAM_2: section = 1; x_offset = settings.window_width / 2.F; break;
                                         default:
-                                        case TEAM_SPECTATOR: mul = 2; x_offset = settings.window_width / 2.F - 150.F; y_offset = height + 32.F; break;
+                                        case TEAM_SPECTATOR: section = 2; x_offset = settings.window_width / 2.F - 150.F; y_offset = layout.spectator_offset; break;
                                 }
+                                int row = section_rows[section]++;
+                                if(row < section_start[section]
+                                   || row >= section_start[section] + section_visible[section])
+                                        continue;
+                                int visible_row = row - section_start[section];
+                                float row_top = scoreboard_top - y_offset - SCOREBOARD_HEADER_HEIGHT
+                                        - SCOREBOARD_ROW_HEIGHT * visible_row;
+                                float row_text_y = row_top - scoreboard_center_offset(
+                                        SCOREBOARD_ROW_HEIGHT, SCOREBOARD_TEXT_HEIGHT);
                                 if(pt[k].id == local_player_id)
                                         glColor3f(1.0F, 1.0F, 0.0F);
                                 else if(!players[pt[k].id].alive)
@@ -2193,8 +2279,8 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 glEnable(GL_BLEND);
                                 glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
                                 glColor4f(1.F, 1.F, 1.F, 0.7F);
-                                font_render(x_offset + 8.F, 450 * scalef - 8.F - (24 * (cntt[mul - 1] + 1)) - y_offset,
-                                                        16.0F, id_str);
+                                font_render(x_offset + 8.0F, row_text_y,
+                                            SCOREBOARD_TEXT_HEIGHT, id_str);
 
                                 if(players[pt[k].id].alive) {
                                         glColor3f(1.F, 1.F, 1.F);
@@ -2202,26 +2288,76 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                         glColor4f(1.F, 1.F, 1.F, 0.5F);
                                 }
 
-                                font_render(x_offset + 48.F,
-                                                        450 * scalef - 8.F - (24 * (cntt[mul - 1] + 1)) - y_offset, 16.0F, players[pt[k].id].name);
+                                int intel_held = section != 2 && gamestate.gamemode_type == GAMEMODE_CTF
+                                        && ((TEAM_1_INTEL_HELD(gamestate.gamemode.ctf)
+                                                     && gamestate.gamemode.ctf.team_1_intel_location.held.player_id == pt[k].id)
+                                                || (TEAM_2_INTEL_HELD(gamestate.gamemode.ctf)
+                                                        && gamestate.gamemode.ctf.team_2_intel_location.held.player_id == pt[k].id));
+                                font_centered(x_offset + 150.0F, row_text_y,
+                                              SCOREBOARD_TEXT_HEIGHT, players[pt[k].id].name);
                                 glDisable(GL_BLEND);
-                                if(mul != 2) {
+                                if(section != 2) {
                                         sprintf(id_str, "%i", pt[k].score);
-                                        font_render(x_offset + 300.F - font_length(16.F, id_str) - 8.F,
-                                                                450 * scalef - 8.F - (24 * (cntt[mul - 1] + 1)), 16, id_str);
+                                        font_render(x_offset + 300.0F
+                                                            - font_length(SCOREBOARD_TEXT_HEIGHT, id_str) - 8.0F,
+                                                    row_text_y, SCOREBOARD_TEXT_HEIGHT, id_str);
                                 }
-                                if(gamestate.gamemode_type == GAMEMODE_CTF
-                                   && ((TEAM_1_INTEL_HELD(gamestate.gamemode.ctf)
-                                                && gamestate.gamemode.ctf.team_1_intel_location.held.player_id == pt[k].id)
-                                           || (TEAM_2_INTEL_HELD(gamestate.gamemode.ctf)
-                                                   && gamestate.gamemode.ctf.team_2_intel_location.held.player_id == pt[k].id))) {
+                                if(intel_held) {
                                         texture_draw(&texture_intel,
-                                                                 x_offset + 300.F - font_length(16.F, id_str) - 8.F - 24.F,
-                                                                 450 * scalef - 8.F - (24 * (cntt[mul - 1] + 1)),
-                                                                 18.0F, 18.0F);
+                                                     x_offset + 300.0F - font_length(SCOREBOARD_TEXT_HEIGHT, id_str)
+                                                             - 8.0F - SCOREBOARD_INTEL_RESERVE,
+                                                     row_top - scoreboard_center_offset(SCOREBOARD_ROW_HEIGHT, 18.0F),
+                                                     18.0F, 18.0F);
                                 }
-                                cntt[mul - 1]++;
                         }
+
+                        /* A narrow thumb makes overflow and the current scroll
+                           position discoverable without taking a column away from
+                           player names or scores. */
+                        glEnable(GL_BLEND);
+                        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                        for(int i = 0; i < 3; i++) {
+                                int limit = scoreboard_scroll_limit(section_counts[i], section_visible[i]);
+                                if(limit <= 0 || section_visible[i] <= 0)
+                                        continue;
+                                float x_offset = i == 0 ? settings.window_width / 2.0F - 300.0F
+                                        : i == 1 ? settings.window_width / 2.0F
+                                        : settings.window_width / 2.0F - 150.0F;
+                                float y_offset = i == 2 ? layout.spectator_offset : 0.0F;
+                                float track_top = scoreboard_top - y_offset - SCOREBOARD_HEADER_HEIGHT;
+                                float track_height = section_visible[i] * SCOREBOARD_ROW_HEIGHT;
+                                float thumb_height = fmaxf(6.0F,
+                                        track_height * section_visible[i] / section_counts[i]);
+                                float thumb_top = track_top
+                                        - (track_height - thumb_height) * section_start[i] / limit;
+                                glColor4f(0.0F, 0.0F, 0.0F, 0.35F);
+                                texture_draw_empty(x_offset + 296.0F, track_top, 4.0F, track_height);
+                                glColor4f(1.0F, 1.0F, 1.0F, 0.75F);
+                                texture_draw_empty(x_offset + 297.0F, thumb_top, 2.0F, thumb_height);
+                        }
+                        glDisable(GL_BLEND);
+
+                        /* One outer frame for the two-team table, boxed headers,
+                           and a single center split. Player rows stay unoutlined. */
+                        float team_left = settings.window_width / 2.0F - 300.0F;
+                        scoreboard_draw_box_outline(team_left, scoreboard_top,
+                                                    600.0F, layout.team_height);
+                        scoreboard_draw_box_outline(team_left, scoreboard_top,
+                                                    300.0F, SCOREBOARD_HEADER_HEIGHT);
+                        scoreboard_draw_box_outline(team_left + 300.0F, scoreboard_top,
+                                                    300.0F, SCOREBOARD_HEADER_HEIGHT);
+                        glColor4f(0.0F, 0.0F, 0.0F, 1.0F);
+                        scoreboard_draw_solid_rect(settings.window_width / 2.0F - SCOREBOARD_BORDER_WIDTH * 0.5F,
+                                                   scoreboard_top, SCOREBOARD_BORDER_WIDTH, layout.team_height);
+                        if(spectator_panel_drawn) {
+                                float spectator_left = settings.window_width / 2.0F - 150.0F;
+                                float spectator_top = scoreboard_top - layout.spectator_offset;
+                                scoreboard_draw_box_outline(spectator_left, spectator_top,
+                                                            300.0F, layout.spectator_height);
+                                scoreboard_draw_box_outline(spectator_left, spectator_top,
+                                                            300.0F, SCOREBOARD_HEADER_HEIGHT);
+                        }
+                        glColor4f(1.0F, 1.0F, 1.0F, 1.0F);
                 }
 
                 int is_local = (camera_mode == CAMERAMODE_FPS) || (cameracontroller_bodyview_player == local_player_id);
@@ -2462,7 +2598,7 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                         if(settings.show_live_player_count) {
                                 unsigned int team1_alive = 0;
                                 unsigned int team2_alive = 0;
-                                for(int k = 0; k < PLAYERS_MAX; k++) {
+                                for(int k = 0; k < PLAYER_COUNT_MAX; k++) {
                                         if(players[k].connected && players[k].alive) {
                                                 if(players[k].team == TEAM_1) {
                                                         team1_alive++;
@@ -3233,6 +3369,21 @@ static void hud_ingame_scroll(double yoffset) {
                         if(chat_scroll_offset > max_offset) chat_scroll_offset = max_offset;
                 }
                 return;
+        }
+        if(scoreboard_is_open()) {
+                /* Three rows per wheel notch, with fractional deltas retained for
+                   trackpads. Each section clamps independently to its own content. */
+                if(yoffset != 0.0F) {
+                        scoreboard_scroll_accum -= yoffset * 3.0F;
+                        int step = (int)scoreboard_scroll_accum;
+                        if(step != 0) {
+                                scoreboard_scroll_accum -= step;
+                                scoreboard_scroll_offset += step;
+                                scoreboard_scroll_offset = scoreboard_scroll_start(
+                                        scoreboard_scroll_offset, scoreboard_scroll_max, 0);
+                        }
+                }
+                return; /* Do not switch weapons while inspecting the scoreboard. */
         }
         if(camera_mode == CAMERAMODE_FPS && yoffset != 0.0F) {
                 int h = players[local_player_id].held_item;

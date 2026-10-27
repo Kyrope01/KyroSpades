@@ -1037,6 +1037,11 @@ retry_context:
 #endif
 #endif
 
+	/* These attributes must be set before SDL_CreateWindow; enabling
+	   GL_MULTISAMPLE later cannot add samples to an existing drawable. */
+	SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, settings.multisamples > 1 ? 1 : 0);
+	SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, settings.multisamples > 1 ? settings.multisamples : 0);
+
 	/* ALLOW_HIGHDPI is needed on iOS/Android where the native pixel density is
 	   part of the expected UX. On macOS desktop it makes the framebuffer 2x
 	   (Retina) while the UI was designed for logical points, so everything
