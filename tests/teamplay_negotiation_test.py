@@ -25,16 +25,18 @@ stub = r'''
 #define EXT_MESSAGES 193
 #define EXT_KICKREASON 194
 #define EXT_PLAYER_OUTFIT 0x35
+#define PIE_MENU_EXT_ID 0x31
 #pragma pack(push,1)
 struct PacketExtInfoEntry {uint8_t id,version;};
 struct PacketExtInfo {uint8_t length;struct PacketExtInfoEntry entries[256];};
 #pragma pack(pop)
-static bool negotiated, flashlight_negotiated, outfit_negotiated;
+static bool negotiated, flashlight_negotiated, outfit_negotiated, pie_menu_negotiated;
 static int sends, sent_id, sent_len;
 static struct PacketExtInfo reply;
 static void teamplay_set_negotiated(bool yes) {negotiated=yes;}
 static void flashlight_ext_set_negotiated(bool yes) {flashlight_negotiated=yes;}
 static void player_outfit_ext_set_negotiated(bool yes) {outfit_negotiated=yes;}
+static void pie_menu_ext_set_negotiated(bool yes) {pie_menu_negotiated=yes;}
 static void network_send(int id,void* data,int len) {
     sent_id=id;sent_len=len;sends++;memcpy(&reply,data,(size_t)len);
 }
@@ -82,7 +84,33 @@ int main(void) {
     assert(reply.entries[4].id==TEAMPLAY_EXTENSION_ID);
     assert(reply.entries[5].id==FLASHLIGHT_EXT_ID);
     assert(reply.entries[6].id==EXT_PLAYER_OUTFIT);
-    puts("Teamplay, Flashlight, and Player Outfit extension v1 handshake tests passed");
+    /* Pie Menu v1: offered, answered with the v1 this client implements. */
+    pkt.length=1;pkt.entries[0]=(struct PacketExtInfoEntry){PIE_MENU_EXT_ID,1};
+    read_PacketExtInfo(&pkt,3);
+    assert(pie_menu_negotiated && reply.length==5 && sent_len==11);
+    assert(reply.entries[4].id==PIE_MENU_EXT_ID && reply.entries[4].version==1);
+    pkt.entries[0].version=3; /* a newer offer still gets the v1 reply */
+    read_PacketExtInfo(&pkt,3);
+    assert(pie_menu_negotiated && reply.entries[4].version==1);
+    pkt.entries[0].version=0;
+    read_PacketExtInfo(&pkt,3);
+    assert(!pie_menu_negotiated && reply.length==4);
+    pkt.entries[0]=(struct PacketExtInfoEntry){0x33,1}; /* a neighbour id is not it */
+    read_PacketExtInfo(&pkt,3);
+    assert(!pie_menu_negotiated && reply.length==4);
+    pkt.length=4;
+    pkt.entries[0]=(struct PacketExtInfoEntry){TEAMPLAY_EXTENSION_ID,1};
+    pkt.entries[1]=(struct PacketExtInfoEntry){FLASHLIGHT_EXT_ID,1};
+    pkt.entries[2]=(struct PacketExtInfoEntry){EXT_PLAYER_OUTFIT,1};
+    pkt.entries[3]=(struct PacketExtInfoEntry){PIE_MENU_EXT_ID,1};
+    read_PacketExtInfo(&pkt,9);
+    assert(negotiated && flashlight_negotiated && outfit_negotiated && pie_menu_negotiated);
+    assert(reply.length==8 && sent_len==17);
+    assert(reply.entries[4].id==TEAMPLAY_EXTENSION_ID);
+    assert(reply.entries[5].id==FLASHLIGHT_EXT_ID);
+    assert(reply.entries[6].id==EXT_PLAYER_OUTFIT);
+    assert(reply.entries[7].id==PIE_MENU_EXT_ID && reply.entries[7].version==1);
+    puts("Teamplay, Flashlight, Player Outfit and Pie Menu extension v1 handshake tests passed");
 }
 '''
 with tempfile.TemporaryDirectory() as d:

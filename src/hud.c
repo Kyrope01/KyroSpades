@@ -1832,10 +1832,14 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
         /* Markers expire in real game time even after a slow/minimized frame;
            only the menu's cosmetic animation needs a bounded frame delta. */
         if(!demo_is_playing()) teamplay_tick(tp_dt);
+        /* A server's menu may be open on a context the client's own has no pies
+           for, so only the built-in menu is dropped on death or spectating. */
         if(pie_menu_opened() && (!network_connected || !network_logged_in || network_map_transfer
            || show_exit || cp_open || chat_input_mode != CHAT_NO_INPUT || screen_current != SCREEN_NONE
-           || players[local_player_id].team == TEAM_SPECTATOR || camera_mode == CAMERAMODE_SPECTATOR
-           || camera_mode == CAMERAMODE_BODYVIEW || demo_is_playing())) pie_menu_close(false);
+           || demo_is_playing()
+           || (!pie_menu_server_menu()
+               && (players[local_player_id].team == TEAM_SPECTATOR || camera_mode == CAMERAMODE_SPECTATOR
+                   || camera_mode == CAMERAMODE_BODYVIEW)))) pie_menu_close(false);
         pie_menu_update(fminf(.25f, tp_dt));
 
         /* Close the colour selector as soon as it no longer applies: tool
