@@ -41,6 +41,7 @@
 #include "network.h"
 #include "teamplay.h"
 #include "flashlight_ext.h"
+#include "pie_menu_ext.h"
 #include "particle.h"
 #include "texture.h"
 #include "chunk.h"
@@ -1460,9 +1461,14 @@ void read_PacketExtInfo(void* data, int len) {
                         if(p->entries[k].id == EXT_PLAYER_OUTFIT && p->entries[k].version >= 1)
                                 supports_player_outfit = true;
                 player_outfit_ext_set_negotiated(supports_player_outfit);
+                bool supports_pie_menu = false;
+                for(int k = 0; k < p->length; k++)
+                        if(p->entries[k].id == PIE_MENU_EXT_ID && p->entries[k].version >= 1)
+                                supports_pie_menu = true;
+                pie_menu_ext_set_negotiated(supports_pie_menu);
                 struct PacketExtInfo reply;
                 reply.length = 4 + (supports_teamplay ? 1 : 0) + (supports_flashlight ? 1 : 0)
-                        + (supports_player_outfit ? 1 : 0);
+                        + (supports_player_outfit ? 1 : 0) + (supports_pie_menu ? 1 : 0);
                 reply.entries[0] = (struct PacketExtInfoEntry) {
                         .id = EXT_PLAYER_PROPERTIES,
                         .version = 1,
@@ -1486,6 +1492,10 @@ void read_PacketExtInfo(void* data, int len) {
                         reply.entries[next_entry++] = (struct PacketExtInfoEntry){ FLASHLIGHT_EXT_ID, 1 };
                 if(supports_player_outfit)
                         reply.entries[next_entry++] = (struct PacketExtInfoEntry){ EXT_PLAYER_OUTFIT, 1 };
+                /* Pie Menu v1: the client implements the head of the still-open
+                   PR #11, so it answers with the v1 it implements. */
+                if(supports_pie_menu)
+                        reply.entries[next_entry++] = (struct PacketExtInfoEntry){ PIE_MENU_EXT_ID, 1 };
                 network_send(PACKET_EXTINFO_ID, &reply, reply.length * sizeof(struct PacketExtInfoEntry) + 1);
         }
 }
@@ -1570,6 +1580,7 @@ unsigned int network_ping() {
 void network_disconnect() {
         teamplay_reset_connection();
         flashlight_ext_reset_connection();
+        pie_menu_ext_reset_connection();
         player_outfit_ext_set_negotiated(false);
         player_outfit_ext_reset_map();
         lighting_flashlight_reset();
@@ -1648,6 +1659,7 @@ int network_connect_sub(char* ip, int port, int version) {
 int network_connect(char* ip, int port) {
         teamplay_reset_connection();
         flashlight_ext_reset_connection();
+        pie_menu_ext_reset_connection();
         player_outfit_ext_set_negotiated(false);
         player_outfit_ext_reset_map();
         log_info("Connecting to %s at port %i", ip, port);
@@ -1767,6 +1779,7 @@ void network_service(void) {
                                 network_map_transfer_end = 0;
                                 teamplay_reset_connection();
                                 flashlight_ext_reset_connection();
+                                pie_menu_ext_reset_connection();
                                 player_outfit_ext_set_negotiated(false);
                                 player_outfit_ext_reset_map();
                                 lighting_flashlight_reset();
@@ -1906,6 +1919,11 @@ static void read_PacketFlashlight(void* data, int len) {
         if(len > 0 && data) flashlight_ext_receive(data, (size_t)len);
 }
 
+/* Pie Menu v1: server to client only, so this client never sends one. */
+static void read_PacketPieMenu(void* data, int len) {
+        if(len > 0 && data) pie_menu_ext_receive((const uint8_t*)data, (size_t)len);
+}
+
 static void read_PacketTeamplay(void* data, int len) {
         if(len <= 0 || !data) return;
         teamplay_receive(data, (size_t)len, demo_is_seeking(),
@@ -1956,6 +1974,7 @@ void network_init() {
         packets[PACKET_EXTINFO_ID] = read_PacketExtInfo;
         packets[TEAMPLAY_PACKET_ID] = read_PacketTeamplay;
         packets[FLASHLIGHT_PACKET_ID] = read_PacketFlashlight;
+        packets[PIE_MENU_PACKET_ID] = read_PacketPieMenu;
         packets[PACKET_EXT_BASE + EXT_PLAYER_PROPERTIES] = read_PacketPlayerProperties;
         packets[PACKET_EXT_BASE + EXT_PLAYER_OUTFIT] = read_PacketPlayerOutfit;
 }
