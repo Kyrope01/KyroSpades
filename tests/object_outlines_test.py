@@ -11,10 +11,10 @@ header = (root / "src/config.h").read_text()
 resource_config = (root / "resources/config.ini").read_text()
 
 assert "int   object_outlines;" in header
-assert "settings.object_outlines = 0;" in main
-assert "object_outlines                = 0" in resource_config
-assert "object_outline_thickness       = 1.0" in resource_config
-assert "settings.object_outline_thickness = 1.0F;" in main
+assert "settings.object_outlines = 1;" in main
+assert "object_outlines                = 1" in resource_config
+assert "object_outline_thickness       = 0.7" in resource_config
+assert "settings.object_outline_thickness = 0.7F;" in main
 assert 'config_seti("client", "object_outlines", settings.object_outlines);' in config
 assert 'config_setf("client", "object_outline_thickness", settings.object_outline_thickness);' in config
 assert "IMPORT_SETTING(settings.object_outline_thickness, object_outline_thickness," in config

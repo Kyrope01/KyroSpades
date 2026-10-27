@@ -196,9 +196,9 @@ void read_PacketChatMessage(void* data, int len) {
                 case CHAT_SYSTEM:
                         // try to determine gamemode
 
-                        if(p->player_id == 255) {
+                        if(p->player_id == PLAYER_ID_SERVER) {
                                 /* KickReason extension: a system chat packet from
-                                   pseudo-player 255 can be sent at any connection
+                                   the server pseudo-player can be sent at any connection
                                    stage to carry a human-readable disconnect reason.
                                    Keep up to the max chat payload (252 bytes), not
                                    the old 16-byte name-sized buffer. */
@@ -538,7 +538,7 @@ void read_PacketExistingPlayer(void* data, int len) {
         size_t name_bytes = (size_t)len - header_size;
         if(name_bytes > sizeof(p->name)) name_bytes = sizeof(p->name);
         ((char*)p->name)[name_bytes - 1] = 0;
-        if(p->player_id < PLAYERS_MAX) {
+        if(p->player_id < PLAYER_COUNT_MAX) {
                 if(!players[p->player_id].connected)
                         printJoinMsg(p->team, p->name);
                 player_save_corpse(p->player_id);
@@ -574,7 +574,7 @@ void read_PacketCreatePlayer(void* data, int len) {
         size_t name_bytes = (size_t)len - header_size;
         if(name_bytes > sizeof(p->name)) name_bytes = sizeof(p->name);
         ((char*)p->name)[name_bytes - 1] = 0;
-        if(p->player_id < PLAYERS_MAX) {
+        if(p->player_id < PLAYER_COUNT_MAX) {
                 if(!players[p->player_id].connected)
                         printJoinMsg(p->team, p->name);
                 flashlight_ext_reset_player(p->player_id, false);
@@ -748,7 +748,8 @@ void read_PacketWorldUpdate(void* data, int len) {
                 if(is_075) {
                         if(len / (int)sizeof(struct PacketWorldUpdate075) > PLAYERS_MAX)
                                 return;
-                        for(int k = 0; k < (len / sizeof(struct PacketWorldUpdate075)); k++) { // supports up to 256 players
+                        /* 255 real players, plus the reserved server-action slot. */
+                        for(int k = 0; k < (len / sizeof(struct PacketWorldUpdate075)); k++) {
                                 struct PacketWorldUpdate075* p
                                         = (struct PacketWorldUpdate075*)(data + k * sizeof(struct PacketWorldUpdate075));
                                 if(players[k].connected && players[k].alive && k != local_player_id) {

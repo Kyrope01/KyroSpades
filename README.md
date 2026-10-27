@@ -58,7 +58,7 @@ corpse models. The current draft Player Outfit extension is also supported:
 server-assigned outfit <code>Undead</code> uses these models regardless of team.
 
 <dt>Object Outlines
-<dd>    Optional dark depth-edge outlines around visible map geometry and players (when a sampleable scene-depth buffer is available; unavailable on iOS copy mode). Defaults to 1 px; enter a thickness from 0.5 to 8 px under Visual Effects → Post Processing. Outlines fade with scene fog.
+<dd>    Optional dark depth-edge outlines around visible map geometry and players (when a sampleable scene-depth buffer is available; unavailable on iOS copy mode). Enabled by default at 0.7 px; enter a thickness from 0.5 to 8 px under Visual Effects → Post Processing. Outlines fade with scene fog.
 
 <dt>Dynamic Wallpapers
 <dd>    Sets a random image from the <code>png/bg/</code> folder as your

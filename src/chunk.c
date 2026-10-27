@@ -283,6 +283,15 @@ static __attribute__((always_inline)) inline bool solid_array_isair(struct libvx
         return !libvxl_copy_chunk_is_solid(blocks, x % map_size_x, z % map_size_z, map_size_y - 1 - y);
 }
 
+/* The dedicated water pass replaces seabed geometry only in actual water
+   columns. A solid block at WATER_LEVEL makes the column dry, so its floor
+   must stay in the terrain mesh instead of leaving the holes fixed in PR #12. */
+static __attribute__((always_inline)) inline bool chunk_block_hidden_by_water(
+        struct libvxl_chunk_copy* blocks, int x, int y, int z, bool separate_water_surface) {
+        return separate_water_surface && (float)y < WATER_LEVEL
+               && solid_array_isair(blocks, x, (int)WATER_LEVEL, z);
+}
+
 static __attribute__((always_inline)) inline float solid_sunblock(struct libvxl_chunk_copy* blocks, uint32_t x,
                                                                                                                                   uint32_t y, uint32_t z) {
         int dec = 18;
@@ -361,13 +370,11 @@ void* chunk_generate(void* data) {
 void chunk_generate_greedy(struct libvxl_chunk_copy* blocks, size_t start_x, size_t start_z, struct tesselator* tess,
                                                    int* max_height) {
         *max_height = 0;
-        /* Solid blocks below WATER_LEVEL must always be meshed. The animated
-           water pass only covers columns that actually contain water (air at
-           WATER_LEVEL), so a stripped floor block under dry ground, shoreline
-           edges, cave floors or placed blocks would leave no geometry at all
-           and produce see-through gaps in the terrain.
+        /* Hide static seabed blocks only where the animated surface actually
+           replaces them; dry-ground floor blocks must remain meshed.
            Match naive/AO meshes: shader-lit chunks keep raw colours, while
            fixed-function chunks bake the current sky/sunlight level. */
+        bool separate_water_surface = water_surface_enabled();
         float baked_sunlight = lighting_world_supported() ? 1.0F : lighting_sunlight_scale();
 
         int checked_voxels[2][CHUNK_SIZE * CHUNK_SIZE];
@@ -383,6 +390,9 @@ void chunk_generate_greedy(struct libvxl_chunk_copy* blocks, size_t start_x, siz
                                         if(*max_height < y) {
                                                 *max_height = y;
                                         }
+                                        if(chunk_block_hidden_by_water(blocks, x, y, z, separate_water_surface))
+                                                continue;
+
                                         uint32_t col = libvxl_copy_chunk_get_color(blocks, x, z, map_size_y - 1 - y);
                                         int r = blue(col) * baked_sunlight;
                                         int g = green(col) * baked_sunlight;
@@ -489,6 +499,9 @@ void chunk_generate_greedy(struct libvxl_chunk_copy* blocks, size_t start_x, siz
                                         if(*max_height < y) {
                                                 *max_height = y;
                                         }
+                                        if(chunk_block_hidden_by_water(blocks, x, y, z, separate_water_surface))
+                                                continue;
+
                                         unsigned int col = libvxl_copy_chunk_get_color(blocks, x, z, map_size_y - 1 - y);
                                         int r = blue(col) * baked_sunlight;
                                         int g = green(col) * baked_sunlight;
@@ -595,6 +608,9 @@ void chunk_generate_greedy(struct libvxl_chunk_copy* blocks, size_t start_x, siz
                                         if(*max_height < y) {
                                                 *max_height = y;
                                         }
+                                        if(chunk_block_hidden_by_water(blocks, x, y, z, separate_water_surface))
+                                                continue;
+
                                         unsigned int col = libvxl_copy_chunk_get_color(blocks, x, z, map_size_y - 1 - y);
                                         int r = blue(col) * baked_sunlight;
                                         int g = green(col) * baked_sunlight;
@@ -728,10 +744,8 @@ static void chunk_add_ao_face(struct tesselator* tess, int16_t coords[12],
 
 void chunk_generate_naive(struct libvxl_chunk_copy* blocks, struct tesselator* tess, int* max_height, int ao) {
         *max_height = 0;
-        /* Floor blocks at y < WATER_LEVEL are kept unconditionally: the water
-           pass only replaces geometry in real water columns, so stripping them
-           would open see-through holes under dry ground and shoreline blocks.
-           Zero is a valid user setting and means no AO darkening. The old
+        bool separate_water_surface = water_surface_enabled();
+        /* Zero is a valid user setting and means no AO darkening. The old
            fallback silently treated 0 as 1, making the slider's minimum lie. */
         float ao_mult = fmaxf(settings.ao_multiplier, 0.0F);
         float ao_curve[5];
@@ -759,6 +773,9 @@ void chunk_generate_naive(struct libvxl_chunk_copy* blocks, struct tesselator* t
                 int z = key_gety(blk->position);
 
                 *max_height = max(*max_height, y);
+                if(chunk_block_hidden_by_water(blocks, x, y, z, separate_water_surface))
+                        continue;
+
                 uint32_t col = blk->color;
                 int r = blue(col);
                 int g = green(col);
@@ -968,9 +985,7 @@ static void emit_textured_face(struct tesselator* tess, enum tesselator_cube_fac
 
 void chunk_generate_textured(struct libvxl_chunk_copy* blocks, struct tesselator* tess, int* max_height) {
         *max_height = 0;
-        /* Like the greedy and naive meshers, never strip y < WATER_LEVEL
-           blocks: only water columns get water geometry, so dry floor blocks
-           have no replacement and must remain in the terrain mesh. */
+        bool separate_water_surface = water_surface_enabled();
 
         /* Legacy terrain has baked vertex lighting; programmable terrain
            applies the sun percentage per frame in its shader instead. */
@@ -989,6 +1004,9 @@ void chunk_generate_textured(struct libvxl_chunk_copy* blocks, struct tesselator
                 int z = key_gety(blk->position);
 
                 *max_height = max(*max_height, y);
+                if(chunk_block_hidden_by_water(blocks, x, y, z, separate_water_surface))
+                        continue;
+
                 uint32_t col = blk->color;
                 int br = blue(col);
                 int bg = green(col);
