@@ -12,6 +12,9 @@ harness = r'''
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
+/* Windows wingdi.h declares a global GDI function named Pie. The menu type
+   must not occupy that identifier when ENet pulls in the platform headers. */
+int Pie(void);
 #include "pie_menu_ext.h"
 
 static int warnings, notices;
@@ -88,7 +91,7 @@ int main(void) {
     len = put_pie(pkt, len, PIE_CONTEXT_ENEMY | PIE_CONTEXT_SKY | 0xc0, "Taunt", six);
     assert(pie_menu_ext_receive(pkt, len));             /* bits 6-7 ignored */
     assert(pie_menu_ext_owner() && pie_menu_ext_count() == 2);
-    const Pie* world = pie_menu_ext_pie(0);
+    const PieMenu* world = pie_menu_ext_pie(0);
     assert(world && world->contexts == (PIE_CONTEXT_BLOCK | PIE_CONTEXT_TEAMMATE));
     assert(!strcmp(world->theme, "Build"));
     assert(!world->slice[0].flags);
@@ -218,7 +221,7 @@ int main(void) {
     n = menu_one(pkt, PIE_CONTEXT_BLOCK, "First", chat("first", "First", ""));
     assert(pie_menu_ext_receive(pkt, n));
     pie_menu_ext_freeze();
-    const Pie* held = pie_menu_ext_pie(0);
+    const PieMenu* held = pie_menu_ext_pie(0);
     n = menu_one(pkt, PIE_CONTEXT_BLOCK, "Second", chat("second", "Second", ""));
     assert(pie_menu_ext_receive(pkt, n));
     assert(!strcmp(pie_menu_ext_pie(0)->theme, "Second"));
@@ -320,7 +323,7 @@ int main(void) {
     assert(pie_menu_ext_owner() && pie_menu_ext_count() == 0);
 
     assert(pie_menu_ext_receive(p1 + 1, sizeof p1 - 1) && pie_menu_ext_count() == 1);
-    const Pie* social = pie_menu_ext_pie(0);
+    const PieMenu* social = pie_menu_ext_pie(0);
     assert(social->contexts == PIE_CONTEXT_BLOCK && !strcmp(social->theme, "Social"));
     assert(!social->slice[0].flags);
     assert(!strcmp(social->slice[0].text, "Hi!") && !strcmp(social->slice[0].label, "Hi"));
@@ -329,13 +332,13 @@ int main(void) {
         assert(!social->slice[i].text[0] && !social->slice[i].label[0]);
 
     assert(pie_menu_ext_receive(p2 + 1, sizeof p2 - 1) && pie_menu_ext_count() == 1);
-    const Pie* dead = pie_menu_ext_pie(0);
+    const PieMenu* dead = pie_menu_ext_pie(0);
     assert(dead->contexts == PIE_CONTEXT_DEAD && !strcmp(dead->theme, "Dead"));
     assert((dead->slice[0].flags & PIE_FLAG_GLOBAL) && !strcmp(dead->slice[0].text, "hello all"));
     assert(!strcmp(dead->slice[0].label, "hello all"));  /* an empty Label draws the Text */
 
     assert(pie_menu_ext_receive(p3 + 1, sizeof p3 - 1) && pie_menu_ext_count() == 1);
-    const Pie* build = pie_menu_ext_pie(0);
+    const PieMenu* build = pie_menu_ext_pie(0);
     assert(build->contexts == PIE_CONTEXT_BLOCK && !strcmp(build->theme, "Build"));
     assert(!strcmp(build->slice[0].text, "/place %r"));
     assert(!strcmp(build->slice[0].label, "Place"));

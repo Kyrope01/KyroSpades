@@ -136,8 +136,8 @@ static void store(char* dst, size_t cap, const uint8_t* s, size_t n, bool utf8, 
 /* The applied Menu, and the one a Menu replaced while a menu was open: a
    client takes the menu itself when the menu opens, so an open menu keeps
    reading the pies it was opened on. */
-static Pie* menu;
-static Pie* retiring;
+static PieMenu* menu;
+static PieMenu* retiring;
 static int menu_count;
 static bool server_owned; /* a Menu has been applied, an empty one included */
 static bool negotiated, frozen;
@@ -165,7 +165,7 @@ void pie_menu_ext_set_negotiated(bool enabled) {
 bool pie_menu_ext_negotiated(void) { return negotiated; }
 bool pie_menu_ext_owner(void) { return server_owned; }
 int pie_menu_ext_count(void) { return menu_count; }
-const Pie* pie_menu_ext_pie(int index) { return index >= 0 && index < menu_count ? menu + index : NULL; }
+const PieMenu* pie_menu_ext_pie(int index) { return index >= 0 && index < menu_count ? menu + index : NULL; }
 void pie_menu_ext_freeze(void) { frozen = true; }
 void pie_menu_ext_thaw(void) {
     frozen = false;
@@ -181,13 +181,13 @@ bool pie_menu_ext_receive(const uint8_t* data, size_t len) {
     }
     unsigned count = data[1];
     size_t pos = 2;
-    Pie* fresh = count ? calloc(count, sizeof *fresh) : NULL;
+    PieMenu* fresh = count ? calloc(count, sizeof *fresh) : NULL;
     if(count && !fresh) {
         log_warn("Pie Menu refused: no memory for %u pies", count);
         return false;
     }
     for(unsigned i = 0; i < count; i++) {
-        Pie* pie = &fresh[i];
+        PieMenu* pie = &fresh[i];
         const uint8_t* bytes;
         size_t n;
         bool utf8;

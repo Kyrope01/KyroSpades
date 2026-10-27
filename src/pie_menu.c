@@ -62,7 +62,7 @@ static struct {
        is read again while the menu is held. */
     bool server;
     int context, remembered_server[CTX_COUNT];
-    const Pie* offered[PIEM_MAX_OFFERED];
+    const PieMenu* offered[PIEM_MAX_OFFERED];
     int offered_count;
     PieAim aim;
 } pm = {.target = -1, .selection = -1};
@@ -193,7 +193,7 @@ bool pie_menu_open(void) {
         uint8_t bit = context_bits[pm.context];
         pm.offered_count = 0;
         for(int i = 0; i < pie_menu_ext_count() && pm.offered_count < PIEM_MAX_OFFERED; i++) {
-            const Pie* pie = pie_menu_ext_pie(i);
+            const PieMenu* pie = pie_menu_ext_pie(i);
             if(pie && (pie->contexts & bit)) pm.offered[pm.offered_count++] = pie;
         }
         /* A context with no pies has no menu, and no other context's pies
@@ -288,7 +288,7 @@ static void send_chat(const char* text, bool global) {
    that starts with '/' is a command for the server to read, on either channel.
    Marking a place is no action of its own -- a slice that wants one sends the
    Teamplay /pingmark command, as in "/pingmark %h Enemy". */
-static void send_slice(const Pie* pie, int index, const PieAim* aim) {
+static void send_slice(const PieMenu* pie, int index, const PieAim* aim) {
     const PieSlice* slice = &pie->slice[index];
     char text[PIE_MENU_TEXT_MAX + 1];
     /* Expanded once, immediately before sending, and never re-scanned. */
@@ -298,7 +298,7 @@ static void send_slice(const Pie* pie, int index, const PieAim* aim) {
 void pie_menu_close(bool commit) {
     if(!pm.open) return;
     int selected = pm.selection, target = pm.target, page_index = pm.page, variant = pm.variant;
-    const Pie* pie = pm.server && pm.page >= 0 && pm.page < pm.offered_count ? pm.offered[pm.page] : NULL;
+    const PieMenu* pie = pm.server && pm.page >= 0 && pm.page < pm.offered_count ? pm.offered[pm.page] : NULL;
     PieAim aim = pm.aim;
     float x = pm.px, y = pm.py, z = pm.pz;
     bool valid = pm.ping_valid, server = pm.server;
