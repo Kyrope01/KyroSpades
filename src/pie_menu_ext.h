@@ -49,11 +49,11 @@ typedef struct PieSlice {
     char tooltip[PIE_MENU_TOOLTIP_MAX + 1];
 } PieSlice;
 
-typedef struct Pie {
+typedef struct PieMenu {
     uint8_t contexts;
     char theme[PIE_MENU_THEME_MAX + 1];
     PieSlice slice[PIE_MENU_SLICES];
-} Pie;
+} PieMenu;
 
 /* What the menu was opened on, taken when it opened and never re-read. The
    world values are AoS wire coordinates: z down, 63 at water level. */
@@ -77,7 +77,7 @@ bool pie_menu_ext_receive(const uint8_t* data, size_t len);
    the menu from then on and the client's own does not come back. */
 bool pie_menu_ext_owner(void);
 int pie_menu_ext_count(void);
-const Pie* pie_menu_ext_pie(int index);
+const PieMenu* pie_menu_ext_pie(int index);
 /* Hold the applied Menu alive across a replacement: a client takes the menu
    itself when the menu opens, and none of it changes while it is held. */
 void pie_menu_ext_freeze(void);
