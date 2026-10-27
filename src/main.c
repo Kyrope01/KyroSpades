@@ -134,10 +134,12 @@ static struct {
 static void postproc_release_targets(void) {
         /* Deleting a bound target leaves GL state dangling across resize/shutdown.
            On iOS the drawable's default FBO is not necessarily zero. */
+        unsigned int msaa_fbo = postprocess_msaa_target();
         GLint bound = 0;
         glGetIntegerv(GL_FRAMEBUFFER_BINDING, &bound);
         if((postproc.fbo && bound == (GLint)postproc.fbo)
-           || (postproc.flare_fbo && bound == (GLint)postproc.flare_fbo))
+           || (postproc.flare_fbo && bound == (GLint)postproc.flare_fbo)
+           || (msaa_fbo && bound == (GLint)msaa_fbo))
                 glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)window_gl_default_framebuffer);
         glGetIntegerv(GL_RENDERBUFFER_BINDING, &bound);
         if(postproc.depth_rb && bound == (GLint)postproc.depth_rb)
@@ -170,6 +172,7 @@ static void postproc_release_targets(void) {
                 glDeleteFramebuffers(1, &postproc.flare_fbo);
         if(postproc.flare_tex)
                 glDeleteTextures(1, &postproc.flare_tex);
+        postprocess_msaa_reset();
         postproc.fbo = 0;
         postproc.depth_rb = 0;
         postproc.texture = 0;
@@ -690,6 +693,18 @@ void display() {
                         }
 #endif
 
+                        /* Window MSAA does not cover an off-screen scene. Render
+                           into a matching multisampled target when available,
+                           then resolve it before any texture-based effects. */
+                        unsigned int scene_fbo = postproc.fbo;
+                        if(postproc.fbo) {
+                                unsigned int msaa_fbo = postprocess_msaa_configure(
+                                        settings.multisamples, settings.window_width,
+                                        settings.window_height, scene_internal_format);
+                                if(msaa_fbo)
+                                        scene_fbo = msaa_fbo;
+                        }
+
                         /* The lens flare draws into its own color target. */
                         if(postproc.texture && settings.lens_flare && !postproc.flare_tex) {
                                 glGenTextures(1, &postproc.flare_tex);
@@ -1081,8 +1096,8 @@ void display() {
                                 needs_postproc = 0;
 #endif
 
-                        if(needs_postproc && postproc.fbo)
-                                glBindFramebuffer(GL_FRAMEBUFFER, postproc.fbo);
+                        if(needs_postproc && scene_fbo)
+                                glBindFramebuffer(GL_FRAMEBUFFER, scene_fbo);
                 }
 
                 glEnable(GL_DEPTH_TEST);
@@ -1406,6 +1421,8 @@ void display() {
 #endif
 
                         if(needs_postproc) {
+                                postprocess_msaa_resolve(postproc.fbo);
+
                                 mat4 saved_proj2, saved_view2, saved_model2;
                                 memcpy(saved_proj2, matrix_projection, sizeof(mat4));
                                 memcpy(saved_view2, matrix_view, sizeof(mat4));
@@ -2374,8 +2391,8 @@ int main(int argc, char** argv) {
         /* ── Post-processing ─────────────────────────────────────────────────
            Bloom is enabled for new installations; each saved client setting
            remains independently configurable. */
-        settings.object_outlines = 0; /* optional dark contours from the scene depth buffer */
-        settings.object_outline_thickness = 1.0F;
+        settings.object_outlines = 1; /* dark contours from the scene depth buffer */
+        settings.object_outline_thickness = 0.7F;
         settings.chromatic_aberration = 1; /* edge chromatic fringe, on by default */
         settings.chromatic_aberration_strength = 1.5F;
         /* Filmic tone mapping and chromatic aberration retain the established
@@ -2410,9 +2427,11 @@ int main(int argc, char** argv) {
         settings.damage_feedback = 1;
         /* Signature client defaults, enabled out of the box (each can be
            disabled individually in settings): floating damage numbers,
-           the session stats display and spectator ESP. */
+           session/technical stats, the live player counter and spectator ESP. */
         settings.damage_numbers = 1;
         settings.player_stats = 1;
+        settings.player_technical_stats = 1;
+        settings.show_live_player_count = 1;
         settings.esp_in_spec = 1;
         strcpy(settings.name, "DEV_CLIENT");
         strcpy(settings.ui_language, "en_US");
