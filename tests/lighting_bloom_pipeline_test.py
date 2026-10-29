@@ -13,8 +13,8 @@ post = (root / "src/postprocess.c").read_text()
 for path in ("src/config.c", "src/config.h", "src/main.c", "src/glowing_blocks.c", "src/glowing_blocks.h", "resources/config.ini"):
     assert "volumetric" not in (root / path).read_text().lower(), path
 
-assert "settings.bloom = 1;" in main
-assert "bloom                          = 1" in (root / "resources/config.ini").read_text()
+assert "settings.bloom = 0;" in main
+assert "bloom                          = 0" in (root / "resources/config.ini").read_text()
 assert "postprocess_bloom_render(scene_texture" in main
 assert "glBindTexture(GL_TEXTURE_2D, bloom_texture)" in main
 assert "glUniform1f(postproc.uni_pp_bloom_separate, bloom_texture ? 1.0F : 0.0F)" in main

@@ -19,5 +19,9 @@ assert "settings.exposure = 20.0F;" in main
 assert "settings.saturation = -15.0F;" in main
 assert "exposure                       = 20.0" in config
 assert "saturation                     = -15.0" in config
+assert "settings.bloom = 0;" in main
+assert "bloom                          = 0" in config
+assert "settings.ads_zoom_animation = 0;" in main
+assert "ads_zoom_animation             = 0" in config
 
 print("Default graphics settings passed")
