@@ -2370,7 +2370,7 @@ int main(int argc, char** argv) {
         settings.rifle_ads_fov = CAMERA_DEFAULT_FOV;
         settings.shotgun_ads_fov = CAMERA_DEFAULT_FOV;
         settings.smg_ads_fov = CAMERA_DEFAULT_FOV;
-        settings.ads_zoom_animation = 1;
+        settings.ads_zoom_animation = 0;
         settings.disable_dynamic_fov = 0;
         settings.textured_blocks = 0;
         settings.minimap_zoom = 3;
@@ -2389,7 +2389,7 @@ int main(int argc, char** argv) {
         settings.contrast = 0.0F;
         settings.vignette = 0.0F;
         /* ── Post-processing ─────────────────────────────────────────────────
-           Bloom is enabled for new installations; each saved client setting
+           Bloom is disabled for new installations; each saved client setting
            remains independently configurable. */
         settings.object_outlines = 1; /* dark contours from the scene depth buffer */
         settings.object_outline_thickness = 0.7F;
@@ -2400,7 +2400,7 @@ int main(int argc, char** argv) {
            compatibility fallback on older renderers. */
         settings.filmic_tonemapping = 1;
         settings.hdr_rendering = 0;
-        settings.bloom = 1;
+        settings.bloom = 0;
         settings.bloom_strength = 0.35F;
         settings.bloom_threshold = 0.8F;
         settings.dynamic_lights = 1;
