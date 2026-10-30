@@ -1,0 +1,78 @@
+name: perf-bench
+
+# To enable: cp tools/bench/ci/perf-bench.yml .github/workflows/perf-bench.yml
+# (kept out of .github/ here because the bot that maintains this branch is not
+#  allowed to push workflow files; nothing else about it is special.)
+#
+# Fast, GPU-free guard rails for the CPU-side renderer work:
+#  - the headless benchmark must build and produce numbers,
+#  - the profiler and bench harness must stay warning- and cppcheck-clean.
+# Unlike deep-audit.yml this runs on every relevant push and finishes in a
+# minute or two, so a regression is visible in the PR itself.
+
+"on":
+  push:
+    paths:
+      - "src/**"
+      - "tools/bench/**"
+      - "deps/libvxl/**"
+      - ".github/workflows/perf-bench.yml"
+  pull_request:
+    paths:
+      - "src/**"
+      - "tools/bench/**"
+      - "deps/libvxl/**"
+      - ".github/workflows/perf-bench.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: perf-bench-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bench:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Type-check the renderer translation units
+        run: make -C tools/bench check
+
+      - name: Build headless bench
+        run: make -C tools/bench
+
+      - name: Run headless bench
+        run: ./tools/bench/bench | tee bench.txt
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-bench
+          path: bench.txt
+
+  static-checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Build profiler with warnings as errors
+        run: |
+          cc -std=gnu99 -O2 -Wall -Wextra -Werror -c src/profiler.c -o /tmp/profiler.o
+
+      - name: cppcheck on profiler and bench harness
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cppcheck
+          cppcheck --enable=warning,performance,portability \
+                   --error-exitcode=1 --inline-suppr \
+                   --suppress=missingIncludeSystem \
+                   src/profiler.c tools/bench/bench.c tools/bench/stubs/bench_stubs.c

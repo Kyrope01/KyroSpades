@@ -21,6 +21,7 @@
 #define WATER_H
 
 #include <stdbool.h>
+#include <stddef.h>
 
 #define WATER_LEVEL 1.0F
 
@@ -43,6 +44,15 @@ bool water_shader_active(void);
 
 void water_reflection_pass(void);
 
+/* Diagnostic: true once a full reflection sweep has been published for the
+ * current map revision, i.e. water_render() no longer needs to probe the live
+ * map for every cell. Used by the headless benchmark. */
+bool water_snapshot_ready(void);
+
 void water_render(void);
+
+/* Diagnostic: quads emitted by the last water mesh rebuild. The headless
+ * benchmark prints it so mesh-shape changes show up in the output. */
+size_t water_last_quad_count(void);
 
 #endif

@@ -262,6 +262,10 @@ static void programmable_emit_quad(const float* vertices, const float* texcoords
 #endif
 
 void texture_draw_sector(struct texture* t, float x, float y, float w, float h, float u, float v, float us, float vs) {
+	glx_client_state_invalidate();
+	glx_stats_draw();
+	glx_stats_bind();
+	glx_batch2d_flush();
 #if defined(GLX_PROGRAMMABLE)
         if(texture_programmable_active()) {
                 glActiveTexture(GL_TEXTURE0);
@@ -365,6 +369,10 @@ void texture_draw_rotated(struct texture* t, float x, float y, float w, float h,
 }
 
 void texture_draw_empty(float x, float y, float w, float h) {
+	glx_client_state_invalidate();
+	glx_stats_draw();
+	glx_stats_bind();
+	glx_batch2d_flush();
 #if defined(GLX_PROGRAMMABLE)
         if(texture_programmable_active()) {
                 float vertices[12] = {x, y, x, y - h, x + w, y - h, x, y, x + w, y - h, x + w, y};
@@ -392,6 +400,10 @@ void texture_draw_empty(float x, float y, float w, float h) {
 }
 
 void texture_draw_empty_rotated(float x, float y, float w, float h, float angle) {
+	glx_client_state_invalidate();
+	glx_stats_draw();
+	glx_stats_bind();
+	glx_batch2d_flush();
 #if defined(GLX_PROGRAMMABLE)
         if(texture_programmable_active()) {
                 float vertices[12]

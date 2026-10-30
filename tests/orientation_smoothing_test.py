@@ -46,6 +46,16 @@ LIBC_MATH = {
     'qsort', 'rand', 'srand', 'malloc', 'free', 'calloc', 'realloc',
 }
 
+# player.c includes demo.h, which includes <enet/enet.h>. Without that package
+# the build fails for a reason unrelated to the behaviour under test, so skip
+# explicitly rather than reporting a failure.
+probe = subprocess.run(['cc', '-std=gnu99', *FLAGS, '-fsyntax-only', '-x', 'c', '-'],
+                       input='#include <enet/enet.h>\nint main(void) { return 0; }\n',
+                       text=True, capture_output=True)
+if probe.returncode != 0:
+    print('SKIP: enet headers not available (install libenet-dev or set KS_CC_FLAGS)')
+    raise SystemExit(0)
+
 with tempfile.TemporaryDirectory() as d:
     d = Path(d)
     obj = d / 'player.o'

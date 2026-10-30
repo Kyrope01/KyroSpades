@@ -51,6 +51,37 @@ void glx_get_current_color(float* dst);
 void glx_set_line_width(float width);
 void glx_set_team_color(float r, float g, float b);
 
+/* ── Per-frame GL work counters ─────────────────────────────────────────────
+ * Counting is free (a few increments per frame) and answers the questions the
+ * CPU profiler cannot: how many draw calls, vertex-attribute updates, uniform
+ * uploads and buffer bytes a frame actually issues. The overlay prints these
+ * when the profiler is enabled; nothing else consumes them.
+ *
+ * Reset once per frame by the caller (main.c), never by glx itself, so a frame
+ * boundary is always the caller's definition of "frame".
+ */
+struct glx_frame_stats {
+	unsigned int draw_calls;      /* glDrawArrays / glCallList                */
+	unsigned int attrib_calls;    /* glVertexAttribPointer + enable/disable    */
+	unsigned int uniform_calls;   /* every glUniform*                          */
+	unsigned int buffer_uploads;  /* glBufferData / glBufferSubData            */
+	unsigned long buffer_bytes;   /* bytes pushed through those uploads        */
+	unsigned int texture_binds;   /* glBindTexture with a non-zero id          */
+	unsigned int state_calls;     /* glEnable / glDisable / glBlendFunc        */
+};
+
+void glx_frame_stats_reset(void);
+void glx_frame_stats_get(struct glx_frame_stats* out);
+/* Cheap inline hooks used by the counting sites in glx.c, texture.c, font.c
+   and tesselator.c. They compile to a single increment. */
+extern struct glx_frame_stats glx_stats;
+static inline void glx_stats_draw(void) { glx_stats.draw_calls++; }
+static inline void glx_stats_attrib(void) { glx_stats.attrib_calls++; }
+static inline void glx_stats_uniform(void) { glx_stats.uniform_calls++; }
+static inline void glx_stats_upload(unsigned long bytes) { glx_stats.buffer_uploads++; glx_stats.buffer_bytes += bytes; }
+static inline void glx_stats_bind(void) { glx_stats.texture_binds++; }
+static inline void glx_stats_state(void) { glx_stats.state_calls++; }
+
 struct glx_displaylist {
 	uint32_t legacy;
 	uint32_t modern;
@@ -109,6 +140,35 @@ void glx_draw_ring_segment_2d(float cx, float cy, float inner_radius, float oute
 /* Vertical 2-color gradient quad: top edge = (r1,g1,b1), bottom edge = (r2,g2,b2). */
 void glx_draw_gradient_quad_2d(float x, float y, float w, float h, float r1, float g1, float b1, float r2, float g2,
 								float b2);
+
+
+/* ── Optional batched solid 2D quads ────────────────────────────────────────
+ * When enabled, glx_draw_quad_2d() appends to a shared vertex/colour buffer
+ * instead of issuing one draw call per quad, and glx_batch2d_flush() submits
+ * the run. Every other draw entry point in glx/texture/font flushes first, so
+ * ordering is preserved as long as nothing changes GL state between two quads
+ * without drawing (blend toggles are the one state the batcher cannot see).
+ *
+ * Off by default: it changes draw order only within a run of solid quads, and
+ * that has to be eyeballed on a running client before it becomes the default.
+ * Enable with `--perf-2d-batch`.
+ */
+void glx_batch2d_enable(bool on);
+bool glx_batch2d_enabled(void);
+void glx_batch2d_flush(void);
+
+/* ── Client-array state shadow for a run of display-list draws ──────────────
+ * The legacy chunk loop draws ~100 meshes per frame, each of which used to
+ * enable and disable four client arrays around its single draw. Inside a
+ * begin()/end() pair the arrays stay enabled and only the per-mesh buffer and
+ * pointers are rebound, which removes ~8 driver calls per visible chunk.
+ *
+ * Any other draw entry point invalidates the shadow, so a scope can only be
+ * held across calls that are known not to touch client state.
+ */
+void glx_client_state_begin(void);
+void glx_client_state_end(void);
+void glx_client_state_invalidate(void);
 
 #ifdef GLX_PROGRAMMABLE
 void glx_draw_screen_quad(void);

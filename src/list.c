@@ -36,7 +36,7 @@ void* list_find(struct list* l, const void* ref, enum list_traverse_direction di
 	switch(dir) {
 		case LIST_TRAVERSE_FORWARD:
 			for(size_t k = 0; k < l->elements; k++) {
-				void* obj = l->data + l->element_size * k;
+				void* obj = (char*)l->data + l->element_size * k;
 
 				if(cmp(obj, ref))
 					return obj;
@@ -49,7 +49,7 @@ void* list_find(struct list* l, const void* ref, enum list_traverse_direction di
 			size_t k = l->elements - 1;
 
 			do {
-				void* obj = l->data + l->element_size * k;
+				void* obj = (char*)l->data + l->element_size * k;
 
 				if(cmp(obj, ref))
 					return obj;
@@ -70,7 +70,7 @@ void list_sort(struct list* l, int (*cmp)(const void* a, const void* b)) {
 void* list_get(struct list* l, size_t i) {
 	assert(l != NULL && i < l->elements);
 
-	return l->data + i * l->element_size;
+	return (char*)l->data + i * l->element_size;
 }
 
 void* list_add(struct list* l, void* e) {
@@ -85,11 +85,11 @@ void* list_add(struct list* l, void* e) {
 	}
 
 	if(e)
-		memcpy(l->data + l->elements * l->element_size, e, l->element_size);
+		memcpy((char*)l->data + l->elements * l->element_size, e, l->element_size);
 	else
-		memset(l->data + l->elements * l->element_size, 0, l->element_size);
+		memset((char*)l->data + l->elements * l->element_size, 0, l->element_size);
 
-	return l->data + (l->elements++) * l->element_size;
+	return (char*)l->data + (l->elements++) * l->element_size;
 }
 
 void list_remove(struct list* l, size_t i) {

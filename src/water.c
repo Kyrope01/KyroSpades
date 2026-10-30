@@ -284,7 +284,15 @@ static struct {
         /* Strict-Core flat water geometry is reusable between meaningful view
            changes. The current MVP still uploads every frame; only CPU culling
            and VBO replacement are cached. CPU-animated paths rebuild. */
+        /* True once a full center-out sweep has been published at the map
+           revision below. While it holds, the main thread may read
+           render_state/render_cache instead of re-probing the live map for
+           every water cell (tens of thousands of point lookups per frame). */
+        bool snapshot_complete;
+        unsigned int snapshot_complete_revision;
+
         bool mesh_valid;
+        size_t last_quads;
         bool mesh_had_waves;
         int mesh_had_wave_mode;
         unsigned int mesh_snapshot_revision;
@@ -465,6 +473,7 @@ void water_invalidate(void) {
         wr.rows_remaining = 0;
         wr.refresh_initialized = false;
         wr.snapshot_invalidated = true;
+        wr.snapshot_complete = false;
         wr.mesh_valid = false;
         pthread_mutex_unlock(&water_lock);
 }
@@ -476,6 +485,10 @@ bool water_surface_enabled(void) {
         if(!settings.water_shader && !settings.water_waves)
                 return false;
         return map_size_x > 0 && map_size_z > 0;
+}
+
+bool water_snapshot_ready(void) {
+        return wr.snapshot_complete;
 }
 
 bool water_shader_active(void) {
@@ -556,6 +569,13 @@ static bool reflect_raycast(float ox, float oz, float dx, float dy, float dz, fl
 
 static int water_wrap(int v, int m) {
         return ((v % m) + m) % m;
+}
+
+/* The maps are at least as large as the visible span, so the modulo is almost
+   never needed. Keeping the common case branch-only avoids two integer
+   divisions per cell, of which there are thousands per frame. */
+static int water_wrap_fast(int v, int m) {
+        return (v >= 0 && v < m) ? v : water_wrap(v, m);
 }
 
 /* Return the actual block color below the water at (wx, wz) so each
@@ -912,23 +932,40 @@ static uint32_t water_sunlit_color(uint32_t color) {
 }
 
 static bool water_sample_surface_cell(int wx, int wz, int size_x, int size_z,
-                                      const float fog[3], uint32_t* out_color) {
+                                      const float fog[3], bool trust_snapshot,
+                                      uint32_t* out_color) {
+        bool have_snapshot = wr.render_cache && wr.render_state
+                && wr.render_size_x == size_x && wr.render_size_z == size_z;
+        size_t idx = (size_t)wz * (size_t)size_x + (size_t)wx;
+        bool known = have_snapshot && wr.render_state[idx] != WATER_CELL_UNKNOWN;
+
         /* Ground truth for an exposed water cell is air at WATER_LEVEL.
            Probing geometry directly under map_read_lock() ensures frame-1 map
            loads and live block edits never leave missing water holes while the
-           asynchronous reflection worker is still catching up. */
-        if(!map_isair_nolock(wx, (int)WATER_LEVEL, wz))
-                return false;
+           asynchronous reflection worker is still catching up.
 
-        if(wr.render_cache && wr.render_state
-           && wr.render_size_x == size_x && wr.render_size_z == size_z) {
-                size_t idx = (size_t)wz * (size_t)size_x + (size_t)wx;
-                if(wr.render_state[idx] == WATER_CELL_SURFACE) {
-                        uint32_t cached = wr.render_cache[idx];
-                        if(cached >> 24) {
-                                *out_color = cached;
-                                return true;
-                        }
+           Once a full sweep has landed at the current map revision the snapshot
+           *is* that ground truth (it is produced by the same probe), so the
+           per-cell map lookup is redundant: the worst case is one extra
+           division per cell instead of a locked voxel query. Any edit bumps the
+           map revision and turns this back off until the next sweep. */
+        if(known && trust_snapshot) {
+                if(!(wr.render_state[idx] == WATER_CELL_SURFACE))
+                        return false;
+                uint32_t cached = wr.render_cache[idx];
+                if(cached >> 24) {
+                        *out_color = cached;
+                        return true;
+                }
+        } else if(!map_isair_nolock(wx, (int)WATER_LEVEL, wz)) {
+                return false;
+        }
+
+        if(have_snapshot && wr.render_state[idx] == WATER_CELL_SURFACE) {
+                uint32_t cached = wr.render_cache[idx];
+                if(cached >> 24) {
+                        *out_color = cached;
+                        return true;
                 }
         }
 
@@ -948,11 +985,31 @@ static bool water_sample_surface_cell(int wx, int wz, int size_x, int size_z,
 
 static void water_render_tile(int tx, int tz, int x0, int x1, int z0, int z1,
                               int size_x, int size_z, float rd, float y,
-                              float render_time, const float fog[3], size_t* n) {
+                              float render_time, const float fog[3], bool trust_snapshot,
+                              size_t* n) {
+        /* Hoisted out of the per-cell loop: these were re-read for every cell
+           in the tile, i.e. ~70k times per frame. */
+        const bool tile_waves = settings.water_waves && settings.water_wave_mode == 1;
+        /* Tile mode draws one solid block per wave tile, so a cell only does any
+           work when it sits on a tile origin — every other cell used to run the
+           whole per-cell body just to `continue` on the modulo test. Walk the
+           loop in tile-sized strides instead (same origin set, same output) and
+           hoist the wave clock, amplitude and tile size out of the loops. */
+        int wave_tile = 1;
+        if(tile_waves) {
+                wave_tile = settings.water_wave_tile_size;
+                wave_tile = max(1, min(wave_tile, 4));
+        }
+        const int cell_step = tile_waves ? wave_tile : 1;
+        const float wave_t = render_time * settings.water_wave_speed;
+        const float wave_amp = settings.water_wave_intensity;
+
         int za = max(tz, z0);
         int zb = min(tz + WATER_TILE, z1);
+        if(tile_waves && za % wave_tile)
+                za += wave_tile - (za % wave_tile);
 
-        for(int z = za; z < zb; z++) {
+        for(int z = za; z < zb; z += cell_step) {
                 float dz = z + 0.5F - camera_z;
                 float w2 = rd * rd - dz * dz;
                 if(w2 < 0.0F)
@@ -961,15 +1018,17 @@ static void water_render_tile(int tx, int tz, int x0, int x1, int z0, int z1,
 
                 int xa = max(max(tx, x0), (int)camera_x - hw);
                 int xb = min(min(tx + WATER_TILE, x1), (int)camera_x + hw + 1);
+                if(tile_waves && xa % wave_tile)
+                        xa += wave_tile - (xa % wave_tile);
 
-                int wrapped_z = water_wrap(z, size_z);
+                int wrapped_z = water_wrap_fast(z, size_z);
 
-                for(int x = xa; x < xb; x++) {
-                        int wrapped_x = water_wrap(x, size_x);
-                        bool tile_waves = settings.water_waves && settings.water_wave_mode == 1;
+                for(int x = xa; x < xb; x += cell_step) {
+                        int wrapped_x = water_wrap_fast(x, size_x);
                         uint32_t c = 0;
                         if(!tile_waves) {
-                                if(!water_sample_surface_cell(wrapped_x, wrapped_z, size_x, size_z, fog, &c))
+                                if(!water_sample_surface_cell(wrapped_x, wrapped_z, size_x, size_z, fog,
+                                                              trust_snapshot, &c))
                                         continue;
 #ifdef OPENGL_CORE
                                 if(!water_program)
@@ -980,8 +1039,8 @@ static void water_render_tile(int tx, int tz, int x0, int x1, int z0, int z1,
                         }
 
                         if(settings.water_waves) {
-                                float t = render_time * settings.water_wave_speed;
-                                float amp = settings.water_wave_intensity;
+                                const float t = wave_t;
+                                const float amp = wave_amp;
 
                                 if(settings.water_wave_mode == 1) {
                                         /* Tile mode: the tile acts as a single solid unit.
@@ -990,22 +1049,19 @@ static void water_render_tile(int tx, int tz, int x0, int x1, int z0, int z1,
                                            - All 5 faces (top + 4 sides) are drawn as a solid block
                                            - Sides only drawn at tile boundaries (edges of the tile)
                                              so interior blocks don't waste quads */
-                                        int ts = settings.water_wave_tile_size;
-                                        ts = max(1, min(ts, 4));
-
-                                        /* Only render the block at the top-left corner of its tile.
-                                           That single render draws the ENTIRE tile as one big block. */
-                                        if(x % ts != 0 || z % ts != 0)
-                                                continue;
+                                        const int ts = wave_tile;
+                                        /* The loop stride already visits only tile origins:
+                                           each of those draws its whole tile as one block. */
 
                                         /* Compute tile-averaged color from all blocks in this tile */
                                         int ar = 0, ag = 0, ab = 0, acount = 0;
                                         for(int dz2 = 0; dz2 < ts && (z + dz2) < zb; dz2++) {
-                                                int sample_z = water_wrap(z + dz2, size_z);
+                                                int sample_z = water_wrap_fast(z + dz2, size_z);
                                                 for(int dx2 = 0; dx2 < ts && (x + dx2) < xb; dx2++) {
-                                                        int sample_x = water_wrap(x + dx2, size_x);
+                                                        int sample_x = water_wrap_fast(x + dx2, size_x);
                                                         uint32_t bc = 0;
-                                                        if(!water_sample_surface_cell(sample_x, sample_z, size_x, size_z, fog, &bc))
+                                                        if(!water_sample_surface_cell(sample_x, sample_z, size_x, size_z, fog,
+                                                                                      trust_snapshot, &bc))
                                                                 continue;
                                                         ar += red(bc);
                                                         ag += green(bc);
@@ -1170,6 +1226,13 @@ static void water_snapshot_refresh_locked(void) {
         }
         wr.render_size_x = wr.size_x;
         wr.render_size_z = wr.size_z;
+        /* A complete sweep means every row in the span was probed at the
+           revision recorded in seen_map_revision. Publishing that here keeps
+           the flag main-thread-only; the worker only writes rows_remaining. */
+        if(wr.refresh_initialized && wr.rows_remaining <= 0 && !wr.snapshot_invalidated) {
+                wr.snapshot_complete = true;
+                wr.snapshot_complete_revision = wr.seen_map_revision;
+        }
         if(changed)
                 wr.snapshot_revision++;
 }
@@ -1184,6 +1247,10 @@ static bool water_mesh_view_changed(void) {
         return false;
 }
 #endif
+
+size_t water_last_quad_count(void) {
+        return wr.last_quads;
+}
 
 void water_render(void) {
         if(!water_shader_active())
@@ -1230,6 +1297,11 @@ void water_render(void) {
         (void)map_revision;
 #endif
 
+        /* The snapshot is authoritative only while it is complete and the map
+           has not changed since the sweep that produced it. */
+        bool trust_snapshot = wr.snapshot_complete
+                && wr.snapshot_complete_revision == map_revision;
+
         if(rebuild_mesh) {
                 int span = water_span();
                 int half = span / 2;
@@ -1246,9 +1318,11 @@ void water_render(void) {
                         for(int tz = z0 & ~(WATER_TILE - 1); tz < z1; tz += WATER_TILE)
                                 for(int tx = x0 & ~(WATER_TILE - 1); tx < x1; tx += WATER_TILE)
                                         if(camera_CubeInFrustum(tx + WATER_TILE / 2, 0.0F, tz + WATER_TILE / 2, WATER_TILE / 2, 2.0F))
-                                                water_render_tile(tx, tz, x0, x1, z0, z1, size_x, size_z, rd, y, render_time, fog, &n);
+                                                water_render_tile(tx, tz, x0, x1, z0, z1, size_x, size_z, rd, y,
+                                                                  render_time, fog, trust_snapshot, &n);
                 }
                 map_read_unlock();
+                wr.last_quads = n;
 
                 if(!n) {
                         wr.mesh_valid = false;

@@ -103,7 +103,9 @@ assert "scoreboard_layout_calculate(" in HUD
 assert "scoreboard_scroll_start(" in HUD
 assert "scoreboard_scroll_limit(" in HUD
 assert SCOREBOARD.count("for(int k = 0; k < PLAYER_COUNT_MAX; k++)") == 2
-assert "struct player_table pt[PLAYER_COUNT_MAX];" in SCOREBOARD
+# The table is zero-initialised so a partial fill cannot expose stack data;
+# assert on the declaration itself, not on the exact initialiser spelling.
+assert "struct player_table pt[PLAYER_COUNT_MAX]" in SCOREBOARD
 assert "for(int k = 0; k < PLAYERS_MAX; k++)" not in SCOREBOARD
 assert "row < section_start[section]" in HUD
 assert "row >= section_start[section] + section_visible[section]" in HUD
