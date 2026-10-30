@@ -311,6 +311,11 @@ void glx_displaylist_draw(struct glx_displaylist* x, int type) {
         poly_factor_at_draw = poly_factor;
     }
 }
+
+/* The chunk-draw client-state scope is inert in these harnesses: nothing draws. */
+void glx_client_state_begin(void) {}
+void glx_client_state_end(void) {}
+void glx_client_state_invalidate(void) {}
 void glx_set_explicit_attributes(bool e) { (void)e; }
 bool glx_uses_explicit_attributes(void) { return false; }
 #ifdef GLX_PROGRAMMABLE

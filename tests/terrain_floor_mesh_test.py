@@ -15,6 +15,8 @@ legacy and OPENGL_CORE modes, and verifies:
    its asynchronous reflection cache is populated and from low camera angles.
 5. Damage overlays follow the same rule: submerged cubes are omitted, while dry
    floor cubes and solid blocks at WATER_LEVEL keep their damage tint.
+6. The culling height from each mesher contains every vertex, including the top
+   faces of a one-block floor and a block at the top of the map.
 """
 import subprocess
 import tempfile
@@ -287,6 +289,11 @@ void glx_displaylist_draw(struct glx_displaylist* x, int type) {
         cull_at_water_draw = cap_cull;
     }
 }
+
+/* The chunk-draw client-state scope is inert in these harnesses: nothing draws. */
+void glx_client_state_begin(void) {}
+void glx_client_state_end(void) {}
+void glx_client_state_invalidate(void) {}
 void glx_set_explicit_attributes(bool e) { (void)e; }
 bool glx_uses_explicit_attributes(void) { return false; }
 #ifdef GLX_PROGRAMMABLE
@@ -396,7 +403,8 @@ static void copy_ensure_floor_block(struct libvxl_chunk_copy* copy, int x, int z
     copy->colors[bottom + (lx + lz * LIBVXL_CHUNK_SIZE) * copy->depth] = color & 0xFFFFFF;
 }
 
-static uint32_t run_mesher(int mode, struct libvxl_chunk_copy* copy, int16_t* min_y_out) {
+static uint32_t run_mesher(int mode, struct libvxl_chunk_copy* copy,
+                           int16_t* min_y_out, int16_t* max_y_out) {
     struct tesselator tess;
     int max_h = 0;
     tesselator_create(&tess, VERTEX_INT, 0, mode >= 3 ? 1 : 0);
@@ -411,7 +419,7 @@ static uint32_t run_mesher(int mode, struct libvxl_chunk_copy* copy, int16_t* mi
         chunk_generate_textured(copy, &tess, &max_h);
     texture_blocks_custom_loaded = 0;
 
-    int16_t min_y = 32767;
+    int16_t min_y = 32767, max_y = -32768;
 #ifdef TESSELATE_TRIANGLES
     size_t vcount = (size_t)tess.quad_count * 6;
 #else
@@ -422,9 +430,17 @@ static uint32_t run_mesher(int mode, struct libvxl_chunk_copy* copy, int16_t* mi
         int16_t vy = verts[i * 3 + 1];
         if (vy < min_y)
             min_y = vy;
+        if (vy > max_y)
+            max_y = vy;
     }
+    /* Frustum culling must bound the actual top face, not just the y of the
+       highest block. Otherwise visible floors disappear near the screen edge. */
+    if (vcount)
+        assert(max_h >= max_y);
     if (min_y_out)
         *min_y_out = min_y;
+    if (max_y_out)
+        *max_y_out = max_y;
     uint32_t q = tess.quad_count;
     tesselator_free(&tess);
     return q;
@@ -459,7 +475,7 @@ int main(void) {
         camera_y = (cam_case == 0) ? 12.0F : 0.4F;
         assert(water_surface_enabled());
         for (int mode = 0; mode <= 4; mode++)
-            assert(run_mesher(mode, &copy, NULL) == 0);
+            assert(run_mesher(mode, &copy, NULL, NULL) == 0);
     }
 
     /* 2. Classic flat water has no separate replacement surface, so the exact
@@ -468,9 +484,24 @@ int main(void) {
     settings.water_shader = 0;
     settings.water_waves = 0;
     assert(!water_surface_enabled());
-    for (int mode = 0; mode <= 4; mode++)
-        assert(run_mesher(mode, &copy, NULL) > 0);
+    for (int mode = 0; mode <= 4; mode++) {
+        int16_t max_y;
+        assert(run_mesher(mode, &copy, NULL, &max_y) > 0);
+        assert(max_y == 1); /* the flat floor's top face */
+    }
     libvxl_copy_chunk_destroy(&copy);
+
+    /* The top-of-map block has a face at y = 64. Check that every mesher's
+       culling bounds include it as well as the low floor above. */
+    map_set(7, 63, 7, rgb(120, 160, 80));
+    map_copy_blocks(&copy, 0, 0);
+    for (int mode = 0; mode <= 4; mode++) {
+        int16_t max_y;
+        assert(run_mesher(mode, &copy, NULL, &max_y) > 0);
+        assert(max_y == 64);
+    }
+    libvxl_copy_chunk_destroy(&copy);
+    map_set(7, 63, 7, 0xFFFFFFFFU);
 
     /* 3. Do not reintroduce PR #12's dry-ground holes: a solid block at y = 1
           makes this column dry, so its y = 0 floor must stay in the mesh.
@@ -484,7 +515,7 @@ int main(void) {
     copy_ensure_floor_block(&copy, 4, 4);
     for (int mode = 0; mode <= 4; mode++) {
         int16_t min_y = 32767;
-        uint32_t quads = run_mesher(mode, &copy, &min_y);
+        uint32_t quads = run_mesher(mode, &copy, &min_y, NULL);
         assert(quads > 0); /* the y = 1 block and exposed dry-floor side remain */
         assert(min_y == 0);
     }

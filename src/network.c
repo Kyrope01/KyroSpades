@@ -751,7 +751,7 @@ void read_PacketWorldUpdate(void* data, int len) {
                         /* 255 real players, plus the reserved server-action slot. */
                         for(int k = 0; k < (len / sizeof(struct PacketWorldUpdate075)); k++) {
                                 struct PacketWorldUpdate075* p
-                                        = (struct PacketWorldUpdate075*)(data + k * sizeof(struct PacketWorldUpdate075));
+                                        = (struct PacketWorldUpdate075*)((const unsigned char*)data + k * sizeof(struct PacketWorldUpdate075));
                                 if(players[k].connected && players[k].alive && k != local_player_id) {
                                         if(distance3D(players[k].pos.x, players[k].pos.y, players[k].pos.z, p->x, 63.0F - p->z, p->y)
                                            > 0.1F * 0.1F) {
@@ -764,7 +764,7 @@ void read_PacketWorldUpdate(void* data, int len) {
                         if(is_076) {
                                 for(int k = 0; k < (len / sizeof(struct PacketWorldUpdate076)); k++) {
                                         struct PacketWorldUpdate076* p
-                                                = (struct PacketWorldUpdate076*)(data + k * sizeof(struct PacketWorldUpdate076));
+                                                = (struct PacketWorldUpdate076*)((const unsigned char*)data + k * sizeof(struct PacketWorldUpdate076));
                                         if(players[p->player_id].connected && players[p->player_id].alive
                                            && p->player_id != local_player_id) {
                                                 if(distance3D(players[p->player_id].pos.x, players[p->player_id].pos.y, players[p->player_id].pos.z, p->x, 63.0F - p->z, p->y)
@@ -972,7 +972,8 @@ void read_PacketKillAction(void* data, int len) {
 
 void read_PacketShortPlayerData(void* data, int len) {
         // should never be received
-        struct PacketShortPlayerData* p = (struct PacketShortPlayerData*)data;
+        (void)data;
+        (void)len;
         log_warn("Unexpected ShortPlayerDataPacket");
 }
 
@@ -1023,7 +1024,6 @@ void read_PacketRestock(void* data, int len) {
                 log_warn("Short PacketRestock: %d < %zu", len, sizeof(struct PacketRestock));
                 return;
         }
-        struct PacketRestock* p = (struct PacketRestock*)data;
         local_player_health = 100;
         damagefx_reset();
         local_player_blocks = 50;
@@ -1714,7 +1714,7 @@ int network_identifier_split(char* addr, char* ip_out, int* port_out) {
                 ip_out[ip_len] = 0;
         } else {
                 unsigned int ip = strtoul(ip_start, NULL, 10);
-                snprintf(ip_out, 32, "%i.%i.%i.%i", ip & 255, (ip >> 8) & 255, (ip >> 16) & 255, (ip >> 24) & 255);
+                snprintf(ip_out, 32, "%u.%u.%u.%u", ip & 255, (ip >> 8) & 255, (ip >> 16) & 255, (ip >> 24) & 255);
         }
 
         return 1;

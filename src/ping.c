@@ -134,15 +134,14 @@ void* ping_update(void* data) {
 				struct ping_entry* entry = ht_lookup(&pings, &ID);
 
 				if(entry) {
-					if(recvLength > 0) { // received something!
-						if(recvLength >= 2 && !memcmp(buf.data, "HI", 2)) {
-							if(ping_result) ping_result(NULL, window_time() - entry->time_start, entry->aos);
-							ht_erase(&pings, &ID);
-						} else {
-							entry->trycount++;
-						}
-					} else { // connection was closed
+					/* The old nested `if(recvLength > 0)` was always true
+					   here, so its "connection was closed" else branch was
+					   unreachable. A reply that is not "HI" is a retry. */
+					if(recvLength >= 2 && !memcmp(buf.data, "HI", 2)) {
+						if(ping_result) ping_result(NULL, window_time() - entry->time_start, entry->aos);
 						ht_erase(&pings, &ID);
+					} else {
+						entry->trycount++;
 					}
 				}
 			} else { // would block

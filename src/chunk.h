@@ -35,7 +35,7 @@
 
 extern struct chunk {
 	struct glx_displaylist display_list;
-	int max_height;
+	int max_height; /* upper vertex bound, including the highest block's top face */
 	bool updated;
 	bool created;
 	int gen;

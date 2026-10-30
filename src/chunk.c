@@ -164,8 +164,20 @@ static void chunk_render(const struct chunk_render_call* call) {
 static struct chunk_render_call* chunk_draw_buf = NULL;
 static int chunk_draw_buf_cap = 0;
 
+/* Keep the camera's chunk and two neighboring columns in every direction.
+   This covers ground underfoot and behind a sprinting/turning player,
+   including diagonals, without disabling culling for the rest of the map. */
+#define CHUNK_NEAR_DRAW_RADIUS 2
+
 static int chunk_collect_draw_calls(float render_distance, bool use_camera_frustum) {
         int overshoot = ((int)render_distance + CHUNK_SIZE - 1) / CHUNK_SIZE + 1;
+        /* Cover the whole safety area at wrapped map edges, even with a very
+           short spectator distance (including a camera exactly on the seam). */
+        if(use_camera_frustum)
+                overshoot = max(overshoot, CHUNK_NEAR_DRAW_RADIUS + 1);
+
+        int camera_chunk_x = (int)floorf(camera_x / CHUNK_SIZE);
+        int camera_chunk_z = (int)floorf(camera_z / CHUNK_SIZE);
 
         /* The candidate count grows beyond the old fixed map-sized array at
            large spectator/shadow distances, so size it from the actual scan. */
@@ -190,13 +202,20 @@ static int chunk_collect_draw_calls(float render_distance, bool use_camera_frust
                         float distance_sq = distance2D((x + 0.5F) * CHUNK_SIZE,
                                                        (y + 0.5F) * CHUNK_SIZE,
                                                        camera_x, camera_z);
-                        if(distance_sq > rd_sq || index >= cap)
+                        /* Use unwrapped chunk coordinates here: each visible map
+                           copy has its own position relative to the camera. */
+                        bool near_camera = use_camera_frustum
+                                && x >= camera_chunk_x - CHUNK_NEAR_DRAW_RADIUS
+                                && x <= camera_chunk_x + CHUNK_NEAR_DRAW_RADIUS
+                                && y >= camera_chunk_z - CHUNK_NEAR_DRAW_RADIUS
+                                && y <= camera_chunk_z + CHUNK_NEAR_DRAW_RADIUS;
+                        if(index >= cap || (!near_camera && distance_sq > rd_sq))
                                 continue;
 
                         uint32_t tmp_x = ((uint32_t)x) % CHUNKS_PER_DIM;
                         uint32_t tmp_y = ((uint32_t)y) % CHUNKS_PER_DIM;
                         struct chunk* c = chunks + tmp_x + tmp_y * CHUNKS_PER_DIM;
-                        if(use_camera_frustum
+                        if(use_camera_frustum && !near_camera
                            && !camera_CubeInFrustum((x + 0.5F) * CHUNK_SIZE, 0.0F,
                                                    (y + 0.5F) * CHUNK_SIZE,
                                                    CHUNK_SIZE / 2, c->max_height))
@@ -230,6 +249,9 @@ void chunk_draw_visible(void) {
 #if !defined(OPENGL_ES) && !defined(OPENGL_CORE)
         bool legacy_texturing = false;
 #endif
+        /* Hold the client arrays enabled for the whole run: this loop used to
+           enable and disable up to four of them around every single chunk. */
+        glx_client_state_begin();
         for(int k = 0; k < count; k++) {
                 struct chunk_render_call* call = chunk_draw_buf + k;
                 struct chunk* c = call->chunk;
@@ -252,6 +274,7 @@ void chunk_draw_visible(void) {
                 chunk_render(call);
         }
         chunk_transform_finish(&transform);
+        glx_client_state_end();
 #if !defined(OPENGL_ES) && !defined(OPENGL_CORE)
         if(legacy_texturing)
                 glDisable(GL_TEXTURE_2D);
@@ -265,12 +288,14 @@ void chunk_draw_shadow(float render_distance) {
         /* The depth-only shader does not sample the terrain atlas. Upload its
            model transform only when a wrapped map copy changes it. */
         struct chunk_transform_state transform = {0};
+        glx_client_state_begin();
         for(int k = 0; k < count; k++) {
                 struct chunk_render_call* call = chunk_draw_buf + k;
                 chunk_transform_apply(&transform, call);
                 chunk_render(call);
         }
         chunk_transform_finish(&transform);
+        glx_client_state_end();
 }
 
 static __attribute__((always_inline)) inline bool solid_array_isair(struct libvxl_chunk_copy* blocks, uint32_t x,
@@ -950,6 +975,10 @@ void chunk_generate_naive(struct libvxl_chunk_copy* blocks, struct tesselator* t
 
         if(baked_shadows)
                 map_read_unlock();
+
+        /* max_height bounds vertex positions, not block indices: the highest
+           block's top face is at y + 1. Match the greedy/textured meshers. */
+        (*max_height)++;
 }
 
 static void emit_textured_face(struct tesselator* tess, enum tesselator_cube_face face,
@@ -1129,6 +1158,9 @@ void chunk_update_all() {
         float budget = (chunk_bulk_pending > 0) ? 0.050F : 0.006F;
 
         struct chunk_result_packet result;
+        /* Bind the minimap atlas once for the whole batch instead of doing a
+           bind/unbind pair per uploaded chunk (two driver round-trips each). */
+        bool minimap_bound = false;
 
         while(channel_size(&chunk_result_queue) > 0) {
                 channel_await(&chunk_result_queue, &result);
@@ -1149,10 +1181,12 @@ void chunk_update_all() {
                            after an updated chunk reaches the GPU. */
                         shadow_invalidate();
 
-                        glBindTexture(GL_TEXTURE_2D, texture_minimap.texture_id);
+                        if(!minimap_bound) {
+                                glBindTexture(GL_TEXTURE_2D, texture_minimap.texture_id);
+                                minimap_bound = true;
+                        }
                         glTexSubImage2D(GL_TEXTURE_2D, 0, result.chunk->x * CHUNK_SIZE, result.chunk->y * CHUNK_SIZE,
                                                         CHUNK_SIZE, CHUNK_SIZE, GL_RGBA, GL_UNSIGNED_BYTE, result.minimap_data);
-                        glBindTexture(GL_TEXTURE_2D, 0);
                 }
 
                 tesselator_free(&result.tesselator);
@@ -1161,6 +1195,9 @@ void chunk_update_all() {
                 if(window_time() - start > budget)
                         break;
         }
+
+        if(minimap_bound)
+                glBindTexture(GL_TEXTURE_2D, 0);
 }
 
 void chunk_rebuild_all() {

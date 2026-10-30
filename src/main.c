@@ -27,6 +27,7 @@
 #include <unistd.h>   /* chdir */
 #include <SDL.h>      /* SDL_AndroidGet*StoragePath */
 #endif
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -71,6 +72,7 @@
 #include "bloodmarks.h"
 #include "damagenumbers.h"
 #include "damagefx.h"
+#include "profiler.h"
 #include "main.h"
 
 int fps = 0;
@@ -496,6 +498,80 @@ void drawScene() {
    out the captured value — that was v12's silent regression: a single 0
    from glGetIntegerv at the start of the render block would clobber the
    id and route every subsequent frame off-screen. */
+
+/* ── Performance overlay (F9 / --prof) ──────────────────────────────────────
+   Drawn last, in screen space, on top of everything else. This is diagnostic
+   scaffolding, so it lives here rather than in the gameplay HUD modules. */
+static void profiler_draw_overlay(void) {
+        if(!prof_enabled())
+                return;
+
+        const float line_h = 13.0F;
+        const float pad = 6.0F;
+        int lines = 2; /* frame line + GL work line */
+        for(int s = 1; s < prof_stage_count(); s++) {
+                if(prof_stage_ms_avg((enum prof_stage)s) >= 0.005)
+                        lines++;
+        }
+
+        float w = 210.0F;
+        float h = pad * 2.0F + line_h * (float)lines;
+        float x = 8.0F;
+        float y = (float)settings.window_height - 8.0F;
+
+        float saved_color[4];
+        glx_get_current_color(saved_color);
+
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glColor4f(0.0F, 0.0F, 0.0F, 0.45F);
+        glx_draw_quad_2d(x, y, w, h);
+
+        font_select(FONT_FIXEDSYS);
+        float ty = y - pad - line_h + 3.0F;
+        char ms[16];
+        char buf[96];
+
+        double frame_ms = prof_frame_ms_avg();
+        prof_format_ms(ms, sizeof(ms), frame_ms);
+        snprintf(buf, sizeof(buf), "cpu %sms  %i fps", ms, (int)fps);
+        glColor4f(1.0F, 1.0F, 1.0F, 1.0F);
+        font_render(x + pad, ty, line_h, buf);
+
+        for(int s = 1; s < prof_stage_count(); s++) {
+                enum prof_stage stage = (enum prof_stage)s;
+                double stage_ms = prof_stage_ms_avg(stage);
+                if(stage_ms < 0.005)
+                        continue;
+
+                ty -= line_h;
+                prof_format_ms(ms, sizeof(ms), stage_ms);
+                double pct = prof_stage_pct(stage);
+                snprintf(buf, sizeof(buf), "%-9s %5sms %4.0f%%", prof_stage_name(stage), ms, pct);
+                if(pct >= 40.0)
+                        glColor4f(1.0F, 0.45F, 0.35F, 1.0F);
+                else if(pct >= 20.0)
+                        glColor4f(1.0F, 0.85F, 0.35F, 1.0F);
+                else
+                        glColor4f(0.85F, 0.90F, 0.95F, 1.0F);
+                font_render(x + pad, ty, line_h, buf);
+        }
+
+        /* Driver work per frame: what the CPU stages above cannot show.
+           Draw calls and buffer bytes are the numbers that decide whether
+           batching is worth it on a given machine. */
+        struct glx_frame_stats gs;
+        glx_frame_stats_get(&gs);
+        ty -= line_h;
+        snprintf(buf, sizeof(buf), "gl %u dr %u bind %u up %lukB",
+                 gs.draw_calls, gs.texture_binds, gs.buffer_uploads,
+                 (unsigned long)(gs.buffer_bytes / 1024UL));
+        glColor4f(0.75F, 0.80F, 0.90F, 1.0F);
+        font_render(x + pad, ty, line_h, buf);
+
+        glColor4f(saved_color[0], saved_color[1], saved_color[2], saved_color[3]);
+        glDisable(GL_BLEND);
+}
 
 void display() {
         /* Apply pending window changes (fullscreen, vsync, size) every frame.
@@ -1103,7 +1179,9 @@ void display() {
                 glEnable(GL_DEPTH_TEST);
                 glDepthRange(0.0F, 1.0F);
 
+                prof_stage_begin(PROF_CHUNKS);
                 chunk_update_all();
+                prof_stage_end(PROF_CHUNKS);
 
                 glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -1228,9 +1306,11 @@ void display() {
                                 matrix_upload();
                         }
 
+                        prof_stage_begin(PROF_SCENE);
                         water_reflection_pass();
                         glx_enable_sphericalfog();
                         drawScene();
+                        prof_stage_end(PROF_SCENE);
                         settings.render_distance = saved_render_distance;
 
                         int render_fpv = (camera_mode == CAMERAMODE_FPS)
@@ -1421,6 +1501,7 @@ void display() {
 #endif
 
                         if(needs_postproc) {
+                                prof_stage_begin(PROF_POSTPROC);
                                 postprocess_msaa_resolve(postproc.fbo);
 
                                 mat4 saved_proj2, saved_view2, saved_model2;
@@ -1679,6 +1760,7 @@ void display() {
                                 memcpy(matrix_model, saved_model2, sizeof(mat4));
                                 matrix_upload_p();
                                 matrix_upload();
+                                prof_stage_end(PROF_POSTPROC);
                         }
                 }
                 if(needs_postproc && network_map_transfer && postproc.fbo) {
@@ -1704,6 +1786,7 @@ void display() {
         float scalef = (settings.window_height / 600.0F);
 
         if(hud_active->render_2D) {
+                prof_stage_begin(PROF_HUD);
                 mu_Context* ctx = hud_active->ctx;
 
                 if(ctx) {
@@ -1792,6 +1875,7 @@ void display() {
                    restoring the matrices (skins_render_preview does both). */
                 if(hud_active->render_2D_overlay)
                         hud_active->render_2D_overlay(scalex, scalef);
+                prof_stage_end(PROF_HUD);
         }
 
         if(screenshot_anim.active && screenshot_anim.texture) {
@@ -1830,6 +1914,10 @@ void display() {
                         glDisable(GL_BLEND);
                 }
         }
+
+        profiler_draw_overlay();
+        /* Submit any solid 2D quads still queued (no-op unless --perf-2d-batch). */
+        glx_batch2d_flush();
 
         if(settings.multisamples > 0)
                 glEnable(GL_MULTISAMPLE);
@@ -2201,6 +2289,8 @@ void mouse_scroll(struct window_instance* window, double xoffset, double yoffset
 }
 
 void deinit() {
+        prof_shutdown();
+
         recorder_shutdown();
         rpc_deinit();
         ping_deinit(); /* Join before freeing HUD state used by ping callbacks. */
@@ -2314,6 +2404,55 @@ static void ios_stage_resources_and_chdir(void) {
         SDL_free(pref);
 }
 #endif /* OS_APPLE */
+
+/* ── Diagnostic render presets ─────────────────────────────────────────────
+   `--perf-preset=bs` forces this client onto ButterSpades' render profile so
+   the two can be compared like-for-like. It is deliberately NOT written back
+   to config.ini: it is a measurement tool, not a user preference. Anything the
+   preset cannot change at runtime (pixel format/MSAA) is applied before
+   window_init(), which is why the preset is resolved before that call. */
+static void main_apply_perf_preset_bs(void) {
+        settings.multisamples = 0;
+        settings.ambient_occlusion = 0;
+        settings.ao_multiplier = 1.0F;
+        settings.greedy_meshing = 0;
+        settings.smooth_fog = 0;
+        settings.force_displaylist = 0;
+
+        /* ButterSpades renders straight to the back buffer: no off-screen
+           target, no grading, no depth-based outlines. */
+        settings.exposure = 0.0F;
+        settings.saturation = 0.0F;
+        settings.contrast = 0.0F;
+        settings.vignette = 0.0F;
+        settings.filmic_tonemapping = 0;
+        settings.chromatic_aberration = 0;
+        settings.object_outlines = 0;
+        settings.hdr_rendering = 0;
+        settings.bloom = 0;
+        settings.lens_flare = 0;
+        settings.sky_gradient = 0;
+
+        /* Upstream terrain is fixed-function with baked vertex colours. */
+        settings.dynamic_lights = 0;
+        settings.flash_lights = 0;
+        settings.tracer_lights = 0;
+        settings.shadow_quality = 0;
+        settings.shadow_intensity = 0.0F;
+        settings.shadow_entities = 0;
+        settings.textured_blocks = 0;
+
+        /* Upstream water is static map geometry. */
+        settings.water_shader = 0;
+        settings.water_waves = 0;
+
+        settings.camera_fov = CAMERA_DEFAULT_FOV;
+        settings.render_distance = 128.0F;
+        settings.spectator_fog_distance = 128.0F;
+
+        log_info("Perf preset: butterSpades parity (MSAA off, no post-process, no dynamic lights, "
+                 "no water mesh, no baked shadows, fov %.0f)", settings.camera_fov);
+}
 
 int main(int argc, char** argv) {
         settings.opengl14 = 1;
@@ -2503,7 +2642,62 @@ int main(int argc, char** argv) {
 
         settings.iron_sight = 1;
         settings.replay_enabled = -1;
+
+        /* ── Command line ─────────────────────────────────────────────────────
+           Parsed before config_reload()/window_init() so the diagnostic preset
+           and the profiler influence window creation (MSAA) and the very first
+           frame. Unknown flags are ignored; the first bare argument is still a
+           server address, as before. */
+        const char* connect_arg = NULL;
+        int perf_preset_bs = 0;
+        int batch2d_requested = 0;
+        int prof_requested = 0;
+        char prof_csv[400] = {0};
+
+        for(int i = 1; i < argc; i++) {
+                if(!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
+                        log_info("Usage: client                       [server browser]");
+                        log_info("       client -aos://<ip>:<port>    [custom address]");
+                        log_info("       client --perf-preset=bs|default [diagnostic render presets]");
+                        log_info("       client --prof                [CPU frame profiler overlay, toggle with F9]");
+                        log_info("       client --prof-log[=file.csv] [also write per-frame samples to CSV]");
+                        log_info("       client --perf-2d-batch     [batch solid 2D quads into shared draws]");
+                        exit(0);
+                } else if(!strcmp(argv[i], "--perf-2d-batch")) {
+                        batch2d_requested = 1;
+                } else if(!strcmp(argv[i], "--prof")) {
+                        prof_requested = 1;
+                } else if(!strncmp(argv[i], "--prof-log", 10)) {
+                        prof_requested = 1;
+                        if(argv[i][10] == '=' && argv[i][11])
+                                snprintf(prof_csv, sizeof(prof_csv), "%s", argv[i] + 11);
+                        else
+                                snprintf(prof_csv, sizeof(prof_csv), "logs/profiler.csv");
+                } else if(!strcmp(argv[i], "--perf-preset=bs")
+                          || !strcmp(argv[i], "--perf-preset=butterspades")) {
+                        perf_preset_bs = 1;
+                } else if(!strncmp(argv[i], "--perf-preset=default", 21)) {
+                        perf_preset_bs = 0;
+                } else if(argv[i][0] != '-') {
+                        connect_arg = argv[i];
+                }
+        }
+
         config_reload();
+
+        if(perf_preset_bs)
+                main_apply_perf_preset_bs();
+
+        /* The profiler is initialised once the log directory exists (it does by
+           now) and before the loop, so the very first frames are sampled. */
+        if(batch2d_requested) {
+                glx_batch2d_enable(true);
+                log_info("2D quad batching enabled (experimental)");
+        }
+
+        prof_init(prof_requested != 0, prof_csv[0] ? prof_csv : NULL);
+        if(prof_enabled())
+                log_info("CPU frame profiler enabled%s%s", prof_csv[0] ? ", csv: " : "", prof_csv);
 
         if(settings.recording_fps == 0) settings.recording_fps = 60;
         if(settings.recording_bitrate_kbps == 0) settings.recording_bitrate_kbps = 2000;
@@ -2566,18 +2760,12 @@ int main(int argc, char** argv) {
         if(settings.vsync > 1)
                 window_swapping(0);
 
-        if(argc > 1) {
-                if(!strcmp(argv[1], "--help")) {
-                        log_info("Usage: client                     [server browser]");
-                        log_info("       client -aos://<ip>:<port>  [custom address]");
-                        exit(0);
-                }
-
-                if(!network_connect_string(argv[1] + 1)) {
+        if(connect_arg) {
+                if(!network_connect_string(connect_arg + 1)) {
                         log_error("Error: Connection failed (use --help for instructions)");
                         exit(1);
                 } else {
-                        log_info("Connection to %s successful", argv[1] + 1);
+                        log_info("Connection to %s successful", connect_arg + 1);
                         hud_change(&hud_ingame);
                 }
         }
@@ -2587,6 +2775,9 @@ int main(int argc, char** argv) {
         double physics_time_fast = 0.0F;
 
         while(!window_closed()) {
+                prof_frame_begin();
+                glx_frame_stats_reset();
+
                 double dt = window_time() - last_frame_start;
                 last_frame_start = window_time();
                 dt_float = (float)dt;
@@ -2594,10 +2785,15 @@ int main(int argc, char** argv) {
                 /* Process incoming network events as early as possible so
                    this frame's physics, input and render see them (instead
                    of only at end-of-frame). */
-                if(settings.net_early_opt)
+                if(settings.net_early_opt) {
+                        prof_stage_begin(PROF_NETWORK_IN);
                         network_service();
+                        prof_stage_end(PROF_NETWORK_IN);
+                }
 
                 if(hud_active->render_world) {
+                        prof_stage_begin(PROF_PHYSICS);
+
                         physics_time_fast += dt;
                         physics_time_fixed += dt;
 
@@ -2666,6 +2862,7 @@ int main(int argc, char** argv) {
                 physics_tick_alpha = settings.render_interpolation
                         ? (float)fmin(fmax(physics_time_fixed / PHYSICS_STEP_TIME, 0.0), 1.0)
                         : 1.0F;
+                        prof_stage_end(PROF_PHYSICS);
                 } else {
                         physics_tick_alpha = 1.0F;
                 }
@@ -2673,8 +2870,20 @@ int main(int argc, char** argv) {
                 /* Damage-feedback vignette fades out every frame, including
                    while a menu is open over the world. */
                 damagefx_update(dt_float);
-
                  display();
+
+                 /* F9: toggle the CPU frame profiler overlay. Lets a settings
+                    change be A/B-ed without relaunching the client. */
+                 {
+                         static bool prof_key_down = false;
+                         if(window_key_down(WINDOW_KEY_F9)) {
+                                 if(!prof_key_down)
+                                         prof_toggle();
+                                 prof_key_down = true;
+                         } else {
+                                 prof_key_down = false;
+                         }
+                 }
  
                   static bool replay_save_key_pressed = false;
                     if (window_key_down(WINDOW_KEY_REPLAY_SAVE)) {
@@ -2759,12 +2968,22 @@ int main(int argc, char** argv) {
                                  loading_screen_seen_time = 0.0F;
                          }
                  }
- 
+                 prof_stage_begin(PROF_SOUND);
                  sound_update();
+                 prof_stage_end(PROF_SOUND);
+
+                 prof_stage_begin(PROF_NETWORK_OUT);
                  network_update();
+                 prof_stage_end(PROF_NETWORK_OUT);
+
+                 prof_stage_begin(PROF_SWAP);
                  window_update();
- 
+                 prof_stage_end(PROF_SWAP);
                  rpc_update();
+
+                 /* The sample ends before the vsync/pacing sleep: this is the
+                    cost of producing a frame, not how long we waited for one. */
+                 prof_frame_end();
  
                  if(settings.vsync > 1 && (window_time() - last_frame_start) < (1.0 / settings.vsync)) {
                          if(settings.precise_pacing) {

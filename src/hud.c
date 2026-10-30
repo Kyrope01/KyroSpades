@@ -259,13 +259,21 @@ static int mu_text_height(mu_Font font) {
         return (int)(16.F * hud_ui_scale());
 }
 
+/* microui asks for text widths one substring at a time; these bound the
+   temporary buffers so a caller cannot size them. */
+#define MU_TEXT_MEASURE_MAX 512
+#define MU_SKINS_PREVIEW_COLS_MAX 16
+
 static int mu_text_width(mu_Font font, const char* text, int len) {
         if(len <= 0) {
                 return ceil(font_length(mu_text_height(font), (char*)text));
         } else {
-                char tmp[len + 1];
-                memcpy(tmp, text, len);
-                tmp[len] = 0;
+                /* microui measures substrings; a VLA here let the caller's
+                   length decide the stack usage. Clamp instead. */
+                char tmp[MU_TEXT_MEASURE_MAX];
+                int n = len < MU_TEXT_MEASURE_MAX - 1 ? len : MU_TEXT_MEASURE_MAX - 1;
+                memcpy(tmp, text, (size_t)n);
+                tmp[n] = 0;
                 return ceil(font_length(mu_text_height(font), tmp));
         }
 }
@@ -2116,7 +2124,7 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                 if(scoreboard_open) {
                         if(network_connected && network_logged_in) {
                                 char ping_str[16];
-                                sprintf(ping_str, "PING: %ims", network_ping());
+                                sprintf(ping_str, "PING: %ums", network_ping());
                                 glColor3f(1.0F, 0.0F, 0.0F);
                                 font_centered(settings.window_width / 2.0F, settings.window_height - 4.F, 16.F, ping_str);
                         }
@@ -2237,7 +2245,7 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 }
                         }
 
-                        struct player_table pt[PLAYER_COUNT_MAX];
+                        struct player_table pt[PLAYER_COUNT_MAX] = {0};
                         int connected = 0;
                         for(int k = 0; k < PLAYER_COUNT_MAX; k++) {
                                 if(players[k].connected) {
@@ -2297,7 +2305,7 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                               SCOREBOARD_TEXT_HEIGHT, players[pt[k].id].name);
                                 glDisable(GL_BLEND);
                                 if(section != 2) {
-                                        sprintf(id_str, "%i", pt[k].score);
+                                        sprintf(id_str, "%u", pt[k].score);
                                         font_render(x_offset + 300.0F
                                                             - font_length(SCOREBOARD_TEXT_HEIGHT, id_str) - 8.0F,
                                                     row_text_y, SCOREBOARD_TEXT_HEIGHT, id_str);
@@ -2522,14 +2530,13 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
 
                         char item_mini_str[32];
                         struct texture* item_mini;
-                        int off = 0;
 
                         struct Team* team = players[local_id].team == 0 ? &gamestate.team_1: &gamestate.team_2;
                         glColor3ub(LIGHTEN(team->red), LIGHTEN(team->green), LIGHTEN(team->blue));
 
                         switch(players[local_id].held_item) {
                                 default:
-                                case TOOL_BLOCK: off = 64 * scalef;
+                                case TOOL_BLOCK: /* falls through: same icon */
                                 case TOOL_SPADE:
                                         item_mini = &texture_block;
                                         glColor3ub(players[local_player_id].block.red, players[local_player_id].block.green, players[local_player_id].block.blue);
@@ -2609,7 +2616,7 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 }
 
                                 char count[4];
-                                sprintf(count, "%i", team1_alive);
+                                sprintf(count, "%u", team1_alive);
 
                                 font_select(FONT_FANTASY);
                                 glColor3ub(gamestate.team_1.red, gamestate.team_1.green, gamestate.team_1.blue);
@@ -2632,7 +2639,7 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 // team 2
                                 gmi_y += 40.F;
 
-                                sprintf(count, "%i", team2_alive);
+                                sprintf(count, "%u", team2_alive);
                                 font_select(FONT_FANTASY);
                                 glColor3ub(gamestate.team_2.red, gamestate.team_2.green, gamestate.team_2.blue);
                                 // helmet and text
@@ -3263,7 +3270,7 @@ texture_draw_empty_rotated(settings.window_width - 143 * scalef + tent2_x * map_
                 char debug_str[16];
                 font_select(FONT_FIXEDSYS);
                 glColor3f(1.0F, 1.0F, 1.0F);
-                sprintf(debug_str, "%ims", network_ping());
+                sprintf(debug_str, "%ums", network_ping());
                 font_render(settings.window_width - 17.0F - font_length(16.F, debug_str), settings.window_height / 2.F - 18.F + 82.F, 16.0F, debug_str);
                 sprintf(debug_str, "%i fps", (int)fps);
                 font_render(settings.window_width - 17.0F - font_length(16.F, debug_str), settings.window_height / 2.F - 18.F + 66.F, 16.0F, debug_str);
@@ -3825,9 +3832,11 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
         }
         if(chat_input_mode != CHAT_NO_INPUT && action == WINDOW_PRESS && key == WINDOW_KEY_TAB && strlen(chat[0][0]) > 0) {
                 // autocomplete word
-                char* incomplete = strrchr(chat[0][0], ' ') + 1;
-                if(incomplete == (char*)1)
-                        incomplete = chat[0][0];
+                /* strrchr() returns NULL when there is no space; NULL + 1 is
+                   undefined behaviour and the old (char*)1 comparison never
+                   caught it. Autocomplete the whole line in that case. */
+                char* space = strrchr(chat[0][0], ' ');
+                char* incomplete = space ? space + 1 : chat[0][0];
                 const char* match = hud_ingame_completeword(incomplete);
                 if(match && strlen(match) + strlen(chat[0][0]) < 128)
                         strcpy(incomplete, match);
@@ -4957,11 +4966,12 @@ static int hud_serverlist_sort(const void* a, const void* b) {
                 return 1;
         }
 
-        if(abs(aa->current - bb->current) == 0)
+        if(abs(aa->current - bb->current) == 0) {
                 if(abs(aa->ping - bb->ping) == 0)
                         return strcmp(aa->name, bb->name);
                 else
                         return aa->ping - bb->ping;
+        }
 
         return bb->current - aa->current;
 }
@@ -5025,8 +5035,16 @@ static void hud_serverlist_pingupdate(void* e, float time_delta, char* aos) {
                                 break;
                         }
         } else {
-                serverlist = realloc(serverlist, (++server_count) * sizeof(struct serverlist_entry));
-                memcpy(serverlist + server_count - 1, e, sizeof(struct serverlist_entry));
+                struct serverlist_entry* grown
+                        = realloc(serverlist, (size_t)(server_count + 1) * sizeof(struct serverlist_entry));
+                if(!grown) {
+                        pthread_mutex_unlock(&serverlist_lock);
+                        log_warn("serverlist: out of memory, entry dropped");
+                        return;
+                }
+                serverlist = grown;
+                memcpy(serverlist + server_count, e, sizeof(struct serverlist_entry));
+                server_count++;
         }
 
         qsort(serverlist, server_count, sizeof(struct serverlist_entry), hud_serverlist_sort);
@@ -5215,11 +5233,12 @@ void hud_common_sidebar(mu_Context* ctx, float scalex, float scaley) {
         }
 
         mu_text_color(ctx, 255, 60, 60);
-        if(mu_button(ctx, network_connected ? "Disconnect" : "Exit"))
+        if(mu_button(ctx, network_connected ? "Disconnect" : "Exit")) {
                 if(network_connected)
                         hud_change(&hud_serverlist);
                 else
                         exit(0);
+        }
         mu_text_color_default(ctx);
 
         mu_end_panel(ctx);
@@ -5342,11 +5361,12 @@ static void hud_common_nav(mu_Context* ctx, mu_Rect* frame, float scalex, float 
         }
 
         mu_text_color(ctx, 255, 60, 60);
-        if(mu_button(ctx, network_connected ? "Disconnect": "Exit"))
+        if(mu_button(ctx, network_connected ? "Disconnect": "Exit")) {
                 if(network_connected)
                         hud_change(&hud_serverlist);
                 else
                         exit(0);
+        }
         mu_text_color_default(ctx);
 
         mu_button_ex(ctx, total_str, 0, MU_OPT_ALIGNRIGHT | MU_OPT_NOINTERACT);
@@ -5689,10 +5709,9 @@ static void hud_serverlist_render(mu_Context* ctx, float scalex, float scaley) {
         }
 #endif
 
-        int render_status_icon = !serverlist_con_established;
         if(request_serverlist) {
                 switch(http_process(request_serverlist)) {
-                        case HTTP_STATUS_PENDING: render_status_icon = 1; break;
+                        case HTTP_STATUS_PENDING: break;
                         case HTTP_STATUS_COMPLETED: {
                                 if(serverlist_source != 0) {
                                         void* f = file_open("serverlist_debug.txt", "w");
@@ -6358,7 +6377,11 @@ static void hud_skins_render(mu_Context* ctx, float scalex, float scaley) {
                         int cols = panel_w / cell_w;
                         if(cols < 1) cols = 1;
 
-                        int widths[cols];
+                        int widths[MU_SKINS_PREVIEW_COLS_MAX];
+                        if(cols < 1)
+                                cols = 1;
+                        if(cols > MU_SKINS_PREVIEW_COLS_MAX)
+                                cols = MU_SKINS_PREVIEW_COLS_MAX;
                         for(int c = 0; c < cols; c++)
                                 widths[c] = panel_w / cols;
 

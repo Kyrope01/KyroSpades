@@ -1,0 +1,14 @@
+# Build output
+build/
+CMakeCache.txt
+CMakeFiles/
+
+# Local benchmark binaries (tools/bench)
+tools/bench/build/
+tools/bench/bench
+
+# Object files / editor noise
+*.o
+*.obj
+*.swp
+.DS_Store
