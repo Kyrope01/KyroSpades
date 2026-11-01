@@ -2719,7 +2719,16 @@ int main(int argc, char** argv) {
                         prof_stage_end(PROF_NETWORK_IN);
                 }
 
-                if(hud_active->render_world) {
+                /* Menus can cover an active multiplayer game. Rendering a HUD
+                   must not pause its simulation or send frozen positions to
+                   the server. Clear gameplay controls before the fixed tick;
+                   preserve crouch as the chat input path does. */
+                if(network_connected && !hud_active->render_world) {
+                        players[local_player_id].input.keys.packed &= 0b00100000;
+                        players[local_player_id].input.buttons.packed = 0;
+                        button_map[0] = button_map[1] = button_map[2] = 0;
+                }
+                if(hud_active->render_world || network_connected) {
                         prof_stage_begin(PROF_PHYSICS);
 
                         physics_time_fast += dt;
@@ -2750,7 +2759,10 @@ int main(int argc, char** argv) {
                         physics_time_fast -= step;
                         if(!demo_is_frozen())
                                 player_update(step, 0);
-                        camera_update(step);
+                        /* FPS camera follows the falling player behind menus;
+                           other controllers can read movement keys directly. */
+                        if(hud_active->render_world || camera_mode == CAMERAMODE_FPS)
+                                camera_update(step);
                         tracer_update(step);
                         particle_update(step);
                         bloodmarks_update(step);

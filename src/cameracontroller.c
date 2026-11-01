@@ -194,7 +194,7 @@ void cameracontroller_fps(float dt) {
 
 	last_cy = players[local_player_id].physics.eye.y - players[local_player_id].physics.velocity.y * 0.4F;
 
-	if(chat_input_mode == CHAT_NO_INPUT) {
+	if(chat_input_mode == CHAT_NO_INPUT && hud_active->render_world) {
 		players[local_player_id].input.keys.up = window_key_down(WINDOW_KEY_UP);
 		players[local_player_id].input.keys.down = window_key_down(WINDOW_KEY_DOWN);
 		players[local_player_id].input.keys.left = window_key_down(WINDOW_KEY_LEFT);
@@ -382,7 +382,7 @@ void cameracontroller_fps(float dt) {
 			players[local_player_id].input.buttons.rmb_start = window_time();
 	}
 
-	if(chat_input_mode != CHAT_NO_INPUT) {
+	if(chat_input_mode != CHAT_NO_INPUT || !hud_active->render_world) {
 		players[local_player_id].input.keys.packed &= 0b00100000;
 		players[local_player_id].input.buttons.packed = 0;
 	}
