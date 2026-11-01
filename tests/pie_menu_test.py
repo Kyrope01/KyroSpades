@@ -85,6 +85,7 @@ void camera_hit(struct Camera_HitType* h,int exclude,float x,float y,float z,
 static int sends, pings, sound, chats, packet_len;
 static unsigned char packet[257];
 static char last_text[255], last_reason[128];
+static int last_utf8_prefixed;
 static unsigned char chat_kind;
 static float wire[3];
 static bool can_ping;
@@ -99,6 +100,25 @@ void sound_create(int a, void* b,float c,float d,float e) {
 }
 void chat_add(int a,unsigned int b,const char* c) {(void)a;(void)b;(void)c; chats++;}
 void chat_showpopup(const char* a,float b,int c) {(void)a;(void)b;(void)c;}
+void network_send(int id,void* data,int len);
+/* Same rule as network.c: printable ASCII goes out bare, anything else behind
+   the 0xff prefix of UTF-8 Chat. */
+void network_send_chat(unsigned char chat_type,const char* text) {
+    struct PacketChatMessage msg;
+    size_t n=strlen(text);
+    if(n>254) n=254;
+    int prefix=0;
+    for(size_t i=0;i<n;i++) {
+        unsigned char c=(unsigned char)text[i];
+        if(c<0x20||c>=0x7f) {prefix=1;break;}
+    }
+    if(prefix&&n==254) n=253;
+    size_t o=0;
+    msg.player_id=local_player_id; msg.chat_type=chat_type;
+    if(prefix) msg.message[o++]=(char)0xff;
+    memcpy(msg.message+o,text,n); o+=n; msg.message[o]=0;
+    network_send(PACKET_CHATMESSAGE_ID,&msg,(int)(2+o+1));
+}
 void network_send(int id,void* data,int len) {
     assert(id==PACKET_CHATMESSAGE_ID && len>=3 && len<=257);
     memcpy(packet,data,len); packet_len=len;
@@ -107,7 +127,8 @@ void network_send(int id,void* data,int len) {
     assert(len==2+(int)strlen(m->message)+1); /* NUL on wire, as in ZeroSpades */
     assert(packet[len-1]==0);
     sends++;chat_kind=m->chat_type;
-    snprintf(last_text,sizeof(last_text),"%s",m->message);
+    last_utf8_prefixed=((unsigned char)m->message[0]==0xff);
+    snprintf(last_text,sizeof(last_text),"%s",m->message+last_utf8_prefixed);
 }
 '''
 checks = r'''
@@ -446,7 +467,8 @@ with tempfile.TemporaryDirectory() as d:
     path = Path(d) / "pie.c"
     exe = Path(d) / "test"
     ext = (root / "src/pie_menu_ext.c").read_text()
-    path.write_text(stubs + src + ext + server_checks + checks)
+    charset = (root / "src/charset.c").read_text()
+    path.write_text(stubs + charset + src + ext + server_checks + checks)
     subprocess.run(["gcc", "-std=c99", "-O2", "-ffunction-sections", "-fdata-sections",
                     "-Wl,--gc-sections", "-I", str(root / "src"), str(path), "-lm", "-o", str(exe)], check=True)
     subprocess.run([str(exe)], check=True)

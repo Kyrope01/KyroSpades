@@ -14,6 +14,17 @@
 #define GLOWING_BLOCK_FRAME_LIGHTS 16
 #define GLOWING_BLOCK_LIGHT_RANGE 50.0F
 
+/* Vertex alpha the mesher writes on a glowing block's own faces. The terrain
+ * shaders read anything below 1.0 as "this surface is the light" and skip the
+ * sun/ambient/point-light multiply, so the block stays bright at night and in
+ * shadow. Every other terrain vertex is 255. */
+#define GLOWING_BLOCK_VERTEX_ALPHA 254
+
+struct glowing_block_sample {
+        int x, y, z;
+        uint32_t color;
+};
+
 struct glowing_block_light {
         float position[3];
         float color[3];
@@ -36,5 +47,16 @@ void glowing_blocks_deinit(void);
 
 /* Submit nearby coloured point lights to the forward-lighting queue. */
 void glowing_blocks_prepare_frame(float view_x, float view_y, float view_z);
+
+/* The colour a glowing block emits, normalised so its brightest channel is 1.0
+ * (even a dark pick reads as a light). Shared by the point light and the
+ * block's own faces so the two can never disagree. `peak` may be NULL. */
+void glowing_blocks_light_color(uint32_t color, float rgb[3], float* peak);
+
+/* Snapshot the blocks inside an inclusive map-space box. The terrain mesher
+ * runs on a worker thread, so it takes one snapshot per chunk and looks voxels
+ * up in that instead of locking the registry once per voxel. */
+int glowing_blocks_collect(int min_x, int min_y, int min_z, int max_x, int max_y, int max_z,
+                           struct glowing_block_sample* out, int capacity);
 
 #endif

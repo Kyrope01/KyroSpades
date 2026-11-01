@@ -73,15 +73,30 @@ typedef unsigned short GLhalf;
 #define GL_SRC_ALPHA 0x0302
 #define GL_ONE_MINUS_SRC_ALPHA 0x0303
 #define GL_ONE 1
+#define GL_ZERO 0
+#define GL_BLEND_SRC_RGB 0x80C9
+#define GL_BLEND_DST_RGB 0x80C8
+#define GL_BLEND_SRC_ALPHA 0x80CB
+#define GL_BLEND_DST_ALPHA 0x80CA
+#define GL_BLEND_EQUATION_RGB 0x8009
+#define GL_BLEND_EQUATION_ALPHA 0x883D
+#define GL_FUNC_ADD 0x8006
 #define GL_COMBINE 0x8570
 #define GL_POLYGON_OFFSET_FILL 0x8037
 #define GL_POLYGON_OFFSET_FACTOR 0x8038
 #define GL_POLYGON_OFFSET_UNITS 0x2A00
 #define GL_CURRENT_PROGRAM 0x8B8D
+#define GL_CURRENT_COLOR 0x0B00
+#define GL_DEPTH_WRITEMASK 0x0B72
 #define GL_PROGRAM_POINT_SIZE 0x8642
 #define GL_POINT_DISTANCE_ATTENUATION 0x8129
 #define GL_FRAMEBUFFER_BINDING 0x8CA6
 #define GL_RENDERBUFFER_BINDING 0x8CA7
+#define GL_ARRAY_BUFFER_BINDING 0x8894
+#define GL_VERTEX_ARRAY_BINDING 0x85B5
+#define GL_CONTEXT_PROFILE_MASK 0x9126
+#define GL_CONTEXT_CORE_PROFILE_BIT 0x00000001
+#define GL_CONTEXT_COMPATIBILITY_PROFILE_BIT 0x00000002
 #define GL_ACTIVE_TEXTURE 0x84E0
 #define GL_CLAMP_TO_EDGE 0x812F
 #define GL_FRAMEBUFFER 0x8D40
@@ -133,6 +148,7 @@ static inline void glDisableClientState(GLenum c) { (void)c; }
 static inline void glEnable(GLenum c) { (void)c; }
 static inline void glDisable(GLenum c) { (void)c; }
 static inline GLboolean glIsEnabled(GLenum c) { (void)c; return GL_FALSE; }
+static inline void glGetBooleanv(GLenum pname, GLboolean* value) { (void)pname; if(value) *value = GL_FALSE; }
 static inline void glGetFloatv(GLenum p, GLfloat* v) { (void)p; v[0] = 0.0f; }
 static inline void glGetIntegerv(GLenum p, GLint* v) { (void)p; v[0] = 0; }
 static inline void glPolygonOffset(GLfloat a, GLfloat b) { (void)a; (void)b; }
@@ -140,6 +156,8 @@ static inline void glUniform1f(GLint l, GLfloat a) { (void)l; (void)a; }
 static inline void glUniform2f(GLint l, GLfloat a, GLfloat b) { (void)l;(void)a;(void)b; }
 static inline void glUniform3f(GLint l, GLfloat a, GLfloat b, GLfloat c) { (void)l;(void)a;(void)b;(void)c; }
 static inline void glBlendFunc(GLenum a, GLenum b) { (void)a; (void)b; }
+static inline void glBlendFuncSeparate(GLenum a, GLenum b, GLenum c, GLenum d) { (void)a; (void)b; (void)c; (void)d; }
+static inline void glBlendEquationSeparate(GLenum a, GLenum b) { (void)a; (void)b; }
 static inline void glColor4f(GLfloat a, GLfloat b, GLfloat c, GLfloat d) { (void)a;(void)b;(void)c;(void)d; }
 static inline void glColor3f(GLfloat a, GLfloat b, GLfloat c) { (void)a;(void)b;(void)c; }
 static inline void glColor3ub(GLubyte a, GLubyte b, GLubyte c) { (void)a;(void)b;(void)c; }

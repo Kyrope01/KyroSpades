@@ -34,6 +34,13 @@ void damagenumbers_clear(void);
    window are merged into a single, growing indicator (matches ZeroSpades). */
 void damagenumbers_add(int victim_id, int damage, float x, float y, float z);
 
+/* Damage Markers (aosprotocol extension 0x20): the amount the server applied to
+   `victim_id`, negative when it healed. While the server is sending these (see
+   damagenumbers_set_server_authoritative()) the client-side estimate below is
+   dropped, so a hit is never drawn twice with two different numbers. */
+void damagenumbers_add_server(int victim_id, int amount);
+void damagenumbers_set_server_authoritative(bool authoritative);
+
 void damagenumbers_update(float dt);
 
 /* Snapshot the current world-space view/projection matrices (matrix_view /

@@ -34,9 +34,6 @@ struct config_file_entry {
 extern struct RENDER_OPTIONS {
         char name[16];
         char last_address[128];
-        int opengl14;
-        int color_correction;
-        int shadow_entities;
         int ambient_occlusion;
         float render_distance;
         int window_width;
@@ -94,6 +91,8 @@ extern struct RENDER_OPTIONS {
         int sunlight_intensity;                /* percent of daylight (direct + ambient), 0..100 */
         int sky_gradient;
         float sky_gradient_intensity;
+        int sky_clouds;
+        float sky_cloud_coverage;
         int water_waves;
         float water_wave_intensity;
         float water_wave_speed;
@@ -108,6 +107,8 @@ extern struct RENDER_OPTIONS {
 	int auto_demo_recording;
 	int blood_marks;
 	int damage_numbers;
+	int client_key_login;
+	int killfeed_distance;
 	int player_stats;
         int player_technical_stats;
         int rain;
@@ -126,9 +127,6 @@ extern struct RENDER_OPTIONS {
         float chromatic_aberration_strength;  /* 0..10 — pixel offset at screen edge */
         int   filmic_tonemapping;             /* 0 = off, 1 = ACES filmic curve */
         int   hdr_rendering;                   /* floating-point scene target on OpenGL Core */
-        int   bloom;                           /* multipass Core bloom; compatibility fallback elsewhere */
-        float bloom_strength;
-        float bloom_threshold;
         int dynamic_lights;                   /* forward point lights and terrain material shading */
         int all_player_flashlights;           /* locally show lamps for living remote players */
         int flash_lights;                     /* muzzle-flash and grenade-explosion point lights */

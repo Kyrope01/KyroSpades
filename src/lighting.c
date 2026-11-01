@@ -18,6 +18,7 @@
 #include "map.h"
 #include "matrix.h"
 #include "network.h"
+#include "daytime_weather.h"
 #include "flashlight_ext.h"
 #include "player.h"
 #include "shadow.h"
@@ -32,7 +33,11 @@ static double last_sky_remesh = -1000.0;
 
 float lighting_sunlight_scale(void) {
         unsigned int level = __atomic_load_n(&sky_level, __ATOMIC_RELAXED);
-        return settings.sunlight_intensity * 0.01F * ((float)level / 255.0F);
+        /* Daytime and Weather: at night the sun casts no light and no shadow.
+           Dynamic lights are added separately in the shaders and do not read
+           this, so they stay as bright as by day. */
+        return settings.sunlight_intensity * 0.01F * ((float)level / 255.0F)
+               * daytime_weather_sunlight();
 }
 
 void lighting_update_sky_color(float r, float g, float b) {
@@ -112,18 +117,16 @@ static GLint previous_program;
 static bool world_shader_active;
 static bool world_uses_explicit_attributes;
 static bool previous_explicit_attributes;
-static bool world_material_maps_bound;
+static bool world_normal_map_bound;
 static GLint previous_active_texture = GL_TEXTURE0;
 static GLint previous_texture1;
-static GLint previous_texture2;
 
 static GLint uniform_mvp = -1;
 static GLint uniform_model = -1;
 static GLint uniform_texture = -1;
 static GLint uniform_texture_enabled = -1;
 static GLint uniform_normal_map = -1;
-static GLint uniform_material_map = -1;
-static GLint uniform_material_maps_enabled = -1;
+static GLint uniform_normal_map_enabled = -1;
 static GLint uniform_sun_direction = -1;
 static GLint uniform_sun_color = -1;
 static GLint uniform_camera = -1;
@@ -272,8 +275,7 @@ static const char* world_fragment_shader =
         "uniform sampler2D u_Texture;\n"
         "uniform float u_TextureEnabled;\n"
         "uniform sampler2D u_NormalMap;\n"
-        "uniform sampler2D u_MaterialMap;\n"
-        "uniform float u_MaterialMapsEnabled;\n"
+        "uniform float u_NormalMapEnabled;\n"
         "uniform vec3 u_SunDirection;\n"
         /* u_SunColor.r is the daylight percentage (original red = 1).
            Reuse it for ambient terrain light rather than spend another ES2 uniform. */
@@ -294,13 +296,11 @@ static const char* world_fragment_shader =
         "    if(u_TextureEnabled > 0.5)\n"
         "        base *= texture2D(u_Texture, v_TexCoord);\n"
         "    vec3 normal = normalize(v_WorldNormal);\n"
-        "    vec3 material = vec3(0.82, 0.05, 0.0);\n"
-        "    if(u_MaterialMapsEnabled > 0.5) {\n"
+        "    if(u_NormalMapEnabled > 0.5) {\n"
         "        vec3 mapped = texture2D(u_NormalMap, v_TexCoord).xyz * 2.0 - 1.0;\n"
         "        vec3 tangent = abs(normal.y) < 0.9 ? normalize(cross(vec3(0.0, 1.0, 0.0), normal)) : vec3(1.0, 0.0, 0.0);\n"
         "        vec3 bitangent = normalize(cross(normal, tangent));\n"
         "        normal = normalize(tangent * mapped.x + bitangent * mapped.y + normal * mapped.z);\n"
-        "        material = texture2D(u_MaterialMap, v_TexCoord).rgb;\n"
         "    }\n"
         "    vec3 added = vec3(0.0);\n"
         "    bool flashlight_active = u_FlashlightDirection.w >= 0.0;\n"
@@ -346,12 +346,12 @@ static const char* world_fragment_shader =
         "    }\n"
         "    vec3 sun_direction = normalize(u_SunDirection);\n"
         "    float sun_diffuse = max(dot(normal, sun_direction), 0.0);\n"
-        "    vec3 view_direction = normalize(u_Camera - v_WorldPosition);\n"
-        "    vec3 half_direction = normalize(sun_direction + view_direction);\n"
-        "    float shininess = mix(64.0, 6.0, clamp(material.r, 0.0, 1.0));\n"
-        "    float specular = pow(max(dot(normal, half_direction), 0.0), shininess) * material.g;\n"
-        "    base.rgb *= (0.86 + 0.14 * sun_diffuse) * (u_SunColor.r + added);\n"
-        "    base.rgb += u_SunColor * specular + base.rgb * material.b;\n"
+        "    vec3 lit = (0.86 + 0.14 * sun_diffuse) * (u_SunColor.r + added);\n"
+        /* A glowing block's faces carry the marker alpha from the mesher: the
+           surface is the light, so neither the sun nor the point lights may dim
+           it. Over-bright, so the HDR bloom pass picks it up when enabled. */
+        "    float emissive = 1.0 - step(0.9995, v_Color.a);\n"
+        "    base.rgb *= mix(lit, vec3(1.25), emissive);\n"
         "    float fog_distance = clamp(length((v_WorldPosition.xz - u_Camera.xz) * u_FogDistance), 0.0, 1.0);\n"
         "    float fog = fog_distance * fog_distance * (3.0 - 2.0 * fog_distance);\n"
         "    gl_FragColor = vec4(mix(base.rgb, u_FogColor, fog), base.a);\n"
@@ -385,8 +385,7 @@ static const char* world_fragment_shader_330 =
         "uniform sampler2D u_Texture;\n"
         "uniform float u_TextureEnabled;\n"
         "uniform sampler2D u_NormalMap;\n"
-        "uniform sampler2D u_MaterialMap;\n"
-        "uniform float u_MaterialMapsEnabled;\n"
+        "uniform float u_NormalMapEnabled;\n"
         "uniform vec3 u_SunDirection;\n"
         "uniform vec3 u_SunColor;\n"
         "uniform vec3 u_Camera;\n"
@@ -433,13 +432,11 @@ static const char* world_fragment_shader_330 =
         "        base *= texture(u_Texture, v_TexCoord);\n"
         "    vec3 geometric_normal = normalize(v_WorldNormal);\n"
         "    vec3 normal = geometric_normal;\n"
-        "    vec3 material = vec3(0.82, 0.05, 0.0);\n"
-        "    if(u_MaterialMapsEnabled > 0.5) {\n"
+        "    if(u_NormalMapEnabled > 0.5) {\n"
         "        vec3 mapped = texture(u_NormalMap, v_TexCoord).xyz * 2.0 - 1.0;\n"
         "        vec3 tangent = abs(normal.y) < 0.9 ? normalize(cross(vec3(0.0, 1.0, 0.0), normal)) : vec3(1.0, 0.0, 0.0);\n"
         "        vec3 bitangent = normalize(cross(normal, tangent));\n"
         "        normal = normalize(tangent * mapped.x + bitangent * mapped.y + normal * mapped.z);\n"
-        "        material = texture(u_MaterialMap, v_TexCoord).rgb;\n"
         "    }\n"
         "    vec3 added = vec3(0.0);\n"
         "    bool flashlight_active = u_FlashlightDirection.w >= 0.0;\n"
@@ -485,14 +482,13 @@ static const char* world_fragment_shader_330 =
         "    }\n"
         "    vec3 sun_direction = normalize(u_SunDirection);\n"
         "    float sun_diffuse = max(dot(normal, sun_direction), 0.0);\n"
-        "    vec3 view_direction = normalize(u_Camera - v_WorldPosition);\n"
-        "    vec3 half_direction = normalize(sun_direction + view_direction);\n"
-        "    float shininess = mix(64.0, 6.0, clamp(material.r, 0.0, 1.0));\n"
-        "    float specular = pow(max(dot(normal, half_direction), 0.0), shininess) * material.g;\n"
         "    float shadow_visibility = terrain_shadow(v_WorldPosition, geometric_normal, sun_direction);\n"
         "    vec3 albedo = base.rgb;\n"
-        "    base.rgb = albedo * ((0.86 + 0.14 * sun_diffuse) * shadow_visibility * u_SunColor.r + added);\n"
-        "    base.rgb += u_SunColor * specular * shadow_visibility + albedo * material.b;\n"
+        "    vec3 lit = (0.86 + 0.14 * sun_diffuse) * shadow_visibility * u_SunColor.r + added;\n"
+        /* See the GLSL 120 shader: the marker alpha means "this surface is the
+           light", including when the sun is down or the world is in shadow. */
+        "    float emissive = 1.0 - step(0.9995, v_Color.a);\n"
+        "    base.rgb = albedo * mix(lit, vec3(1.25), emissive);\n"
         "    float fog_distance = clamp(length((v_WorldPosition.xz - u_Camera.xz) * u_FogDistance), 0.0, 1.0);\n"
         "    float fog = fog_distance * fog_distance * (3.0 - 2.0 * fog_distance);\n"
         "    out_Color = vec4(mix(base.rgb, u_FogColor, fog), base.a);\n"
@@ -505,8 +501,7 @@ static void lighting_cache_uniforms(void) {
         uniform_texture = glx_uniform_location(world_program, "u_Texture");
         uniform_texture_enabled = glx_uniform_location(world_program, "u_TextureEnabled");
         uniform_normal_map = glx_uniform_location(world_program, "u_NormalMap");
-        uniform_material_map = glx_uniform_location(world_program, "u_MaterialMap");
-        uniform_material_maps_enabled = glx_uniform_location(world_program, "u_MaterialMapsEnabled");
+        uniform_normal_map_enabled = glx_uniform_location(world_program, "u_NormalMapEnabled");
         uniform_sun_direction = glx_uniform_location(world_program, "u_SunDirection");
         uniform_sun_color = glx_uniform_location(world_program, "u_SunColor");
         uniform_camera = glx_uniform_location(world_program, "u_Camera");
@@ -626,8 +621,6 @@ bool lighting_set_enabled(bool enabled) {
                 glUniform1i(uniform_texture, 0);
         if(uniform_normal_map >= 0)
                 glUniform1i(uniform_normal_map, 1);
-        if(uniform_material_map >= 0)
-                glUniform1i(uniform_material_map, 2);
         glx_use_program((GLuint)active_program);
 
 #ifdef OPENGL_ES
@@ -664,7 +657,7 @@ void lighting_deinit(void) {
         frame_light_count = 0;
         flash_generation = 0;
         world_shader_active = false;
-        world_material_maps_bound = false;
+        world_normal_map_bound = false;
         world_uses_explicit_attributes = false;
 }
 
@@ -673,14 +666,14 @@ bool lighting_supported(void) {
 }
 
 bool lighting_world_supported(void) {
-#ifdef OPENGL_CORE
-        return world_program != 0
-                && (settings.dynamic_lights
-                    || (settings.shadow_quality && settings.shadow_intensity > 0.0F));
-#else
+        if(!world_program || !lighting_world_program_required())
+                return false;
+#ifndef OPENGL_CORE
         /* The explicit-attribute path cannot shade legacy display lists. */
-        return lighting_supported() && !(world_uses_explicit_attributes && settings.force_displaylist);
+        if(world_uses_explicit_attributes && settings.force_displaylist)
+                return false;
 #endif
+        return true;
 }
 
 bool lighting_flashlight_toggle(void) {
@@ -974,11 +967,13 @@ void lighting_prepare_frame(double now, float view_x, float view_y, float view_z
                         source.direction[2] = dz;
                         struct flashlight_beam beam = flashlight_ext_beam(i);
                         if(!beam.reach || !beam.cone) continue;
+                        /* Flicker: the beam and its glare go dark together. */
+                        if(flashlight_ext_dark(i, window_time())) continue;
                         source.radius = beam.reach;
                         source.spot_color[0] = beam.red / 255.0F;
                         source.spot_color[1] = beam.green / 255.0F;
                         source.spot_color[2] = beam.blue / 255.0F;
-                        source.cone_cos = cosf(beam.cone * (PI / 360.0F));
+                        source.cone_cos = cosf(beam.cone * (PI / 512.0F));
                         source.intensity = 1.5F;
 #ifdef OPENGL_CORE
                         if(settings.hdr_rendering)
@@ -1054,11 +1049,13 @@ static void lighting_build_uniform_arrays(float* position_radius, float* color_i
                 position_radius[i * 4 + 1] = flashlight.position[1];
                 position_radius[i * 4 + 2] = flashlight.position[2];
                 struct flashlight_beam beam = flashlight_ext_beam(local_player_id);
+                if(flashlight_ext_dark(local_player_id, window_time()))
+                        brightness = 0.0F;
                 position_radius[i * 4 + 3] = beam.reach;
                 spot_color_cone[i * 4 + 0] = beam.red / 255.0F;
                 spot_color_cone[i * 4 + 1] = beam.green / 255.0F;
                 spot_color_cone[i * 4 + 2] = beam.blue / 255.0F;
-                spot_color_cone[i * 4 + 3] = cosf(beam.cone * (PI / 360.0F));
+                spot_color_cone[i * 4 + 3] = cosf(beam.cone * (PI / 512.0F));
                 color_intensity[i * 4 + 0] = 1.0F;
                 color_intensity[i * 4 + 1] = 0.70F;
                 color_intensity[i * 4 + 2] = 0.50F;
@@ -1109,6 +1106,10 @@ void lighting_apply_program(unsigned int program) {
         location = glx_uniform_location((GLuint)program, "u_SunIntensity");
         if(location >= 0)
                 glUniform1f(location, lighting_sunlight_scale());
+        /* Only glx.c's default shader declares this; the world program does not,
+           so the lookup is -1 there and the ambient stays with the world shader's
+           own sun term. Keep it for the entity/model/water paths, which follow the
+           map's day/night level. */
         location = glx_uniform_location((GLuint)program, "u_AmbientLight");
         if(location >= 0) {
                 float sun = lighting_sunlight_scale();
@@ -1198,8 +1199,8 @@ void lighting_world_update_matrices(void) {
 bool lighting_world_begin(bool textured) {
         if(!lighting_world_supported() || world_shader_active)
                 return false;
-        world_material_maps_bound = false;
-        bool has_material_maps = textured && texture_blocks_materials_ready;
+        world_normal_map_bound = false;
+        bool has_normal_map = textured && texture_blocks_normal_map_ready;
         /* Keep one stable terrain baseline while lighting is enabled. Switching
            shaders only for the lifetime of a flash changes the global sunlight
            response and causes a visible full-world brightness pulse. */
@@ -1236,20 +1237,17 @@ bool lighting_world_begin(bool textured) {
                 glUniform4fv(uniform_spot_color_cone, LIGHTING_SHADER_LIGHTS, spot_color_cone);
         if(uniform_texture_enabled >= 0)
                 glUniform1f(uniform_texture_enabled, textured ? 1.0F : 0.0F);
-        bool use_material_maps = has_material_maps;
-        world_material_maps_bound = use_material_maps;
-        if(uniform_material_maps_enabled >= 0)
-                glUniform1f(uniform_material_maps_enabled, use_material_maps ? 1.0F : 0.0F);
-        if(use_material_maps) {
+        bool use_normal_map = has_normal_map;
+        world_normal_map_bound = use_normal_map;
+        if(uniform_normal_map_enabled >= 0)
+                glUniform1f(uniform_normal_map_enabled, use_normal_map ? 1.0F : 0.0F);
+        if(use_normal_map) {
                 /* Texture unit 1 can hold the legacy spherical-fog gradient.
-                   Preserve both auxiliary bindings instead of silently breaking
-                   water/model draws when the terrain pass ends. */
+                   Preserve the binding instead of silently breaking water/model
+                   draws when the terrain pass ends. */
                 glActiveTexture(GL_TEXTURE1);
                 glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous_texture1);
                 glBindTexture(GL_TEXTURE_2D, texture_blocks_normal.texture_id);
-                glActiveTexture(GL_TEXTURE2);
-                glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous_texture2);
-                glBindTexture(GL_TEXTURE_2D, texture_blocks_material.texture_id);
                 glActiveTexture(GL_TEXTURE0);
         }
         float sun_length = sqrtf(sun_dir[0] * sun_dir[0] + sun_dir[1] * sun_dir[1] + sun_dir[2] * sun_dir[2]);
@@ -1278,12 +1276,10 @@ void lighting_world_end(void) {
         if(!world_shader_active)
                 return;
         shadow_finish_program();
-        if(world_material_maps_bound) {
-                glActiveTexture(GL_TEXTURE2);
-                glBindTexture(GL_TEXTURE_2D, (GLuint)previous_texture2);
+        if(world_normal_map_bound) {
                 glActiveTexture(GL_TEXTURE1);
                 glBindTexture(GL_TEXTURE_2D, (GLuint)previous_texture1);
-                world_material_maps_bound = false;
+                world_normal_map_bound = false;
         }
         glActiveTexture((GLenum)previous_active_texture);
         glx_use_program((GLuint)previous_program);

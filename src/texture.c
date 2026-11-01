@@ -50,9 +50,8 @@ struct texture texture_block;
 struct texture texture_blocks;
 struct texture texture_blocks_custom;
 struct texture texture_blocks_normal;
-struct texture texture_blocks_material;
 int texture_blocks_custom_loaded = 0;
-int texture_blocks_materials_ready = 0;
+int texture_blocks_normal_map_ready = 0;
 
 /* Colour lookup table granularity for custom block textures. Each axis of the
    8-bit RGB colour space is quantised into CUSTOM_LUT_DIM steps; the table maps
@@ -862,12 +861,12 @@ static float texture_luminance(const unsigned char* pixel) {
         return pixel[0] * 0.2126F + pixel[1] * 0.7152F + pixel[2] * 0.0722F;
 }
 
-/* Build material maps for any block atlas, including user-provided atlases.
-   Alpha stores height, RGB in the normal map stores a tangent-space normal;
-   the material map stores roughness/specular/emission. This gives old texture
-   packs a useful modern material response without requiring extra files. */
-bool texture_blocks_prepare_materials(void) {
-        if(texture_blocks_materials_ready)
+/* Build the terrain normal map for any block atlas, including user-provided
+   atlases. RGB stores a tangent-space normal derived from the luminance
+   gradient, alpha stores height. This gives old texture packs a useful modern
+   surface response without requiring extra files. */
+bool texture_blocks_prepare_normal_map(void) {
+        if(texture_blocks_normal_map_ready)
                 return true;
         struct texture* atlas = texture_blocks_atlas();
         if(!atlas || !atlas->pixels || atlas->width < 1 || atlas->height < 1)
@@ -879,9 +878,7 @@ bool texture_blocks_prepare_materials(void) {
                 return false;
         size_t bytes = (size_t)w * (size_t)h * 4U;
         unsigned char* normals = malloc(bytes);
-        unsigned char* materials = malloc(bytes);
         CHECK_ALLOCATION_ERROR(normals)
-        CHECK_ALLOCATION_ERROR(materials)
 
         int tile = (w >= CUSTOM_BLOCK_TILE && h >= CUSTOM_BLOCK_TILE) ? CUSTOM_BLOCK_TILE : max(w, h);
         for(int y = 0; y < h; y++) {
@@ -910,15 +907,10 @@ bool texture_blocks_prepare_materials(void) {
 
                         size_t o = ((size_t)y * w + x) * 4;
                         float luminance = texture_luminance(px) / 255.0F;
-                        float local_contrast = fminf((fabsf(dx) + fabsf(dy)) * 0.5F, 1.0F);
                         normals[o + 0] = (unsigned char)((nx * 0.5F + 0.5F) * 255.0F);
                         normals[o + 1] = (unsigned char)((ny * 0.5F + 0.5F) * 255.0F);
                         normals[o + 2] = (unsigned char)((nz * 0.5F + 0.5F) * 255.0F);
                         normals[o + 3] = (unsigned char)(luminance * 255.0F);
-                        materials[o + 0] = (unsigned char)((0.82F - 0.35F * local_contrast) * 255.0F); /* roughness */
-                        materials[o + 1] = (unsigned char)((0.05F + 0.20F * luminance) * 255.0F);      /* specular */
-                        materials[o + 2] = 0;                                                           /* emission */
-                        materials[o + 3] = 255;
                 }
         }
 
@@ -928,17 +920,15 @@ bool texture_blocks_prepare_materials(void) {
         glActiveTexture(GL_TEXTURE0);
         glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous_texture0);
         texture_create_buffer(&texture_blocks_normal, w, h, normals, 1);
-        texture_create_buffer(&texture_blocks_material, w, h, materials, 1);
         texture_filter(&texture_blocks_normal, TEXTURE_WRAP_CLAMP);
-        texture_filter(&texture_blocks_material, TEXTURE_WRAP_CLAMP);
         glBindTexture(GL_TEXTURE_2D, (GLuint)previous_texture0);
         glActiveTexture((GLenum)previous_active_texture);
-        texture_blocks_materials_ready = 1;
-        log_info("Generated normal/material maps for the %ix%i block atlas", w, h);
+        texture_blocks_normal_map_ready = 1;
+        log_info("Generated normal map for the %ix%i block atlas", w, h);
         return true;
 }
 
-void texture_blocks_release_materials(void) {
+void texture_blocks_release_normal_map(void) {
         free(g_custom_lut);
         g_custom_lut = NULL;
         if(texture_blocks_custom_loaded) {
@@ -946,13 +936,11 @@ void texture_blocks_release_materials(void) {
                 memset(&texture_blocks_custom, 0, sizeof(texture_blocks_custom));
                 texture_blocks_custom_loaded = 0;
         }
-        if(!texture_blocks_materials_ready)
+        if(!texture_blocks_normal_map_ready)
                 return;
         texture_delete(&texture_blocks_normal);
-        texture_delete(&texture_blocks_material);
         memset(&texture_blocks_normal, 0, sizeof(texture_blocks_normal));
-        memset(&texture_blocks_material, 0, sizeof(texture_blocks_material));
-        texture_blocks_materials_ready = 0;
+        texture_blocks_normal_map_ready = 0;
 }
 
 int texture_blocks_custom_tile(uint32_t color) {
@@ -1144,6 +1132,6 @@ void texture_init() {
            atlas. When present they replace the built-in block atlas. */
         texture_load_custom_blocks();
         /* Skip their CPU/GPU cost when lighting is disabled or unavailable. */
-        if(lighting_supported())
-                texture_blocks_prepare_materials();
+        if(lighting_world_supported())
+                texture_blocks_prepare_normal_map();
 }

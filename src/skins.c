@@ -7,6 +7,7 @@
 
 #include "common.h"
 #include "skins.h"
+#include "weapon_skin_scale.h"
 #include "file.h"
 #include "config.h"
 #include "log.h"
@@ -21,6 +22,18 @@ static int entry_compare(const void* a, const void* b) {
 	const struct skin_entry* ea = (const struct skin_entry*)a;
 	const struct skin_entry* eb = (const struct skin_entry*)b;
 	return strcmp(ea->name, eb->name);
+}
+
+/* Apply the same sizing to the menu preview and the in-game skin.  The KV6
+   pivot is already expressed in voxel coordinates; scaling the whole model
+   also scales its offset, preserving the author's intended hand position. */
+static int skin_reload_model(enum skin_category_type category, struct skin_category* cat,
+                             int model, struct kv6_t* target, const char* path) {
+	if(kv6_reload(target, path, cat->models[model].scale) != 0)
+		return -1;
+	if(category == SKIN_RIFLE || category == SKIN_SMG || category == SKIN_SHOTGUN)
+		target->scale = weapon_skin_scale(target->scale, target->ysiz);
+	return 0;
 }
 
 void skins_scan(void) {
@@ -103,7 +116,7 @@ void skins_scan(void) {
 		for(int m = 0; m < cat->model_count; m++) {
 			char mp[256];
 			snprintf(mp, sizeof(mp), "kv6/%s.kv6", cat->models[m].basename);
-			kv6_reload(&cat->entries[0].previews[m], mp, cat->models[m].scale);
+			skin_reload_model((enum skin_category_type)c, cat, m, &cat->entries[0].previews[m], mp);
 		}
 		cat->count = 1;
 
@@ -148,7 +161,7 @@ void skins_scan(void) {
 									char mp[256];
 									snprintf(mp, sizeof(mp), "kv6/%s(%s).kv6",
 										cat->models[m].basename, e->suffix);
-									kv6_reload(&e->previews[m], mp, cat->models[m].scale);
+									skin_reload_model((enum skin_category_type)c, cat, m, &e->previews[m], mp);
 								}
 								cat->count++;
 							}
@@ -184,7 +197,7 @@ int skins_apply(enum skin_category_type category, int entry, int models) {
 				snprintf(path, sizeof(path), "kv6/%s.kv6",
 					cat->models[m].basename);
 
-			if(kv6_reload(cat->models[m].ptr, path, cat->models[m].scale) == 0)
+			if(skin_reload_model(category, cat, m, cat->models[m].ptr, path) == 0)
 				ok = 1;
 		}
 	}

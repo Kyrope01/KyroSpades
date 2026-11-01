@@ -187,6 +187,51 @@ void glowing_blocks_deinit(void) {
         pthread_mutex_unlock(&glowing_lock);
 }
 
+void glowing_blocks_light_color(uint32_t color, float rgb[3], float* peak_out) {
+        float r = (float)(color & 0xFFU) / 255.0F;
+        float g = (float)((color >> 8) & 0xFFU) / 255.0F;
+        float b = (float)((color >> 16) & 0xFFU) / 255.0F;
+        float peak = fmaxf(r, fmaxf(g, b));
+        if(peak < 1.0F / 255.0F) {
+                /* A black pick still has to look like a light; it reads as the
+                   established cool white. */
+                rgb[0] = 0.75F;
+                rgb[1] = 0.85F;
+                rgb[2] = 1.0F;
+                peak = 0.0F;
+        } else {
+                /* Preserve hue but make even dark selected colours visibly
+                   emissive; the caller's intensity keeps brightness variation. */
+                rgb[0] = r / peak;
+                rgb[1] = g / peak;
+                rgb[2] = b / peak;
+        }
+        if(peak_out)
+                *peak_out = peak;
+}
+
+int glowing_blocks_collect(int min_x, int min_y, int min_z, int max_x, int max_y, int max_z,
+                           struct glowing_block_sample* out, int capacity) {
+        if(!out || capacity <= 0)
+                return 0;
+
+        int count = 0;
+        pthread_mutex_lock(&glowing_lock);
+        for(size_t i = 0; i < glowing_count && count < capacity; i++) {
+                const struct glowing_block_record* block = &glowing_records[i];
+                if(block->x < min_x || block->x > max_x || block->y < min_y || block->y > max_y
+                   || block->z < min_z || block->z > max_z)
+                        continue;
+                out[count].x = block->x;
+                out[count].y = block->y;
+                out[count].z = block->z;
+                out[count].color = block->color;
+                count++;
+        }
+        pthread_mutex_unlock(&glowing_lock);
+        return count;
+}
+
 static struct glowing_block_light glowing_make_light(const struct glowing_block_record* block,
                                                        float view_x, float view_z, float* distance_sq) {
         struct glowing_block_light light;
@@ -198,22 +243,8 @@ static struct glowing_block_light glowing_make_light(const struct glowing_block_
         if(map_size_z > 0)
                 light.position[2] += roundf((view_z - light.position[2]) / map_size_z) * map_size_z;
 
-        float r = (float)(block->color & 0xFFU) / 255.0F;
-        float g = (float)((block->color >> 8) & 0xFFU) / 255.0F;
-        float b = (float)((block->color >> 16) & 0xFFU) / 255.0F;
-        float peak = fmaxf(r, fmaxf(g, b));
-        if(peak < 1.0F / 255.0F) {
-                light.color[0] = 0.75F;
-                light.color[1] = 0.85F;
-                light.color[2] = 1.0F;
-                peak = 0.0F;
-        } else {
-                /* Preserve hue but make even dark selected colours visibly
-                   emissive; intensity below still retains brightness variation. */
-                light.color[0] = r / peak;
-                light.color[1] = g / peak;
-                light.color[2] = b / peak;
-        }
+        float peak = 0.0F;
+        glowing_blocks_light_color(block->color, light.color, &peak);
         light.radius = 10.0F + peak * 3.0F;
         light.intensity = 1.15F + peak * 0.65F;
 

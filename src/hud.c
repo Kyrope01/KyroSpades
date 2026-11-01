@@ -46,6 +46,7 @@ extern float tactical_sprint_amount;
 #include "http.h"
 #include "parson.h"
 #include "config.h"
+#include "daytime_weather.h"
 #include "network.h"
 #include "pie_menu.h"
 #include "teamplay.h"
@@ -1987,7 +1988,7 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                 glColor3f(1.0F, 1.0F, 1.0F);
         }
 
-        if(network_map_transfer) {
+        if(network_map_transfer || daytime_weather_awaiting_sky()) {
                 hud_common_render(ctx);
                 glColor3ub(255, 255, 255);
 
@@ -2024,8 +2025,11 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                 glColor3f(1.0F, 1.0F, 1.0F);
                 char str[128];
                 
-                sprintf(str, "Loading Map %iKB/%iKB", compressed_chunk_data_offset / 1024,
-                                compressed_chunk_data_estimate / 1024);
+                if(!network_map_transfer)
+                        sprintf(str, "Waiting for the server's time of day");
+                else
+                        sprintf(str, "Loading Map %iKB/%iKB", compressed_chunk_data_offset / 1024,
+                                        compressed_chunk_data_estimate / 1024);
                 font_render(4.F, texture_loader.height + 16.F + 4.F, 16, str);
 
                 font_select(FONT_FIXEDSYS);
@@ -3815,15 +3819,15 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
                 for(int i = 0; i < list_size(&config_macros); i++) {
                         struct config_macro* m = list_get(&config_macros, i);
                         if(internal == m->key && m->text[0]) {
-                                struct PacketChatMessage msg;
-                                msg.player_id = local_player_id;
-                                msg.chat_type = CHAT_ALL;
-                                strncpy(msg.message, m->text, sizeof(msg.message) - 1);
-                                msg.message[sizeof(msg.message) - 1] = '\0';
-                                for(size_t i = 0; msg.message[i]; i++)
-                                        if(msg.message[i] == '\n') msg.message[i] = ' ';
-                                network_send(PACKET_CHATMESSAGE_ID, &msg,
-                                        sizeof(msg) - sizeof(msg.message) + strlen(m->text) + 1);
+                                /* A macro is one chat line: a newline would
+                                   split it, and network_send_chat() bounds it
+                                   to the message field and marks it UTF-8 when
+                                   it is not plain ASCII. */
+                                char line[256];
+                                snprintf(line, sizeof(line), "%s", m->text);
+                                for(size_t i = 0; line[i]; i++)
+                                        if(line[i] == '\n') line[i] = ' ';
+                                network_send_chat(CHAT_ALL, line);
                                 sound_create(SOUND_LOCAL, &sound_chat, 0.0F, 0.0F, 0.0F);
                                 chat_add(2, 0, m->text);
                                 return;
@@ -4421,15 +4425,10 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
                         if(key == WINDOW_KEY_ESCAPE || key == WINDOW_KEY_ENTER) {
                                 chat_history_pos = 0;
                                 if(key == WINDOW_KEY_ENTER && strlen(chat[0][0]) > 0) {
-                                        struct PacketChatMessage msg;
-                                        msg.player_id = local_player_id;
-                                        msg.chat_type = (chat_input_mode == CHAT_ALL_INPUT) ? CHAT_ALL : CHAT_TEAM;
-                                        strncpy(msg.message, chat[0][0], sizeof(msg.message) - 1);
-                                        msg.message[sizeof(msg.message) - 1] = '\0';
-                                        for(size_t i = 0; msg.message[i]; i++)
-                                                if(msg.message[i] == '\n') msg.message[i] = ' ';
-                                        network_send(PACKET_CHATMESSAGE_ID, &msg,
-                                                                 sizeof(msg) - sizeof(msg.message) + strlen(chat[0][0]) + 1);
+                                        for(size_t i = 0; chat[0][0][i]; i++)
+                                                if(chat[0][0][i] == '\n') chat[0][0][i] = ' ';
+                                        network_send_chat((chat_input_mode == CHAT_ALL_INPUT) ? CHAT_ALL : CHAT_TEAM,
+                                                          chat[0][0]);
                                         sound_create(SOUND_LOCAL, &sound_chat, 0.0F, 0.0F, 0.0F);
                                         chat_add(2, 0, chat[0][0]);
                                 }
@@ -4808,6 +4807,7 @@ struct hud hud_ingame = {
         1,
         0,
         NULL,
+        /* render_2D_overlay */ NULL,
 };
 
 /*         HUD_SERVERLIST START        */
@@ -5059,11 +5059,11 @@ static void pinned_load() {
         if(!file_exists("pinned_servers.txt")) return;
         int sz = file_size("pinned_servers.txt");
         if(sz <= 0) return;
-        char* data = file_load("pinned_servers.txt");
+        unsigned char* data = file_load("pinned_servers.txt");
         if(!data) return;
         pinned_count = 0;
-        char* p = data;
-        char* end = data + sz;
+        char* p = (char*)data;
+        char* end = (char*)data + sz;
         while(p < end && pinned_count < MAX_PINNED) {
                 char* nl = strchr(p, '\n');
                 int len = nl ? (nl - p) : (end - p);
@@ -5642,6 +5642,8 @@ static void hud_serverlist_render(mu_Context* ctx, float scalex, float scaley) {
 
         if(request_news) {
                 switch(http_process(request_news)) {
+                        case HTTP_STATUS_PENDING:
+                                break;
                         case HTTP_STATUS_COMPLETED: {
                                 JSON_Value* js = json_parse_string(request_news->response_data);
                                 JSON_Array* news = json_value_get_array(js);
@@ -5663,7 +5665,10 @@ static void hud_serverlist_render(mu_Context* ctx, float scalex, float scaley) {
                                                 int size = base64_decode(img, strlen(img));
                                                 unsigned char* buffer = NULL;
                                                 unsigned width = 0, height = 0;
-                                                unsigned err = size > 0 ? lodepng_decode32(&buffer, &width, &height, img, (size_t)size) : 1;
+                                                unsigned err = size > 0
+                                                        ? lodepng_decode32(&buffer, &width, &height, (const unsigned char*)img,
+                                                                          (size_t)size)
+                                                        : 1;
                                                 if(!err && width > 0 && height > 0 && width <= INT_MAX && height <= INT_MAX) {
                                                         texture_create_buffer(&current->image, (int)width, (int)height, buffer, 1);
                                                         texture_filter(&current->image, TEXTURE_FILTER_LINEAR);
@@ -5807,6 +5812,7 @@ struct hud hud_serverlist = {
         0,
         0,
         NULL,
+        /* render_2D_overlay */ NULL,
 };
 
 /*         HUD_SETTINGS START        */
@@ -6218,10 +6224,10 @@ static void hud_settings_render(mu_Context* ctx, float scalex, float scaley) {
                         /* set_enabled() turns the option back off when this
                            context cannot compile the lighting program. */
                         settings_tmp.dynamic_lights = settings.dynamic_lights;
-                        if(lighting_supported())
-                                texture_blocks_prepare_materials();
+                        if(lighting_world_supported())
+                                texture_blocks_prepare_normal_map();
                         else
-                                texture_blocks_release_materials();
+                                texture_blocks_release_normal_map();
                 }
                 window_fromsettings();
                 sound_volume(settings.volume / 10.0F);
@@ -6259,6 +6265,7 @@ struct hud hud_settings = {
         0,
         0,
         NULL,
+        /* render_2D_overlay */ NULL,
 };
 
 
@@ -6377,11 +6384,9 @@ static void hud_skins_render(mu_Context* ctx, float scalex, float scaley) {
                         int cols = panel_w / cell_w;
                         if(cols < 1) cols = 1;
 
-                        int widths[MU_SKINS_PREVIEW_COLS_MAX];
-                        if(cols < 1)
-                                cols = 1;
                         if(cols > MU_SKINS_PREVIEW_COLS_MAX)
                                 cols = MU_SKINS_PREVIEW_COLS_MAX;
+                        int widths[MU_SKINS_PREVIEW_COLS_MAX];
                         for(int c = 0; c < cols; c++)
                                 widths[c] = panel_w / cols;
 
@@ -6747,7 +6752,9 @@ static void hud_demolist_touch(void* finger, int action, float x, float y, float
         window_setmouseloc(x, y);
 }
 struct hud hud_demolist = { hud_demolist_init, NULL, hud_demolist_render, hud_demolist_keyboard,
-        NULL, NULL, NULL, hud_demolist_touch, NULL, 0, 0, NULL, };
+        NULL, NULL, NULL, hud_demolist_touch, NULL, 0, 0, NULL,
+        /* render_2D_overlay */ NULL,
+};
 
 static void hud_controls_render(mu_Context* ctx, float scalex, float scaley) {
         hud_common_render(ctx);
@@ -6869,6 +6876,7 @@ struct hud hud_controls = {
         0,
         0,
         NULL,
+        /* render_2D_overlay */ NULL,
 };
 
 /*         HUD_MACROS START        */
@@ -7144,6 +7152,7 @@ struct hud hud_recording = {
         0,
         0,
         NULL,
+        /* render_2D_overlay */ NULL,
 };
 
 struct hud hud_replay = {
@@ -7159,6 +7168,7 @@ struct hud hud_replay = {
         0,
         0,
         NULL,
+        /* render_2D_overlay */ NULL,
 };
 
 
@@ -7176,6 +7186,7 @@ struct hud hud_macros = {
         0,
         0,
         NULL,
+        /* render_2D_overlay */ NULL,
 };
 
 void hud_common_render_for_chatlog(mu_Context* ctx) {

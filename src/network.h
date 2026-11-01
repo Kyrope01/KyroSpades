@@ -44,6 +44,10 @@ const char* network_reason_disconnect(int code);
 
 unsigned int network_ping(void);
 void network_send(int id, void* data, int len);
+/* Sends a Chat Message carrying `text` as UTF-8: the line goes out as it is
+   when it is all printable ASCII and otherwise behind the 0xff prefix of the
+   UTF-8 Chat extension, so a server reads the bytes the player typed. */
+void network_send_chat(unsigned char chat_type, const char* text);
 void network_updateColor(void);
 void network_disconnect(void);
 int network_identifier_split(char* addr, char* ip_out, int* port_out);
@@ -57,6 +61,8 @@ void network_init(void);
 
 void read_PacketMapChunk(void* data, int len);
 void read_PacketChatMessage(void* data, int len);
+void read_PacketDamageMarker(void* data, int len);
+void read_PacketClientKey(void* data, int len);
 void read_PacketBlockAction(void* data, int len);
 void read_PacketBlockLine(void* data, int len);
 void read_PacketStateData(void* data, int len);
@@ -467,6 +473,11 @@ struct PacketProgressBar {
 	float progress;
 };
 
+/* Damage Markers (aosprotocol extension 0x20): the server sends the player who
+   dealt the damage the amount it applied, one packet per hit. The length picks
+   the width of the amount: UByte, LE Int16 (a negative value is a heal) or
+   LE Int32. */
+#define PACKET_DAMAGEMARKER_ID 0x60
 #define PACKET_EXTINFO_ID 60
 struct PacketExtInfo {
 	unsigned char length;
@@ -494,6 +505,8 @@ enum Extension {
 	EXT_256PLAYERS = 0xC0,
 	EXT_MESSAGES = 0xC1,
 	EXT_KICKREASON = 0xC2,
+	EXT_DAMAGE_MARKERS = 0x20,
+	EXT_DAYTIME_WEATHER = 0x33,
 	EXT_PLAYER_OUTFIT = 0x35,
 };
 

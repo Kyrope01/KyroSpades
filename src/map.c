@@ -39,6 +39,7 @@
 #include "tesselator.h"
 #include "utils.h"
 #include "config.h"
+#include "daytime_weather.h"
 #include "lighting.h"
 #include "water.h"
 #include "glowing_blocks.h"
@@ -66,7 +67,8 @@ void fog_color_render(float out[3]) {
         /* Sky brightness already lives in the stored fog colour. Multiplying
            by its derived daylight level here would darken dusk twice. */
         float scale = (settings.filmic_tonemapping ? 0.9F : 1.0F)
-                      * settings.sunlight_intensity * 0.01F;
+                      * settings.sunlight_intensity * 0.01F
+                      * daytime_weather_sunlight();
         out[0] = fog_color[0] * scale;
         out[1] = fog_color[1] * scale;
         out[2] = fog_color[2] * scale;

@@ -249,6 +249,9 @@ void tesselator_draw(struct tesselator* t, int with_color) {
 }
 
 void tesselator_glx(struct tesselator* t, struct glx_displaylist* x) {
+        /* A remesh can add or remove normals after this display list was
+           created. Upload and draw must use the new layout, not the old one. */
+        x->has_normal = t->has_normal != 0;
 #ifdef TESSELATE_QUADS
         switch(t->vertex_type) {
                 case VERTEX_INT:

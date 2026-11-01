@@ -34,7 +34,10 @@
 #include "model.h"
 #include "camera.h"
 
-struct RENDER_OPTIONS settings = {.sunlight_intensity = 100}, settings_tmp;
+/* Selected defaults matter for configs written before a setting existed:
+   an absent key keeps the value here. */
+struct RENDER_OPTIONS settings = {.sunlight_intensity = 100, .client_key_login = 1,
+                                  .killfeed_distance = 1}, settings_tmp;
 struct list config_keys;
 struct list config_macros;
 struct list config_settings;
@@ -333,6 +336,8 @@ void config_save() {
         config_seti("client", "sunlight_intensity", settings.sunlight_intensity);
         config_seti("client", "sky_gradient", settings.sky_gradient);
         config_setf("client", "sky_gradient_intensity", settings.sky_gradient_intensity);
+        config_seti("client", "sky_clouds", settings.sky_clouds);
+        config_setf("client", "sky_cloud_coverage", settings.sky_cloud_coverage);
         config_seti("client", "water_waves", settings.water_waves);
         config_setf("client", "water_wave_intensity", settings.water_wave_intensity);
         config_setf("client", "water_wave_speed", settings.water_wave_speed);
@@ -368,9 +373,6 @@ void config_save() {
         config_setf("client", "chromatic_aberration_strength", settings.chromatic_aberration_strength);
         config_seti("client", "filmic_tonemapping", settings.filmic_tonemapping);
         config_seti("client", "hdr_rendering", settings.hdr_rendering);
-        config_seti("client", "bloom", settings.bloom);
-        config_setf("client", "bloom_strength", settings.bloom_strength);
-        config_setf("client", "bloom_threshold", settings.bloom_threshold);
         config_seti("client", "dynamic_lights", settings.dynamic_lights);
         config_seti("client", "all_player_flashlights", settings.all_player_flashlights);
         config_seti("client", "flash_lights", settings.flash_lights);
@@ -381,6 +383,8 @@ void config_save() {
         config_seti("client", "auto_demo_recording", settings.auto_demo_recording);
         config_seti("client", "blood_marks", settings.blood_marks);
         config_seti("client", "damage_numbers", settings.damage_numbers);
+        config_seti("client", "client_key_login", settings.client_key_login);
+        config_seti("client", "killfeed_distance", settings.killfeed_distance);
         config_seti("client", "damage_feedback", settings.damage_feedback);
         config_seti("client", "player_stats", settings.player_stats);
         config_seti("client", "player_technical_stats", settings.player_technical_stats);
@@ -455,6 +459,21 @@ void config_save() {
                 char last_section[32] = {0};
                 for(int k = 0; k < list_size(&config_file); k++) {
                         struct config_file_entry* e = list_get(&config_file, k);
+                        /* Drop obsolete client settings when rewriting existing configs. */
+                        if(strcmp(e->section, "client") == 0
+                           && (!strcmp(e->name, "height_fog_density")
+                               || !strcmp(e->name, "height_fog_top")
+                               || !strcmp(e->name, "bloom")
+                               || !strcmp(e->name, "bloom_strength")
+                               || !strcmp(e->name, "bloom_threshold")
+                               || !strcmp(e->name, "voxel_reflectivity")
+                               || !strcmp(e->name, "flashlight_beams")
+                               || !strcmp(e->name, "sky_cloud_speed")
+                               || !strcmp(e->name, "volumetric_fog")
+                               || !strcmp(e->name, "volumetric_fog_quality")
+                               || !strcmp(e->name, "volumetric_fog_density")
+                               || !strcmp(e->name, "volumetric_fog_top")))
+                                continue;
                         if(strcmp(e->section, last_section) != 0) {
                                 file_printf(f, "\r\n[%s]\r\n", e->section);
                                 strcpy(last_section, e->section);
@@ -533,6 +552,8 @@ IMPORT_SETTING(settings.camera_movement, camera_movement, atoi(value));
                 IMPORT_SETTING(settings.sunlight_intensity, sunlight_intensity, max(0, min(100, atoi(value))));
                 IMPORT_SETTING(settings.sky_gradient, sky_gradient, atoi(value));
                 IMPORT_SETTING(settings.sky_gradient_intensity, sky_gradient_intensity, fmaxf(0.0F, fminf(1.0F, atof(value))));
+                IMPORT_SETTING(settings.sky_clouds, sky_clouds, atoi(value) ? 1 : 0);
+                IMPORT_SETTING(settings.sky_cloud_coverage, sky_cloud_coverage, fmaxf(0.0F, fminf(1.0F, atof(value))));
                 IMPORT_SETTING(settings.water_waves, water_waves, atoi(value));
                 IMPORT_SETTING(settings.water_wave_intensity, water_wave_intensity,
                                fmaxf(1.0F, fminf(5.0F, atof(value))));
@@ -553,9 +574,6 @@ IMPORT_SETTING(settings.camera_movement, camera_movement, atoi(value));
                                fmaxf(0.0F, fminf(10.0F, atof(value))));
                 IMPORT_SETTING(settings.filmic_tonemapping, filmic_tonemapping, atoi(value));
                 IMPORT_SETTING(settings.hdr_rendering, hdr_rendering, atoi(value) ? 1 : 0);
-                IMPORT_SETTING(settings.bloom, bloom, atoi(value) ? 1 : 0);
-                IMPORT_SETTING(settings.bloom_strength, bloom_strength, fmaxf(0.0F, fminf(2.0F, atof(value))));
-                IMPORT_SETTING(settings.bloom_threshold, bloom_threshold, fmaxf(0.25F, fminf(4.0F, atof(value))));
                 IMPORT_SETTING(settings.dynamic_lights, dynamic_lights, atoi(value) ? 1 : 0);
                 IMPORT_SETTING(settings.all_player_flashlights, all_player_flashlights, atoi(value) ? 1 : 0);
                 IMPORT_SETTING(settings.flash_lights, flash_lights, atoi(value) ? 1 : 0);
@@ -567,6 +585,8 @@ IMPORT_SETTING(settings.camera_movement, camera_movement, atoi(value));
                 IMPORT_SETTING(settings.auto_demo_recording, auto_demo_recording, atoi(value));
                 IMPORT_SETTING(settings.blood_marks, blood_marks, atoi(value));
                 IMPORT_SETTING(settings.damage_numbers, damage_numbers, atoi(value));
+                IMPORT_SETTING(settings.client_key_login, client_key_login, atoi(value) ? 1 : 0);
+                IMPORT_SETTING(settings.killfeed_distance, killfeed_distance, atoi(value) ? 1 : 0);
                 IMPORT_SETTING(settings.damage_feedback, damage_feedback, atoi(value));
                 IMPORT_SETTING(settings.player_stats, player_stats, atoi(value));
                 IMPORT_SETTING(settings.player_technical_stats, player_technical_stats, atoi(value));
@@ -1260,7 +1280,7 @@ void config_reload() {
                                  .type = CONFIG_TYPE_INT,
                                  .min = 0,
                                  .max = 1,
-                                 .help = "Blended sky gradient instead of flat color",
+                                 .help = "Camera-aware sky gradient instead of flat color",
                                  .name = "Sky gradient",
                                  .category = "Visual Effects",
                                  .subcategory = "Sky",
@@ -1275,6 +1295,20 @@ void config_reload() {
                                  .name = "Sky gradient intensity",
                                  .category = "Visual Effects",
                                  .subcategory = "Sky",
+                         });
+        list_add(&config_settings,
+                         &(struct config_setting) {
+                                 .value = &settings_tmp.sky_clouds,
+                                 .type = CONFIG_TYPE_INT, .min = 0, .max = 1,
+                                 .help = "Procedural visual clouds; requires shader support",
+                                 .name = "Sky clouds", .category = "Visual Effects", .subcategory = "Sky",
+                         });
+        list_add(&config_settings,
+                         &(struct config_setting) {
+                                 .value = &settings_tmp.sky_cloud_coverage,
+                                 .type = CONFIG_TYPE_FLOAT, .min = 0, .max = 1,
+                                 .help = "Amount of cloud cover (zero removes clouds)",
+                                 .name = "Cloud coverage", .category = "Visual Effects", .subcategory = "Sky",
                          });
         list_add(&config_settings,
                          &(struct config_setting) {
@@ -1408,39 +1442,6 @@ void config_reload() {
                                  .max = 1,
                                  .help = "Floating-point Core scene rendering with a safe fallback",
                                  .name = "HDR rendering",
-                                 .category = "Visual Effects",
-                                 .subcategory = "Post Processing",
-                         });
-        list_add(&config_settings,
-                         &(struct config_setting) {
-                                 .value = &settings_tmp.bloom,
-                                 .type = CONFIG_TYPE_INT,
-                                 .min = 0,
-                                 .max = 1,
-                                 .help = "Soft glow around highlights (multipass on OpenGL Core)",
-                                 .name = "Bloom",
-                                 .category = "Visual Effects",
-                                 .subcategory = "Post Processing",
-                         });
-        list_add(&config_settings,
-                         &(struct config_setting) {
-                                 .value = &settings_tmp.bloom_strength,
-                                 .type = CONFIG_TYPE_FLOAT,
-                                 .min = 0,
-                                 .max = 2,
-                                 .help = "Brightness of the bloom glow",
-                                 .name = "Bloom strength",
-                                 .category = "Visual Effects",
-                                 .subcategory = "Post Processing",
-                         });
-        list_add(&config_settings,
-                         &(struct config_setting) {
-                                 .value = &settings_tmp.bloom_threshold,
-                                 .type = CONFIG_TYPE_FLOAT,
-                                 .min = 0.25F,
-                                 .max = 4.0F,
-                                 .help = "Minimum scene brightness that produces bloom",
-                                 .name = "Bloom threshold",
                                  .category = "Visual Effects",
                                  .subcategory = "Post Processing",
                          });
@@ -1990,6 +1991,28 @@ void config_reload() {
                                  .max = 1,
                                  .help = "Shows floating damage numbers when you hit a player",
                                  .name = "Damage Numbers",
+                         });
+
+        list_add(&config_settings,
+                         &(struct config_setting) {
+                                 .value = &settings_tmp.client_key_login,
+                                 .type = CONFIG_TYPE_INT,
+                                 .min = 0,
+                                 .max = 1,
+                                 .help = "Proves your identity to servers that ask (client key); "
+                                         "one key per server, stored in client_key.dat",
+                                 .name = "Client Key Login",
+                         });
+
+        list_add(&config_settings,
+                         &(struct config_setting) {
+                                 .value = &settings_tmp.killfeed_distance,
+                                 .type = CONFIG_TYPE_INT,
+                                 .min = 0,
+                                 .max = 1,
+                                 .help = "Shows how far each kill was made from, in blocks",
+                                 .name = "Killfeed distance",
+                                 .category = "HUD/UI Settings",
                          });
 
         list_add(&config_settings,

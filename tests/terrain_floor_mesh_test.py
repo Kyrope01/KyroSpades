@@ -169,6 +169,8 @@ HARNESS = r"""
 #include "glowing_blocks.h"
 
 struct RENDER_OPTIONS settings;
+/* Daytime and Weather is not what this harness tests: keep the sun at full. */
+float daytime_weather_sunlight(void) { return 1.0F; }
 float camera_x = 8.0F, camera_y = 10.0F, camera_z = 8.0F;
 int glx_version = 1;
 int glx_fog = 1;
@@ -326,8 +328,11 @@ void matrix_vector(mat4 m, vec4 v) { (void)m; (void)v; }
 void matrix_upload(void) {}
 
 bool lighting_supported(void) { return false; }
-bool lighting_world_supported(void) { return false; }
-float lighting_sunlight_scale(void) { return 1.0F; }
+/* Scenario 5 drives both terrain paths: shader-lit terrain writes the emissive
+   marker alpha, the baked path has to look right without it. */
+static int world_lighting_supported = 0;
+bool lighting_world_supported(void) { return world_lighting_supported != 0; }
+float lighting_sunlight_scale(void) { return 0.5F; }
 void lighting_world_update_matrices(void) {}
 void lighting_apply_program(unsigned int p) { (void)p; }
 
@@ -340,9 +345,9 @@ struct texture* texture_blocks_atlas(void) { return &texture_minimap; }
 int texture_blocks_custom_tile(uint32_t col) { (void)col; return 0; }
 int texture_blocks_custom_grid(void) { return 4; }
 
-void glowing_blocks_clear(void) {}
-void glowing_blocks_map_changed(int x, int y, int z, unsigned int color) {
-    (void)x; (void)y; (void)z; (void)color;
+void lighting_submit_point(float x, float y, float z, float red, float green, float blue,
+                           float radius, float intensity) {
+    (void)x; (void)y; (void)z; (void)red; (void)green; (void)blue; (void)radius; (void)intensity;
 }
 void particle_create_block(unsigned int c, float x, float y, float z,
                            float v, float vy, int count, float min_s, float max_s) {
@@ -444,6 +449,37 @@ static uint32_t run_mesher(int mode, struct libvxl_chunk_copy* copy,
     uint32_t q = tess.quad_count;
     tesselator_free(&tess);
     return q;
+}
+
+/* Same mesher dispatch as run_mesher(), but keeps the emitted vertex colours
+   so a scenario can inspect how a block was painted. */
+static size_t run_mesher_colors(int mode, struct libvxl_chunk_copy* copy, uint32_t* colors_out,
+                                int16_t* verts_out, size_t capacity) {
+    struct tesselator tess;
+    int max_h = 0;
+    tesselator_create(&tess, VERTEX_INT, 0, mode >= 3 ? 1 : 0);
+    texture_blocks_custom_loaded = (mode == 4) ? 1 : 0;
+    if (mode == 0)
+        chunk_generate_greedy(copy, 0, 0, &tess, &max_h);
+    else if (mode == 1)
+        chunk_generate_naive(copy, &tess, &max_h, 0);
+    else if (mode == 2)
+        chunk_generate_naive(copy, &tess, &max_h, 1);
+    else
+        chunk_generate_textured(copy, &tess, &max_h);
+    texture_blocks_custom_loaded = 0;
+
+#ifdef TESSELATE_TRIANGLES
+    size_t vcount = (size_t)tess.quad_count * 6;
+#else
+    size_t vcount = (size_t)tess.quad_count * 4;
+#endif
+    if (vcount > capacity)
+        vcount = capacity;
+    memcpy(colors_out, tess.colors, vcount * sizeof(uint32_t));
+    memcpy(verts_out, tess.vertices, vcount * 3 * sizeof(int16_t));
+    tesselator_free(&tess);
+    return vcount;
 }
 
 int main(void) {
@@ -607,6 +643,74 @@ int main(void) {
     map_damaged_voxels_render();
     assert(immediate_draw_quads == two_entry_quads);
 
+    /* 6. A glowing block is the light itself: every mesher paints its faces at
+          the colour it emits, flat (no AO, no face shade), and marks them with
+          the alpha the terrain shaders skip the sun/point-light multiply for. */
+    glowing_blocks_set_placement_enabled(true);
+    /* Deliberately asymmetric (R=0x40, G=0x80, B=0xFF in the picker's
+       R | G << 8 | B << 16 packing) so a swapped channel cannot pass. */
+    map_set(5, 1, 5, 0x00FF8040U);
+    glowing_blocks_note_local_build(5, 1, 5, 0x00FF8040U);
+    glowing_blocks_confirm_local_build(5, 1, 5);
+    glowing_blocks_prepare_frame(0.0F, 2.0F, 0.0F); /* keep the light off-screen cheap */
+
+    for (int path = 0; path < 2; path++) {
+        world_lighting_supported = path == 0 ? 1 : 0;
+        uint32_t marker_alpha = path == 0 ? GLOWING_BLOCK_VERTEX_ALPHA : 255;
+
+        map_copy_blocks(&copy, 0, 0);
+        for (int mode = 0; mode <= 4; mode++) {
+            /* Custom textures are tinted by a neutral colour so the atlas keeps
+               its own hues; every other path paints the picked colour. */
+            uint32_t expected = mode == 4 ? rgba(255, 255, 255, marker_alpha)
+                                          : rgba(64, 128, 255, marker_alpha);
+            uint32_t colors[8192];
+            int16_t verts[8192 * 3];
+            size_t count = run_mesher_colors(mode, &copy, colors, verts, 8192);
+            assert(count > 0);
+
+            size_t marked = 0;
+            for (size_t i = 0; i < count; i++) {
+                if (path == 0 ? alpha(colors[i]) == GLOWING_BLOCK_VERTEX_ALPHA
+                              : colors[i] == expected) {
+                    /* Flat: a glowing face carries no per-corner AO or shade. */
+                    assert(colors[i] == expected);
+                    marked++;
+                }
+            }
+            /* The block sits on the y = 0 floor, so at least its top and sides
+               are exposed; every one of those vertices must be emissive. */
+            assert(marked >= 4);
+        }
+        libvxl_copy_chunk_destroy(&copy);
+    }
+    world_lighting_supported = 0;
+
+    /* A greedy run would otherwise merge a neighbour of the same colour into the
+       glowing block's quad and paint rows of ordinary terrain as a light. */
+    map_set(6, 1, 5, 0x00FF8040U);
+    map_copy_blocks(&copy, 0, 0);
+    {
+        uint32_t colors[8192];
+        int16_t verts[8192 * 3];
+        size_t count = run_mesher_colors(0, &copy, colors, verts, 8192);
+        int16_t min_x = 32767, max_x = -32768;
+        size_t marked = 0;
+        for (size_t i = 0; i < count; i++) {
+            if (colors[i] != rgba(64, 128, 255, 255))
+                continue;
+            marked++;
+            if (verts[i * 3] < min_x) min_x = verts[i * 3];
+            if (verts[i * 3] > max_x) max_x = verts[i * 3];
+        }
+        assert(marked > 0);
+        /* The glowing block occupies x = 5..6. A merged quad would reach x = 7. */
+        assert(min_x == 5 && max_x == 6);
+    }
+    libvxl_copy_chunk_destroy(&copy);
+    map_set(6, 1, 5, 0xFFFFFFFFU);
+    map_set(5, 1, 5, 0xFFFFFFFFU);
+
     water_deinit();
     map_deinit();
     return 0;
@@ -615,6 +719,7 @@ int main(void) {
 
 COMMON_SRCS = [
     str(root / "src/chunk.c"),
+    str(root / "src/glowing_blocks.c"),
     str(root / "src/water.c"),
     str(root / "src/map.c"),
     str(root / "src/tesselator.c"),

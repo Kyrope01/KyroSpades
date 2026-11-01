@@ -43,6 +43,10 @@ for coeff in ("* 0.08", "* 0.06", "* 0.04"):
 # 3. Waves must not force a per-frame CPU mesh rebuild on the GPU path; only
 #    CPU-animated cases (no program, or tiled mode) may do that.
 assert "bool cpu_wave_animation = waves_enabled" in water_src
+# Fresh installs default to vertex waves; existing user choices remain configurable.
+assert 'settings.water_wave_mode = 0;' in (root / 'src/main.c').read_text()
+assert 'water_wave_mode               = 0' in (root / 'resources/config.ini').read_text()
+assert 'IMPORT_SETTING(settings.water_wave_mode, water_wave_mode, atoi(value))' in (root / 'src/config.c').read_text()
 assert "!water_program || settings.water_wave_mode == 1" in water_src
 assert "wr.mesh_had_wave_mode = settings.water_wave_mode;" in water_src
 
@@ -182,6 +186,8 @@ HARNESS = r"""
 #include "glowing_blocks.h"
 
 struct RENDER_OPTIONS settings;
+/* Daytime and Weather is not what this harness tests: keep the sun at full. */
+float daytime_weather_sunlight(void) { return 1.0F; }
 float camera_x = 8.0F, camera_y = 10.0F, camera_z = 8.0F;
 int glx_version = 1;
 int glx_fog = 1;
@@ -362,6 +368,19 @@ int texture_blocks_custom_grid(void) { return 4; }
 void glowing_blocks_clear(void) {}
 void glowing_blocks_map_changed(int x, int y, int z, unsigned int color) {
     (void)x; (void)y; (void)z; (void)color;
+}
+/* Glowing blocks are meshed by chunk.c but are not what this harness tests. */
+int glowing_blocks_collect(int min_x, int min_y, int min_z, int max_x, int max_y, int max_z,
+                           struct glowing_block_sample* out, int capacity) {
+    (void)min_x; (void)min_y; (void)min_z; (void)max_x; (void)max_y; (void)max_z;
+    (void)out; (void)capacity;
+    return 0;
+}
+void glowing_blocks_light_color(uint32_t color, float rgb[3], float* peak) {
+    (void)color;
+    rgb[0] = rgb[1] = rgb[2] = 1.0F;
+    if (peak)
+        *peak = 1.0F;
 }
 void particle_create_block(unsigned int c, float x, float y, float z,
                            float v, float vy, int count, float min_s, float max_s) {
