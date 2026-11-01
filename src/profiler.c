@@ -19,7 +19,6 @@
 
 #include <stdio.h>
 #include <string.h>
-#include <stdint.h>
 #include <stdbool.h>
 
 #if defined(_WIN32)
@@ -79,7 +78,8 @@ static double stage_start[PROF_STAGE_COUNT];
 static int stage_depth[PROF_STAGE_COUNT];
 static double stage_frame_ms[PROF_STAGE_COUNT];
 
-/* Ring buffer of completed frames. */
+/* Ring buffer of completed frames, plus the running sums of the samples it
+   currently holds, so the overlay never has to walk it. */
 static float sample_frame_ms[PROF_SAMPLES];
 static float sample_stage_ms[PROF_STAGE_COUNT][PROF_SAMPLES];
 static int sample_head = 0;   /* next write position */
@@ -87,13 +87,10 @@ static int sample_count = 0;  /* valid samples, <= PROF_SAMPLES */
 
 static double sum_frame_ms = 0.0;
 static double sum_stage_ms[PROF_STAGE_COUNT];
-static double max_frame_ms = 0.0;
-static double max_stage_ms[PROF_STAGE_COUNT];
 
 static FILE* csv = NULL;
 static unsigned long csv_frames = 0;
 static double csv_last_flush = 0.0;
-static char csv_path_copy[512];
 
 /* ── CSV ───────────────────────────────────────────────────────────────── */
 
@@ -130,12 +127,10 @@ void prof_init(bool enabled, const char* path) {
         memset(sample_frame_ms, 0, sizeof(sample_frame_ms));
         memset(sample_stage_ms, 0, sizeof(sample_stage_ms));
         memset(sum_stage_ms, 0, sizeof(sum_stage_ms));
-        memset(max_stage_ms, 0, sizeof(max_stage_ms));
         memset(stage_depth, 0, sizeof(stage_depth));
         sample_head = 0;
         sample_count = 0;
         sum_frame_ms = 0.0;
-        max_frame_ms = 0.0;
         prof_on = enabled;
 
         if(csv) {
@@ -144,14 +139,12 @@ void prof_init(bool enabled, const char* path) {
                 csv = NULL;
         }
 
-        csv_path_copy[0] = '\0';
         if(path && path[0]) {
                 csv = fopen(path, "w");
                 if(csv) {
                         /* 64 KiB buffer: profiling must not add a syscall per
                            frame to the very frames it is measuring. */
                         setvbuf(csv, NULL, _IOFBF, 64 * 1024);
-                        snprintf(csv_path_copy, sizeof(csv_path_copy), "%s", path);
                         csv_write_header();
                         csv_frames = 0;
                         csv_last_flush = clock_now();
@@ -166,16 +159,11 @@ void prof_shutdown(void) {
                 fclose(csv);
                 csv = NULL;
         }
-        csv_path_copy[0] = '\0';
         prof_on = false;
 }
 
 bool prof_enabled(void) {
         return prof_on;
-}
-
-void prof_set_enabled(bool enabled) {
-        prof_on = enabled;
 }
 
 void prof_toggle(void) {
@@ -233,30 +221,10 @@ void prof_frame_end(void) {
         for(int s = 1; s < PROF_STAGE_COUNT; s++)
                 sum_stage_ms[s] += stage_frame_ms[s];
 
-        /* Unaccounted stage time (main loop glue, input, recorder, pacing). */
-        double accounted = 0.0;
-        for(int s = 1; s < PROF_STAGE_COUNT; s++)
-                accounted += stage_frame_ms[s];
-        sample_stage_ms[0][sample_head] = (float)(frame_ms - accounted);
-
         if(sample_count < PROF_SAMPLES)
                 sample_count++;
 
         sample_head = (sample_head + 1) % PROF_SAMPLES;
-
-        /* Max is recomputed lazily from the window below; track a cheap
-           running max that is reset when the ring wraps. */
-        if(sample_head == 0 || sample_count == 1) {
-                max_frame_ms = frame_ms;
-                for(int s = 1; s < PROF_STAGE_COUNT; s++)
-                        max_stage_ms[s] = stage_frame_ms[s];
-        } else {
-                if(frame_ms > max_frame_ms)
-                        max_frame_ms = frame_ms;
-                for(int s = 1; s < PROF_STAGE_COUNT; s++)
-                        if(stage_frame_ms[s] > max_stage_ms[s])
-                                max_stage_ms[s] = stage_frame_ms[s];
-        }
 
         csv_write_row(frame_ms);
 }
@@ -267,20 +235,10 @@ double prof_frame_ms_avg(void) {
         return sample_count ? sum_frame_ms / (double)sample_count : 0.0;
 }
 
-double prof_frame_ms_max(void) {
-        return max_frame_ms;
-}
-
 double prof_stage_ms_avg(enum prof_stage stage) {
         if(stage <= PROF_FRAME || stage >= PROF_STAGE_COUNT || !sample_count)
                 return 0.0;
         return sum_stage_ms[stage] / (double)sample_count;
-}
-
-double prof_stage_ms_max(enum prof_stage stage) {
-        if(stage <= PROF_FRAME || stage >= PROF_STAGE_COUNT)
-                return 0.0;
-        return max_stage_ms[stage];
 }
 
 double prof_stage_pct(enum prof_stage stage) {
@@ -300,11 +258,7 @@ int prof_stage_count(void) {
         return PROF_STAGE_COUNT;
 }
 
-int prof_sample_count(void) {
-        return sample_count;
-}
-
-void prof_format_ms(char* out, unsigned long out_size, double ms) {
+void prof_format_ms(char* out, size_t out_size, double ms) {
         if(!out || out_size == 0)
                 return;
 

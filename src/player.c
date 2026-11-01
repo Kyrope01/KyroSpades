@@ -22,6 +22,7 @@
 #include <string.h>
 #include <ctype.h>
 #include "demo.h"
+#include <float.h>
 #include <math.h>
 #include <limits.h>
 
@@ -79,8 +80,12 @@ bool player_team_is_zombie(unsigned char team) {
    separately from Player so Set Outfit can arrive before Create/Existing
    Player, as the extension requires. 255 means "use the current team outfit". */
 static unsigned char player_outfit_overrides[PLAYERS_MAX];
+/* The team whose colour an override wears, from the Set Outfit Colour byte:
+   0, 1, or 255 for the player's own. */
+static unsigned char player_outfit_colours[PLAYERS_MAX];
 static unsigned char player_team_outfits[256];
 static bool player_outfit_extension_negotiated;
+static bool player_outfit_colours_initialised;
 static bool player_team_outfits_received;
 
 static unsigned char player_outfit_resolve(unsigned char player_id, unsigned char team) {
@@ -96,7 +101,22 @@ static unsigned char player_outfit_resolve(unsigned char player_id, unsigned cha
 	return outfit == 1 ? 1 : 0;
 }
 
+/* A static array starts at zero, which here means "team 1's colour"; every id
+   starts out wearing its own. */
+static void player_outfit_colours_init(void) {
+	if(player_outfit_colours_initialised)
+		return;
+	player_outfit_colours_initialised = true;
+	memset(player_outfit_overrides, 255, sizeof(player_outfit_overrides));
+	memset(player_outfit_colours, 255, sizeof(player_outfit_colours));
+}
+
 void player_outfit_ext_set_negotiated(bool supported) {
+	player_outfit_colours_init();
+	/* Negotiation happens once per connection, so this is where a previous
+	   server's per-player outfits and colours are forgotten. */
+	memset(player_outfit_overrides, 255, sizeof(player_outfit_overrides));
+	memset(player_outfit_colours, 255, sizeof(player_outfit_colours));
 	player_outfit_extension_negotiated = supported;
 	if(!supported) {
 		player_team_outfits_received = false;
@@ -105,22 +125,33 @@ void player_outfit_ext_set_negotiated(bool supported) {
 }
 
 void player_outfit_ext_reset_map(void) {
+	player_outfit_colours_init();
 	/* Team Outfits lasts for the connection; Map Start only clears per-player
-	   outfit overrides, as specified by the draft extension. */
+	   outfit overrides, as specified by the extension. */
 	memset(player_outfit_overrides, 255, sizeof(player_outfit_overrides));
+	memset(player_outfit_colours, 255, sizeof(player_outfit_colours));
 	for(int i = 0; i < PLAYERS_MAX; i++)
 		players[i].outfit = 0;
 }
 
 void player_outfit_ext_reset_player(unsigned char player_id) {
 	player_outfit_overrides[player_id] = 255;
+	player_outfit_colours[player_id] = 255;
 	players[player_id].outfit = 0;
 }
 
-void player_outfit_ext_set_player(unsigned char player_id, unsigned char outfit) {
+void player_outfit_ext_set_player(unsigned char player_id, unsigned char outfit, unsigned char colour) {
 	player_outfit_overrides[player_id] = outfit == 255 ? 255 : (outfit == 1 ? 1 : 0);
+	/* Only 0, 1 and 255 name a colour; anything else leaves the player in
+	   their own team's, as an absent Colour would. */
+	player_outfit_colours[player_id] = colour == 0 || colour == 1 ? colour : 255;
 	if(players[player_id].connected)
 		players[player_id].outfit = player_outfit_resolve(player_id, players[player_id].team);
+}
+
+unsigned char player_outfit_ext_colour(unsigned char player_id) {
+	unsigned char colour = player_outfit_colours[player_id];
+	return colour == 0 || colour == 1 ? colour : players[player_id].team;
 }
 
 void player_outfit_ext_set_teams(const unsigned char* entries, int length) {
@@ -130,6 +161,8 @@ void player_outfit_ext_set_teams(const unsigned char* entries, int length) {
 	for(int i = 0; i < length; i += 2) {
 		unsigned char team = entries[i];
 		unsigned char outfit = entries[i + 1];
+		if(team > 1) /* only teams 0 and 1 exist; the rest are ignored */
+			continue;
 		player_team_outfits[team] = outfit == 1 ? 1 : 0;
 	}
 	player_team_outfits_received = true;
@@ -141,6 +174,36 @@ void player_outfit_ext_apply_player(unsigned char player_id) {
 
 bool player_uses_undead_outfit(const struct Player* p) {
 	return p && p->outfit == 1;
+}
+
+/* The outfit is drawn in the colour the server named where the normal uniform
+   would be; the held tool and weapon keep the player's own team colour.
+
+   The HUD's team-selector previews are not player slots: hud.c renders them with
+   PLAYERS_MAX as the id, so they must take the model's own team. Indexing
+   `players` with that id reads past the array, which painted both previews in
+   whichever team colour happened to sit in the adjacent memory. */
+static unsigned char player_model_team(const struct Player* p, int id) {
+	if(id < 0 || id >= PLAYERS_MAX)
+		return p->team;
+	if(!player_outfit_extension_negotiated)
+		return players[id].team;
+	return player_outfit_ext_colour((unsigned char)id);
+}
+
+/* Light the model about to be drawn.
+
+   A HUD preview is not a world object: hud.c builds it on the stack with its
+   position at the origin, so kv6_calclight() sampled the map's corner and shaded
+   both team-selector models with that corner's sun occlusion - they came out as
+   the same near-black silhouette, which is what made their team colours
+   unreadable. (-1, -1, -1) is the engine's "full sun, no map position" form,
+   the same one the Skins preview uses. */
+static void player_model_light(const struct Player* p, int id) {
+	if(id < 0 || id >= PLAYERS_MAX)
+		kv6_calclight(-1, -1, -1);
+	else
+		kv6_calclight(p->pos.x, p->pos.y, p->pos.z);
 }
 
 static float os_sprint_state=0, os_sprint_smooth=0, os_raise_state=1, os_last_time=0, os_aim_state=0, os_aim_smooth=0;
@@ -1526,6 +1589,9 @@ static void player_render_flashlight_tip(int id) {
 	float pos[3];
 	if(!lighting_remote_flashlight_position(id, pos))
 		return;
+	/* A flickering light's lamp goes dark with its beam. */
+	if(flashlight_ext_dark(id, window_time()))
+		return;
 
 	float dx = camera_x - pos[0], dz = camera_z - pos[2];
 	float length = sqrtf(dx * dx + dz * dz);
@@ -1590,7 +1656,7 @@ static void player_render_flashlight_tip(int id) {
 }
 
 void player_render(struct Player* p, int id) {
-	kv6_calclight(p->pos.x, p->pos.y, p->pos.z);
+	player_model_light(p, id);
 
 	/* Spectator ESP is drawn as TigerSpades-style colored outline boxes in
 	   player_render_all(); keep the normal model renderer depth-correct. */
@@ -1646,7 +1712,7 @@ void player_render(struct Player* p, int id) {
 				glDisable(GL_DEPTH_TEST);
 			}
 			kv6_render(player_uses_undead_outfit(p) && model_zombie_dead.voxels
-				? &model_zombie_dead : &model_playerdead, p->team);
+				? &model_zombie_dead : &model_playerdead, player_model_team(p, id));
 			if(esp_active) {
 				glEnable(GL_DEPTH_TEST);
 			}
@@ -1727,7 +1793,7 @@ void player_render(struct Player* p, int id) {
 		matrix_rotate(matrix_model, 90.0F, 0.0F, 1.0F, 0.0F);
 		matrix_upload();
 		kv6_render(zombie_team && model_zombie_head.voxels
-			? &model_zombie_head : &model_playerhead, p->team);
+			? &model_zombie_head : &model_playerhead, player_model_team(p, id));
 		matrix_pop(matrix_model);
 
 		matrix_push(matrix_model);
@@ -1735,7 +1801,7 @@ void player_render(struct Player* p, int id) {
 		matrix_pointAt(matrix_model, ox, 0.0F, oz);
 		matrix_rotate(matrix_model, 90.0F, 0.0F, 1.0F, 0.0F);
 		matrix_upload();
-		kv6_render(torso, p->team);
+		kv6_render(torso, player_model_team(p, id));
 		matrix_pop(matrix_model);
 
 		if(gamestate.gamemode_type == GAMEMODE_CTF
@@ -1775,7 +1841,7 @@ void player_render(struct Player* p, int id) {
 		matrix_rotate(matrix_model, 45.0F * foot_function(p) * a, 1.0F, 0.0F, 0.0F);
 		matrix_rotate(matrix_model, 45.0F * foot_function(p) * b, 0.0F, 0.0F, 1.0F);
 		matrix_upload();
-		kv6_render(leg_left, p->team);
+		kv6_render(leg_left, player_model_team(p, id));
 		matrix_pop(matrix_model);
 
 		matrix_push(matrix_model);
@@ -1788,7 +1854,7 @@ void player_render(struct Player* p, int id) {
 		matrix_rotate(matrix_model, -45.0F * foot_function(p) * a, 1.0F, 0.0F, 0.0F);
 		matrix_rotate(matrix_model, -45.0F * foot_function(p) * b, 0.0F, 0.0F, 1.0F);
 		matrix_upload();
-		kv6_render(leg_right, p->team);
+		kv6_render(leg_right, player_model_team(p, id));
 		matrix_pop(matrix_model);
 		if(esp_active) {
 			glEnable(GL_DEPTH_TEST);
@@ -1966,7 +2032,7 @@ void player_render(struct Player* p, int id) {
 		}
 		matrix_upload();
 		kv6_render(zombie_team && model_zombie_arms.voxels
-			? &model_zombie_arms : &model_playerarms, p->team);
+			? &model_zombie_arms : &model_playerarms, player_model_team(p, id));
 		if(esp_active) {
 			glEnable(GL_DEPTH_TEST);
 		}

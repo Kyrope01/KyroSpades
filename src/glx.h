@@ -163,8 +163,16 @@ void glx_batch2d_flush(void);
  * begin()/end() pair the arrays stay enabled and only the per-mesh buffer and
  * pointers are rebound, which removes ~8 driver calls per visible chunk.
  *
- * Any other draw entry point invalidates the shadow, so a scope can only be
- * held across calls that are known not to touch client state.
+ * Outside a scope nothing is assumed: every draw enables what the mesh needs
+ * and releases it again, which is the behaviour the draw path always had.
+ * begin() therefore only ever removes calls, never adds them.
+ *
+ * Anything that touches client state itself (compiled display lists, the 2D
+ * batcher's fixed-function path, font and texture uploads) calls
+ * glx_client_state_invalidate(). That ends the trust window for the rest of
+ * the current scope, so the remaining draws fall back to the per-draw path
+ * instead of drawing with arrays the shadow got wrong. end() releases
+ * whatever is still enabled.
  */
 void glx_client_state_begin(void);
 void glx_client_state_end(void);

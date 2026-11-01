@@ -40,6 +40,7 @@
 #include "water.h"
 #include "lighting.h"
 #include "shadow.h"
+#include "glowing_blocks.h"
 /* pthread_spinlock_t is Linux-only. macOS and Android's Bionic lack it.
    Use a mutex on those platforms; the spinlock is a micro-optimisation
    that is only relevant on multi-core Linux anyway. */
@@ -345,10 +346,10 @@ void* chunk_generate(void* data) {
                 result.chunk = work.chunk;
                 result.gen = work.chunk->gen;
                 result.minimap_data = malloc(CHUNK_SIZE * CHUNK_SIZE * sizeof(uint32_t));
-                /* Keep flat face normals in terrain VBOs while forward lighting
+                /* Keep flat face normals in terrain VBOs while the terrain shader
                    is active. They are generated automatically by the tesselator
                    and dropped again when the runtime setting is disabled. */
-                tesselator_create(&result.tesselator, VERTEX_INT, lighting_supported(), settings.textured_blocks);
+                tesselator_create(&result.tesselator, VERTEX_INT, lighting_world_supported(), settings.textured_blocks);
 
                 struct libvxl_chunk_copy blocks;
                 map_copy_blocks(&blocks, work.chunk_x * CHUNK_SIZE, work.chunk_y * CHUNK_SIZE);
@@ -392,6 +393,59 @@ void* chunk_generate(void* data) {
         return NULL;
 }
 
+/* ── Glowing blocks ────────────────────────────────────────────────────────
+   A block placed with the colour picker's glow toggle is the light itself, so
+   its own faces are meshed at the colour it emits: no sun shade, no AO, and a
+   vertex alpha the terrain shaders read as "this surface is the light". The
+   registry sits behind a mutex and meshing runs on a worker thread, so each
+   chunk snapshots it once instead of locking per voxel. */
+
+#define CHUNK_GLOWING_MAX 64
+
+static int chunk_glow_snapshot(const struct libvxl_chunk_copy* blocks, struct glowing_block_sample* out) {
+        if(!blocks)
+                return 0;
+        return glowing_blocks_collect((int)blocks->grid_x, 0, (int)blocks->grid_y,
+                                      (int)blocks->grid_x + CHUNK_SIZE - 1, (int)blocks->depth - 1,
+                                      (int)blocks->grid_y + CHUNK_SIZE - 1, out, CHUNK_GLOWING_MAX);
+}
+
+static const struct glowing_block_sample* chunk_glow_at(const struct glowing_block_sample* list, int count,
+                                                       int x, int y, int z) {
+        for(int i = 0; i < count; i++)
+                if(list[i].x == x && list[i].y == y && list[i].z == z)
+                        return &list[i];
+        return NULL;
+}
+
+/* The vertex colour of an emissive face. `white` keeps a textured face neutral so
+   the atlas shows its own colours at full brightness. The marker is only written
+   where a shader can act on it; the fixed-function path bakes vertex light and
+   would only see a stray alpha. */
+static uint32_t chunk_glow_vertex_color(const struct glowing_block_sample* block, bool white) {
+        uint32_t vertex_alpha = lighting_world_supported() ? GLOWING_BLOCK_VERTEX_ALPHA : 255U;
+        if(white)
+                return rgba(255, 255, 255, vertex_alpha);
+
+        float rgb[3];
+        glowing_blocks_light_color(block->color, rgb, NULL);
+        return rgba((int)(rgb[0] * 255.0F + 0.5F), (int)(rgb[1] * 255.0F + 0.5F),
+                    (int)(rgb[2] * 255.0F + 0.5F), vertex_alpha);
+}
+
+/* Greedy merging keys on colour alone, so a glowing block would otherwise merge
+   with a neighbour of the same colour and repaint rows of ordinary terrain --
+   and a neighbour would merge into the glowing block's quad. Neither side of a
+   merge may be glowing: `seed` is the voxel whose quad is being built. */
+static bool chunk_glow_merge_matches(struct libvxl_chunk_copy* blocks, const struct glowing_block_sample* list,
+                                     int count, int seed_x, int seed_y, int seed_z,
+                                     int x, int y, int z, uint32_t color) {
+        if(count > 0
+           && (chunk_glow_at(list, count, seed_x, seed_y, seed_z) || chunk_glow_at(list, count, x, y, z)))
+                return false;
+        return libvxl_copy_chunk_get_color(blocks, x, z, map_size_y - 1 - y) == color;
+}
+
 void chunk_generate_greedy(struct libvxl_chunk_copy* blocks, size_t start_x, size_t start_z, struct tesselator* tess,
                                                    int* max_height) {
         *max_height = 0;
@@ -401,6 +455,9 @@ void chunk_generate_greedy(struct libvxl_chunk_copy* blocks, size_t start_x, siz
            fixed-function chunks bake the current sky/sunlight level. */
         bool separate_water_surface = water_surface_enabled();
         float baked_sunlight = lighting_world_supported() ? 1.0F : lighting_sunlight_scale();
+
+        struct glowing_block_sample glows[CHUNK_GLOWING_MAX];
+        int glow_count = chunk_glow_snapshot(blocks, glows);
 
         int checked_voxels[2][CHUNK_SIZE * CHUNK_SIZE];
         int checked_voxels2[2][CHUNK_SIZE * map_size_y];
@@ -422,6 +479,10 @@ void chunk_generate_greedy(struct libvxl_chunk_copy* blocks, size_t start_x, siz
                                         int r = blue(col) * baked_sunlight;
                                         int g = green(col) * baked_sunlight;
                                         int b = red(col) * baked_sunlight;
+                                        const struct glowing_block_sample* glow
+                                                = glow_count > 0
+                                                        ? chunk_glow_at(glows, glow_count, x, y, z)
+                                                        : NULL;
 
                                         if((z == 0 && solid_array_isair(blocks, x, y, map_size_z - 1))
                                            || (z > 0 && solid_array_isair(blocks, x, y, z - 1))) {
@@ -431,7 +492,7 @@ void chunk_generate_greedy(struct libvxl_chunk_copy* blocks, size_t start_x, siz
 
                                                         for(int a = 1; a < map_size_y - y; a++) {
                                                                 if(!solid_array_isair(blocks, x, y + a, z)
-                                                                   && libvxl_copy_chunk_get_color(blocks, x, z, map_size_y - 1 - (y + a)) == col
+                                                                   && chunk_glow_merge_matches(blocks, glows, glow_count, x, y, z, x, (y + a), z, col)
                                                                    && checked_voxels2[0][y + a + (x - start_x) * map_size_y] == 0
                                                                    && ((z == 0 && solid_array_isair(blocks, x, y + a, map_size_z - 1))
                                                                            || (z > 0 && solid_array_isair(blocks, x, y + a, z - 1))))
@@ -444,7 +505,7 @@ void chunk_generate_greedy(struct libvxl_chunk_copy* blocks, size_t start_x, siz
                                                                 int a;
                                                                 for(a = 0; a < len_y; a++) {
                                                                         if(solid_array_isair(blocks, x + b, y + a, z)
-                                                                           || libvxl_copy_chunk_get_color(blocks, x + b, z, map_size_y - 1 - (y + a)) != col
+                                                                           || !chunk_glow_merge_matches(blocks, glows, glow_count, x, y, z, x + b, (y + a), z, col)
                                                                            || checked_voxels2[0][y + a + (x + b - start_x) * map_size_y] != 0
                                                                            || !((z == 0 && solid_array_isair(blocks, x + b, y + a, map_size_z - 1))
                                                                                         || (z > 0 && solid_array_isair(blocks, x + b, y + a, z - 1))))
@@ -460,7 +521,7 @@ void chunk_generate_greedy(struct libvxl_chunk_copy* blocks, size_t start_x, siz
                                                                 for(int a = 0; a < len_y; a++)
                                                                         checked_voxels2[0][y + a + (x + b - start_x) * map_size_y] = 1;
 
-                                                        tesselator_set_color(tess, rgba(r * 0.875F, g * 0.875F, b * 0.875F, 255));
+                                                        tesselator_set_color(tess, glow ? chunk_glow_vertex_color(glow, false) : rgba(r * 0.875F, g * 0.875F, b * 0.875F, 255));
                                                         tesselator_addi_simple(
                                                                 tess, (int16_t[]) {x, y, z, x, y + len_y, z, x + len_x, y + len_y, z, x + len_x, y, z});
                                                 }
@@ -474,7 +535,7 @@ void chunk_generate_greedy(struct libvxl_chunk_copy* blocks, size_t start_x, siz
 
                                                         for(int a = 1; a < map_size_y - y; a++) {
                                                                 if(!solid_array_isair(blocks, x, y + a, z)
-                                                                   && libvxl_copy_chunk_get_color(blocks, x, z, map_size_y - 1 - (y + a)) == col
+                                                                   && chunk_glow_merge_matches(blocks, glows, glow_count, x, y, z, x, (y + a), z, col)
                                                                    && checked_voxels2[1][y + a + (x - start_x) * map_size_y] == 0
                                                                    && ((z == map_size_z - 1 && solid_array_isair(blocks, x, y + a, 0))
                                                                            || (z < map_size_z - 1 && solid_array_isair(blocks, x, y + a, z + 1))))
@@ -487,7 +548,7 @@ void chunk_generate_greedy(struct libvxl_chunk_copy* blocks, size_t start_x, siz
                                                                 int a;
                                                                 for(a = 0; a < len_y; a++) {
                                                                         if(solid_array_isair(blocks, x + b, y + a, z)
-                                                                           || libvxl_copy_chunk_get_color(blocks, x + b, z, map_size_y - 1 - (y + a)) != col
+                                                                           || !chunk_glow_merge_matches(blocks, glows, glow_count, x, y, z, x + b, (y + a), z, col)
                                                                            || checked_voxels2[1][y + a + (x + b - start_x) * map_size_y] != 0
                                                                            || !((z == map_size_z - 1 && solid_array_isair(blocks, x + b, y + a, 0))
                                                                                         || (z < map_size_z - 1 && solid_array_isair(blocks, x + b, y + a, z + 1))))
@@ -503,7 +564,7 @@ void chunk_generate_greedy(struct libvxl_chunk_copy* blocks, size_t start_x, siz
                                                                 for(int a = 0; a < len_y; a++)
                                                                         checked_voxels2[1][y + a + (x + b - start_x) * map_size_y] = 1;
 
-                                                        tesselator_set_color(tess, rgba(r * 0.625F, g * 0.625F, b * 0.625F, 255));
+                                                        tesselator_set_color(tess, glow ? chunk_glow_vertex_color(glow, false) : rgba(r * 0.625F, g * 0.625F, b * 0.625F, 255));
                                                         tesselator_addi_simple(tess,
                                                                                                    (int16_t[]) {x, y, z + 1, x + len_x, y, z + 1, x + len_x, y + len_y,
                                                                                                                                 z + 1, x, y + len_y, z + 1});
@@ -531,6 +592,10 @@ void chunk_generate_greedy(struct libvxl_chunk_copy* blocks, size_t start_x, siz
                                         int r = blue(col) * baked_sunlight;
                                         int g = green(col) * baked_sunlight;
                                         int b = red(col) * baked_sunlight;
+                                        const struct glowing_block_sample* glow
+                                                = glow_count > 0
+                                                        ? chunk_glow_at(glows, glow_count, x, y, z)
+                                                        : NULL;
 
                                         if((x == 0 && solid_array_isair(blocks, map_size_x - 1, y, z))
                                            || (x > 0 && solid_array_isair(blocks, x - 1, y, z))) {
@@ -540,7 +605,7 @@ void chunk_generate_greedy(struct libvxl_chunk_copy* blocks, size_t start_x, siz
 
                                                         for(int a = 1; a < map_size_y - y; a++) {
                                                                 if(!solid_array_isair(blocks, x, y + a, z)
-                                                                   && libvxl_copy_chunk_get_color(blocks, x, z, map_size_y - 1 - (y + a)) == col
+                                                                   && chunk_glow_merge_matches(blocks, glows, glow_count, x, y, z, x, (y + a), z, col)
                                                                    && checked_voxels2[0][y + a + (z - start_z) * map_size_y] == 0
                                                                    && ((x == 0 && solid_array_isair(blocks, map_size_x - 1, y + a, z))
                                                                            || (x > 0 && solid_array_isair(blocks, x - 1, y + a, z))))
@@ -553,7 +618,7 @@ void chunk_generate_greedy(struct libvxl_chunk_copy* blocks, size_t start_x, siz
                                                                 int a;
                                                                 for(a = 0; a < len_y; a++) {
                                                                         if(solid_array_isair(blocks, x, y + a, z + b)
-                                                                           || libvxl_copy_chunk_get_color(blocks, x, z + b, map_size_y - 1 - (y + a)) != col
+                                                                           || !chunk_glow_merge_matches(blocks, glows, glow_count, x, y, z, x, (y + a), z + b, col)
                                                                            || checked_voxels2[0][y + a + (z + b - start_z) * map_size_y] != 0
                                                                            || !((x == 0 && solid_array_isair(blocks, map_size_x - 1, y + a, z + b))
                                                                                         || (x > 0 && solid_array_isair(blocks, x - 1, y + a, z + b))))
@@ -569,7 +634,7 @@ void chunk_generate_greedy(struct libvxl_chunk_copy* blocks, size_t start_x, siz
                                                                 for(int a = 0; a < len_y; a++)
                                                                         checked_voxels2[0][y + a + (z + b - start_z) * map_size_y] = 1;
 
-                                                        tesselator_set_color(tess, rgba(r * 0.75F, g * 0.75F, b * 0.75F, 255));
+                                                        tesselator_set_color(tess, glow ? chunk_glow_vertex_color(glow, false) : rgba(r * 0.75F, g * 0.75F, b * 0.75F, 255));
                                                         tesselator_addi_simple(
                                                                 tess, (int16_t[]) {x, y, z, x, y, z + len_z, x, y + len_y, z + len_z, x, y + len_y, z});
                                                 }
@@ -583,7 +648,7 @@ void chunk_generate_greedy(struct libvxl_chunk_copy* blocks, size_t start_x, siz
 
                                                         for(int a = 1; a < map_size_y - y; a++) {
                                                                 if(!solid_array_isair(blocks, x, y + a, z)
-                                                                   && libvxl_copy_chunk_get_color(blocks, x, z, map_size_y - 1 - (y + a)) == col
+                                                                   && chunk_glow_merge_matches(blocks, glows, glow_count, x, y, z, x, (y + a), z, col)
                                                                    && checked_voxels2[1][y + a + (z - start_z) * map_size_y] == 0
                                                                    && ((x == map_size_x - 1 && solid_array_isair(blocks, 0, y + a, z))
                                                                            || (x < map_size_x - 1 && solid_array_isair(blocks, x + 1, y + a, z))))
@@ -596,7 +661,7 @@ void chunk_generate_greedy(struct libvxl_chunk_copy* blocks, size_t start_x, siz
                                                                 int a;
                                                                 for(a = 0; a < len_y; a++) {
                                                                         if(solid_array_isair(blocks, x, y + a, z + b)
-                                                                           || libvxl_copy_chunk_get_color(blocks, x, z + b, map_size_y - 1 - (y + a)) != col
+                                                                           || !chunk_glow_merge_matches(blocks, glows, glow_count, x, y, z, x, (y + a), z + b, col)
                                                                            || checked_voxels2[1][y + a + (z + b - start_z) * map_size_y] != 0
                                                                            || !((x == map_size_x - 1 && solid_array_isair(blocks, 0, y + a, z + b))
                                                                                         || (x < map_size_x - 1 && solid_array_isair(blocks, x + 1, y + a, z + b))))
@@ -612,7 +677,7 @@ void chunk_generate_greedy(struct libvxl_chunk_copy* blocks, size_t start_x, siz
                                                                 for(unsigned char a = 0; a < len_y; a++)
                                                                         checked_voxels2[1][y + a + (z + b - start_z) * map_size_y] = 1;
 
-                                                        tesselator_set_color(tess, rgba(r * 0.75F, g * 0.75F, b * 0.75F, 255));
+                                                        tesselator_set_color(tess, glow ? chunk_glow_vertex_color(glow, false) : rgba(r * 0.75F, g * 0.75F, b * 0.75F, 255));
                                                         tesselator_addi_simple(tess,
                                                                                                    (int16_t[]) {x + 1, y, z, x + 1, y + len_y, z, x + 1, y + len_y,
                                                                                                                                 z + len_z, x + 1, y, z + len_z});
@@ -640,6 +705,10 @@ void chunk_generate_greedy(struct libvxl_chunk_copy* blocks, size_t start_x, siz
                                         int r = blue(col) * baked_sunlight;
                                         int g = green(col) * baked_sunlight;
                                         int b = red(col) * baked_sunlight;
+                                        const struct glowing_block_sample* glow
+                                                = glow_count > 0
+                                                        ? chunk_glow_at(glows, glow_count, x, y, z)
+                                                        : NULL;
 
                                         if(y == map_size_y - 1 || solid_array_isair(blocks, x, y + 1, z)) {
                                                 if(checked_voxels[0][(x - start_x) + (z - start_z) * CHUNK_SIZE] == 0) {
@@ -648,7 +717,7 @@ void chunk_generate_greedy(struct libvxl_chunk_copy* blocks, size_t start_x, siz
 
                                                         for(int a = 1; a < (start_x + CHUNK_SIZE - x); a++) {
                                                                 if(!solid_array_isair(blocks, x + a, y, z)
-                                                                   && libvxl_copy_chunk_get_color(blocks, x + a, z, map_size_y - 1 - y) == col
+                                                                   && chunk_glow_merge_matches(blocks, glows, glow_count, x, y, z, x + a, y, z, col)
                                                                    && checked_voxels[0][(x + a - start_x) + (z - start_z) * CHUNK_SIZE] == 0
                                                                    && (y == map_size_y - 1 || solid_array_isair(blocks, x + a, y + 1, z)))
                                                                         len_x++;
@@ -660,7 +729,7 @@ void chunk_generate_greedy(struct libvxl_chunk_copy* blocks, size_t start_x, siz
                                                                 int a;
                                                                 for(a = 0; a < len_x; a++) {
                                                                         if(solid_array_isair(blocks, x + a, y, z + b)
-                                                                           || libvxl_copy_chunk_get_color(blocks, x + a, z + b, map_size_y - 1 - y) != col
+                                                                           || !chunk_glow_merge_matches(blocks, glows, glow_count, x, y, z, x + a, y, z + b, col)
                                                                            || checked_voxels[0][(x + a - start_x) + (z + b - start_z) * CHUNK_SIZE] != 0
                                                                            || !(y == map_size_y - 1 || solid_array_isair(blocks, x + a, y + 1, z + b)))
                                                                                 break;
@@ -675,7 +744,7 @@ void chunk_generate_greedy(struct libvxl_chunk_copy* blocks, size_t start_x, siz
                                                                 for(int a = 0; a < len_x; a++)
                                                                         checked_voxels[0][(x + a - start_x) + (z + b - start_z) * CHUNK_SIZE] = 1;
 
-                                                        tesselator_set_color(tess, rgba(r, g, b, 255));
+                                                        tesselator_set_color(tess, glow ? chunk_glow_vertex_color(glow, false) : rgba(r, g, b, 255));
                                                         tesselator_addi_simple(tess,
                                                                                                    (int16_t[]) {x, y + 1, z, x, y + 1, z + len_z, x + len_x, y + 1,
                                                                                                                                 z + len_z, x + len_x, y + 1, z});
@@ -689,7 +758,7 @@ void chunk_generate_greedy(struct libvxl_chunk_copy* blocks, size_t start_x, siz
 
                                                         for(int a = 1; a < (start_x + CHUNK_SIZE - x); a++) {
                                                                 if(!solid_array_isair(blocks, x + a, y, z)
-                                                                   && libvxl_copy_chunk_get_color(blocks, x + a, z, map_size_y - 1 - y) == col
+                                                                   && chunk_glow_merge_matches(blocks, glows, glow_count, x, y, z, x + a, y, z, col)
                                                                    && checked_voxels[1][(x + a - start_x) + (z - start_z) * CHUNK_SIZE] == 0
                                                                    && (y > 0 && solid_array_isair(blocks, x + a, y - 1, z)))
                                                                         len_x++;
@@ -701,7 +770,7 @@ void chunk_generate_greedy(struct libvxl_chunk_copy* blocks, size_t start_x, siz
                                                                 int a;
                                                                 for(a = 0; a < len_x; a++) {
                                                                         if(solid_array_isair(blocks, x + a, y, z + b)
-                                                                           || libvxl_copy_chunk_get_color(blocks, x + a, z + b, map_size_y - 1 - y) != col
+                                                                           || !chunk_glow_merge_matches(blocks, glows, glow_count, x, y, z, x + a, y, z + b, col)
                                                                            || checked_voxels[1][(x + a - start_x) + (z + b - start_z) * CHUNK_SIZE] != 0
                                                                            || !(y > 0 && solid_array_isair(blocks, x + a, y - 1, z + b)))
                                                                                 break;
@@ -716,7 +785,7 @@ void chunk_generate_greedy(struct libvxl_chunk_copy* blocks, size_t start_x, siz
                                                                 for(int a = 0; a < len_x; a++)
                                                                         checked_voxels[1][(x + a - start_x) + (z + b - start_z) * CHUNK_SIZE] = 1;
 
-                                                        tesselator_set_color(tess, rgba(r * 0.5F, g * 0.5F, b * 0.5F, 255));
+                                                        tesselator_set_color(tess, glow ? chunk_glow_vertex_color(glow, false) : rgba(r * 0.5F, g * 0.5F, b * 0.5F, 255));
                                                         tesselator_addi_simple(
                                                                 tess, (int16_t[]) {x, y, z, x + len_x, y, z, x + len_x, y, z + len_z, x, y, z + len_z});
                                                 }
@@ -772,6 +841,8 @@ void chunk_generate_naive(struct libvxl_chunk_copy* blocks, struct tesselator* t
         bool separate_water_surface = water_surface_enabled();
         /* Zero is a valid user setting and means no AO darkening. The old
            fallback silently treated 0 as 1, making the slider's minimum lie. */
+        struct glowing_block_sample glows[CHUNK_GLOWING_MAX];
+        int glow_count = chunk_glow_snapshot(blocks, glows);
         float ao_mult = fmaxf(settings.ao_multiplier, 0.0F);
         float ao_curve[5];
         ao_curve[1] = powf(0.25F, ao_mult);
@@ -805,6 +876,8 @@ void chunk_generate_naive(struct libvxl_chunk_copy* blocks, struct tesselator* t
                 int r = blue(col);
                 int g = green(col);
                 int b = red(col);
+                const struct glowing_block_sample* glow
+                        = glow_count > 0 ? chunk_glow_at(glows, glow_count, x, y, z) : NULL;
 
                 float shade = solid_sunblock(blocks, x, y, z) * baked_sunlight;
                 if(baked_shadows) {
@@ -854,6 +927,11 @@ void chunk_generate_naive(struct libvxl_chunk_copy* blocks, struct tesselator* t
                 clut[2] = rgba(fr * ao_curve[2], fg * ao_curve[2], fb * ao_curve[2], 255);                                     \
                 clut[3] = rgba(fr * ao_curve[3], fg * ao_curve[3], fb * ao_curve[3], 255);                                     \
                 clut[4] = rgba(fr * ao_curve[4], fg * ao_curve[4], fb * ao_curve[4], 255);                                     \
+                /* A glowing block is the light: every corner goes flat and unshaded. */                                        \
+                if(glow) {                                                                                                     \
+                        uint32_t emissive = chunk_glow_vertex_color(glow, false);                                              \
+                        clut[1] = clut[2] = clut[3] = clut[4] = emissive;                                                      \
+                }                                                                                                              \
         } while(0)
 
                         if(n[1][1][0]) { // -Z
@@ -942,32 +1020,32 @@ void chunk_generate_naive(struct libvxl_chunk_copy* blocks, struct tesselator* t
 #undef BUILD_CLUT
                 } else {
                         if(solid_array_isair(blocks, x, y, z - 1)) {
-                                tesselator_set_color(tess, rgba(r * 0.875F, g * 0.875F, b * 0.875F, 255));
+                                tesselator_set_color(tess, glow ? chunk_glow_vertex_color(glow, false) : rgba(r * 0.875F, g * 0.875F, b * 0.875F, 255));
                                 tesselator_addi_cube_face(tess, CUBE_FACE_Z_N, x, y, z);
                         }
 
                         if(solid_array_isair(blocks, x, y, z + 1)) {
-                                tesselator_set_color(tess, rgba(r * 0.625F, g * 0.625F, b * 0.625F, 255));
+                                tesselator_set_color(tess, glow ? chunk_glow_vertex_color(glow, false) : rgba(r * 0.625F, g * 0.625F, b * 0.625F, 255));
                                 tesselator_addi_cube_face(tess, CUBE_FACE_Z_P, x, y, z);
                         }
 
                         if(solid_array_isair(blocks, x - 1, y, z)) {
-                                tesselator_set_color(tess, rgba(r * 0.75F, g * 0.75F, b * 0.75F, 255));
+                                tesselator_set_color(tess, glow ? chunk_glow_vertex_color(glow, false) : rgba(r * 0.75F, g * 0.75F, b * 0.75F, 255));
                                 tesselator_addi_cube_face(tess, CUBE_FACE_X_N, x, y, z);
                         }
 
                         if(solid_array_isair(blocks, x + 1, y, z)) {
-                                tesselator_set_color(tess, rgba(r * 0.75F, g * 0.75F, b * 0.75F, 255));
+                                tesselator_set_color(tess, glow ? chunk_glow_vertex_color(glow, false) : rgba(r * 0.75F, g * 0.75F, b * 0.75F, 255));
                                 tesselator_addi_cube_face(tess, CUBE_FACE_X_P, x, y, z);
                         }
 
                         if(y == map_size_y - 1 || solid_array_isair(blocks, x, y + 1, z)) {
-                                tesselator_set_color(tess, rgba(r, g, b, 255));
+                                tesselator_set_color(tess, glow ? chunk_glow_vertex_color(glow, false) : rgba(r, g, b, 255));
                                 tesselator_addi_cube_face(tess, CUBE_FACE_Y_P, x, y, z);
                         }
 
                         if(y > 0 && solid_array_isair(blocks, x, y - 1, z)) {
-                                tesselator_set_color(tess, rgba(r * 0.5F, g * 0.5F, b * 0.5F, 255));
+                                tesselator_set_color(tess, glow ? chunk_glow_vertex_color(glow, false) : rgba(r * 0.5F, g * 0.5F, b * 0.5F, 255));
                                 tesselator_addi_cube_face(tess, CUBE_FACE_Y_N, x, y, z);
                         }
                 }
@@ -1015,6 +1093,8 @@ static void emit_textured_face(struct tesselator* tess, enum tesselator_cube_fac
 void chunk_generate_textured(struct libvxl_chunk_copy* blocks, struct tesselator* tess, int* max_height) {
         *max_height = 0;
         bool separate_water_surface = water_surface_enabled();
+        struct glowing_block_sample glows[CHUNK_GLOWING_MAX];
+        int glow_count = chunk_glow_snapshot(blocks, glows);
 
         /* Legacy terrain has baked vertex lighting; programmable terrain
            applies the sun percentage per frame in its shader instead. */
@@ -1040,6 +1120,8 @@ void chunk_generate_textured(struct libvxl_chunk_copy* blocks, struct tesselator
                 int br = blue(col);
                 int bg = green(col);
                 int bb = red(col);
+                const struct glowing_block_sample* glow
+                        = glow_count > 0 ? chunk_glow_at(glows, glow_count, x, y, z) : NULL;
 
                 float shade;
                 {
@@ -1068,37 +1150,43 @@ void chunk_generate_textured(struct libvxl_chunk_copy* blocks, struct tesselator
 
                         if(solid_array_isair(blocks, x, y, z - 1)) {
                                 int lum = (int)(255.0F * shade * 0.875F);
-                                tesselator_set_color(tess, rgba(lum, lum, lum, 255));
+                                tesselator_set_color(tess, glow ? chunk_glow_vertex_color(glow, true)
+                                                        : rgba(lum, lum, lum, 255));
                                 emit_textured_face(tess, CUBE_FACE_Z_N, x, y, z, u0, v0, u1, v1);
                         }
 
                         if(solid_array_isair(blocks, x, y, z + 1)) {
                                 int lum = (int)(255.0F * shade * 0.625F);
-                                tesselator_set_color(tess, rgba(lum, lum, lum, 255));
+                                tesselator_set_color(tess, glow ? chunk_glow_vertex_color(glow, true)
+                                                        : rgba(lum, lum, lum, 255));
                                 emit_textured_face(tess, CUBE_FACE_Z_P, x, y, z, u0, v0, u1, v1);
                         }
 
                         if(solid_array_isair(blocks, x - 1, y, z)) {
                                 int lum = (int)(255.0F * shade * 0.75F);
-                                tesselator_set_color(tess, rgba(lum, lum, lum, 255));
+                                tesselator_set_color(tess, glow ? chunk_glow_vertex_color(glow, true)
+                                                        : rgba(lum, lum, lum, 255));
                                 emit_textured_face(tess, CUBE_FACE_X_N, x, y, z, u0, v0, u1, v1);
                         }
 
                         if(solid_array_isair(blocks, x + 1, y, z)) {
                                 int lum = (int)(255.0F * shade * 0.75F);
-                                tesselator_set_color(tess, rgba(lum, lum, lum, 255));
+                                tesselator_set_color(tess, glow ? chunk_glow_vertex_color(glow, true)
+                                                        : rgba(lum, lum, lum, 255));
                                 emit_textured_face(tess, CUBE_FACE_X_P, x, y, z, u0, v0, u1, v1);
                         }
 
                         if(y == map_size_y - 1 || solid_array_isair(blocks, x, y + 1, z)) {
                                 int lum = (int)(255.0F * shade * 1.0F);
-                                tesselator_set_color(tess, rgba(lum, lum, lum, 255));
+                                tesselator_set_color(tess, glow ? chunk_glow_vertex_color(glow, true)
+                                                        : rgba(lum, lum, lum, 255));
                                 emit_textured_face(tess, CUBE_FACE_Y_P, x, y, z, u0, v0, u1, v1);
                         }
 
                         if(y > 0 && solid_array_isair(blocks, x, y - 1, z)) {
                                 int lum = (int)(255.0F * shade * 0.5F);
-                                tesselator_set_color(tess, rgba(lum, lum, lum, 255));
+                                tesselator_set_color(tess, glow ? chunk_glow_vertex_color(glow, true)
+                                                        : rgba(lum, lum, lum, 255));
                                 emit_textured_face(tess, CUBE_FACE_Y_N, x, y, z, u0, v0, u1, v1);
                         }
                 } else {
@@ -1116,32 +1204,32 @@ void chunk_generate_textured(struct libvxl_chunk_copy* blocks, struct tesselator
                         float v1 = (tile_y + 1) / 8.0f;
 
                         if(solid_array_isair(blocks, x, y, z - 1)) {
-                                tesselator_set_color(tess, rgba(r * 0.875F, g * 0.875F, b * 0.875F, 255));
+                                tesselator_set_color(tess, glow ? chunk_glow_vertex_color(glow, false) : rgba(r * 0.875F, g * 0.875F, b * 0.875F, 255));
                                 emit_textured_face(tess, CUBE_FACE_Z_N, x, y, z, u0, v0, u1, v1);
                         }
 
                         if(solid_array_isair(blocks, x, y, z + 1)) {
-                                tesselator_set_color(tess, rgba(r * 0.625F, g * 0.625F, b * 0.625F, 255));
+                                tesselator_set_color(tess, glow ? chunk_glow_vertex_color(glow, false) : rgba(r * 0.625F, g * 0.625F, b * 0.625F, 255));
                                 emit_textured_face(tess, CUBE_FACE_Z_P, x, y, z, u0, v0, u1, v1);
                         }
 
                         if(solid_array_isair(blocks, x - 1, y, z)) {
-                                tesselator_set_color(tess, rgba(r * 0.75F, g * 0.75F, b * 0.75F, 255));
+                                tesselator_set_color(tess, glow ? chunk_glow_vertex_color(glow, false) : rgba(r * 0.75F, g * 0.75F, b * 0.75F, 255));
                                 emit_textured_face(tess, CUBE_FACE_X_N, x, y, z, u0, v0, u1, v1);
                         }
 
                         if(solid_array_isair(blocks, x + 1, y, z)) {
-                                tesselator_set_color(tess, rgba(r * 0.75F, g * 0.75F, b * 0.75F, 255));
+                                tesselator_set_color(tess, glow ? chunk_glow_vertex_color(glow, false) : rgba(r * 0.75F, g * 0.75F, b * 0.75F, 255));
                                 emit_textured_face(tess, CUBE_FACE_X_P, x, y, z, u0, v0, u1, v1);
                         }
 
                         if(y == map_size_y - 1 || solid_array_isair(blocks, x, y + 1, z)) {
-                                tesselator_set_color(tess, rgba(r, g, b, 255));
+                                tesselator_set_color(tess, glow ? chunk_glow_vertex_color(glow, false) : rgba(r, g, b, 255));
                                 emit_textured_face(tess, CUBE_FACE_Y_P, x, y, z, u0, v0, u1, v1);
                         }
 
                         if(y > 0 && solid_array_isair(blocks, x, y - 1, z)) {
-                                tesselator_set_color(tess, rgba(r * 0.5F, g * 0.5F, b * 0.5F, 255));
+                                tesselator_set_color(tess, glow ? chunk_glow_vertex_color(glow, false) : rgba(r * 0.5F, g * 0.5F, b * 0.5F, 255));
                                 emit_textured_face(tess, CUBE_FACE_Y_N, x, y, z, u0, v0, u1, v1);
                         }
                 }

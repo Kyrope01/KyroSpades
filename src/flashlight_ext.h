@@ -8,8 +8,11 @@
 #define FLASHLIGHT_EXT_ID 0x32
 #define FLASHLIGHT_PACKET_ID 0x72
 #define FLASHLIGHT_PLAYERS 256
+/* aosprotocol extensions/flashlight.md, Sub ID 2: Reach, Cone (in pi/256, so
+   255 is about 179.3 degrees), linear RGB, and Flicker, where a light is dark
+   about Flicker/512 of the time. Reach or Cone of 0 gives no light. */
 struct flashlight_beam {
-    uint8_t reach, cone, red, green, blue;
+    uint8_t reach, cone, red, green, blue, flicker;
 };
 void flashlight_ext_reset_connection(void);
 void flashlight_ext_set_negotiated(bool enabled);
@@ -21,4 +24,7 @@ bool flashlight_ext_on(unsigned int id);
 struct flashlight_beam flashlight_ext_beam(unsigned int id);
 /* Payload for packet 0x72 (network_send prepends the top-level ID). */
 void flashlight_ext_request(unsigned int id, uint8_t out[3]);
+/* True while this player's light is in a flicker dropout. The beam and its lamp
+   glare drop out together, so both callers ask the same question. */
+bool flashlight_ext_dark(unsigned int id, double time);
 #endif

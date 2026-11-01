@@ -181,7 +181,7 @@ list(APPEND CLIENT_SOURCES dr_wav.c)
 list(APPEND CLIENT_SOURCES file.c)
 list(APPEND CLIENT_SOURCES font.c)
 list(APPEND CLIENT_SOURCES glx.c)
-list(APPEND CLIENT_SOURCES lighting.c)
+list(APPEND CLIENT_SOURCES lighting.c sky.c)
 list(APPEND CLIENT_SOURCES glowing_blocks.c)
 list(APPEND CLIENT_SOURCES shadow.c)
 list(APPEND CLIENT_SOURCES postprocess.c)
@@ -197,6 +197,11 @@ list(APPEND CLIENT_SOURCES matrix.c)
 list(APPEND CLIENT_SOURCES model.c)
 list(APPEND CLIENT_SOURCES skins.c)
 list(APPEND CLIENT_SOURCES network.c teamplay.c pie_menu.c pie_menu_ext.c teamplay_draw.c flashlight_ext.c)
+list(APPEND CLIENT_SOURCES daytime_weather.c)
+list(APPEND CLIENT_SOURCES charset.c)
+list(APPEND CLIENT_SOURCES client_key.c)
+list(APPEND CLIENT_SOURCES killfeed.c)
+list(APPEND CLIENT_SOURCES ${KyroSpades_SOURCE_DIR}/deps/tweetnacl/tweetnacl.c)
 list(APPEND CLIENT_SOURCES parson.c)
 list(APPEND CLIENT_SOURCES profiler.c)
 list(APPEND CLIENT_SOURCES particle.c)
@@ -502,7 +507,10 @@ if(NOT ANDROID)
         # POST_BUILD does not accept DEPENDS (CMP0175). On Make/Ninja, relink
         # when the archive changes so its post-build extraction runs again.
         set_property(TARGET ${KS_TARGET} APPEND PROPERTY LINK_DEPENDS
-                "${KyroSpades_SOURCE_DIR}/bsresources.zip")
+                "${KyroSpades_SOURCE_DIR}/bsresources.zip"
+                "${KyroSpades_SOURCE_DIR}/resources.override/kv6/semi(Kar-98K).kv6"
+                "${KyroSpades_SOURCE_DIR}/resources.override/png/semi(Kar-98K).png"
+                "${KyroSpades_SOURCE_DIR}/resources.override/wav/semishoot(Kar-98K).wav")
         add_custom_command(
                 TARGET ${KS_TARGET}
                 POST_BUILD

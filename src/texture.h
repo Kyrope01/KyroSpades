@@ -26,7 +26,10 @@
 
 struct texture {
         int width, height;
-        int texture_id;
+        /* GL texture name. `unsigned int` is GLuint in every header this
+           project builds against; declaring it as int made every
+           glGenTextures/glDeleteTextures call a signedness mismatch. */
+        unsigned int texture_id;
         unsigned char* pixels;
 };
 
@@ -48,9 +51,8 @@ extern struct texture texture_blocks;
 #define CUSTOM_BLOCK_TILE 16
 extern struct texture texture_blocks_custom;
 extern struct texture texture_blocks_normal;
-extern struct texture texture_blocks_material;
 extern int texture_blocks_custom_loaded;
-extern int texture_blocks_materials_ready;
+extern int texture_blocks_normal_map_ready;
 
 void texture_load_custom_blocks(void);
 /* Returns the atlas texture that should be bound for textured blocks:
@@ -61,10 +63,10 @@ struct texture* texture_blocks_atlas(void);
 int texture_blocks_custom_tile(uint32_t color);
 /* Tiles per row/column in the custom atlas (square grid). */
 int texture_blocks_custom_grid(void);
-/* Generated normal/roughness maps used by the forward terrain shader. These
+/* Generated terrain normal map used by the forward terrain shader. These
    calls are idempotent and support changing the lighting setting at runtime. */
-bool texture_blocks_prepare_materials(void);
-void texture_blocks_release_materials(void);
+bool texture_blocks_prepare_normal_map(void);
+void texture_blocks_release_normal_map(void);
 extern struct texture texture_grenade;
 extern struct texture texture_ammo_semi;
 extern struct texture texture_ammo_smg;

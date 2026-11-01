@@ -11,8 +11,8 @@ header = (root / "src/config.h").read_text()
 resource_config = (root / "resources/config.ini").read_text()
 
 assert "int   object_outlines;" in header
-assert "settings.object_outlines = 1;" in main
-assert "object_outlines                = 1" in resource_config
+assert "settings.object_outlines = 0;" in main
+assert "object_outlines                = 0" in resource_config
 assert "object_outline_thickness       = 0.7" in resource_config
 assert "settings.object_outline_thickness = 0.7F;" in main
 assert 'config_seti("client", "object_outlines", settings.object_outlines);' in config
@@ -28,7 +28,7 @@ assert "IMPORT_SETTING(settings.object_outlines, object_outlines, atoi(value));"
 assert '.value = &settings_tmp.object_outlines' in config
 assert '.name = "Object outlines"' in config
 assert "int outlines_postproc = settings.object_outlines;" in main
-assert "|| hdr_postproc || bloom_postproc || outlines_postproc" in main
+assert "|| hdr_postproc || outlines_postproc" in main
 assert "outlines_postproc = 0;" in main
 assert main.count('"uniform sampler2D depthmap;') >= 2
 assert main.count('"uniform float pp_outlines;') == 2

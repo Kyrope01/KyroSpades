@@ -29,6 +29,7 @@
 #include "font.h"
 #include "window.h"
 #include "glx.h"
+#include "player.h"
 #include "damagenumbers.h"
 
 /* Floating damage numbers, adapted from ZeroSpades' cg_damageIndicators.
@@ -47,6 +48,7 @@ struct damage_indicator {
 	int victim_id;
 	int damage;
 	bool crit;
+	bool heal;   /* a negative Hit Amount: the server healed the victim */
 	float x, y, z;
 	float vx, vy, vz;
 	float fade;     /* seconds remaining before fully gone */
@@ -57,6 +59,10 @@ struct damage_indicator {
 
 static struct damage_indicator indicators[DAMAGENUMBERS_MAX];
 static bool indicators_any_active = false;
+/* Set while the server is sending Damage Markers. The server knows the damage
+   it applied, so the client's weapon-table estimate would only ever be a
+   second, slightly different number for the same hit. */
+static bool server_authoritative = false;
 
 /* Cached once per frame via damagenumbers_capture_camera(): the world-space
    view/projection matrices at the moment the 3D scene camera was finalized.
@@ -111,7 +117,19 @@ static struct damage_indicator* damagenumbers_alloc_slot(void) {
 	return &indicators[oldest];
 }
 
+void damagenumbers_set_server_authoritative(bool authoritative) {
+	server_authoritative = authoritative;
+	if(!authoritative)
+		return;
+	/* Numbers still fading were estimates; the server's replace them. */
+	for(int k = 0; k < DAMAGENUMBERS_MAX; k++)
+		indicators[k].active = false;
+	indicators_any_active = false;
+}
+
 void damagenumbers_add(int victim_id, int damage, float x, float y, float z) {
+	if(server_authoritative)
+		return;
 	if(!settings.damage_numbers || damage <= 0)
 		return;
 
@@ -156,6 +174,48 @@ void damagenumbers_add(int victim_id, int damage, float x, float y, float z) {
 		slot->vy = 1.2F;
 	}
 
+	slot->max_fade = slot->crit ? 2.0F : 1.5F;
+	slot->fade = slot->max_fade;
+}
+
+/* Damage Markers (aosprotocol extension 0x20): the amount the server applied,
+   which is negative when the hit healed. It names the victim only, so the
+   number floats over where that player is now. */
+void damagenumbers_add_server(int victim_id, int amount) {
+	if(!settings.damage_numbers || !amount)
+		return;
+	if(victim_id < 0 || victim_id >= PLAYERS_MAX || !players[victim_id].connected)
+		return;
+
+	bool heal = amount < 0;
+	int damage = heal ? -amount : amount;
+	struct damage_indicator* ind = damagenumbers_find_recent(victim_id);
+	if(ind && ind->heal == heal) {
+		ind->damage += damage;
+		ind->age = 0.0F;
+		ind->crit = !heal && ind->damage >= DAMAGENUMBERS_CRIT_THRESHOLD;
+		ind->max_fade = ind->crit ? 2.0F : 1.5F;
+		ind->fade = ind->max_fade;
+		return;
+	}
+	if(ind) /* a heal and a hit never merge into one number */
+		ind->active = false;
+
+	struct damage_indicator* slot = damagenumbers_alloc_slot();
+	slot->active = true;
+	indicators_any_active = true;
+	slot->victim_id = victim_id;
+	slot->damage = damage;
+	slot->heal = heal;
+	slot->crit = !heal && damage >= DAMAGENUMBERS_CRIT_THRESHOLD;
+	slot->x = players[victim_id].physics.eye.x;
+	slot->y = players[victim_id].physics.eye.y + player_height(&players[victim_id]) + 0.4F;
+	slot->z = players[victim_id].physics.eye.z;
+	slot->age = 0.0F;
+	slot->pulse_time = 0.0F;
+	slot->vx = (damagenumbers_frand() - 0.5F) * 1.2F;
+	slot->vz = (damagenumbers_frand() - 0.5F) * 1.2F;
+	slot->vy = 1.2F;
 	slot->max_fade = slot->crit ? 2.0F : 1.5F;
 	slot->fade = slot->max_fade;
 }
@@ -250,7 +310,7 @@ void damagenumbers_render(void) {
 			continue;
 
 		char buf[16];
-		snprintf(buf, sizeof(buf), "%d", ind->damage);
+		snprintf(buf, sizeof(buf), "%s%d", ind->heal ? "+" : "", ind->damage);
 
 		float size = ind->crit ? DAMAGENUMBERS_FONT_SIZE_CRIT : DAMAGENUMBERS_FONT_SIZE;
 		float text_w = font_length(size, buf);
@@ -274,7 +334,10 @@ void damagenumbers_render(void) {
 		font_render(draw_x, draw_y - 1.F, size, buf);
 		font_render(draw_x, draw_y + 1.F, size, buf);
 
-		glColor4f(red, 0.0F, 0.0F, alpha);
+		if(ind->heal)
+			glColor4f(0.2F, 1.0F, 0.35F, alpha);
+		else
+			glColor4f(red, 0.0F, 0.0F, alpha);
 		font_render(draw_x, draw_y, size, buf);
 	}
 }

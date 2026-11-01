@@ -37,6 +37,7 @@
 #define PROFILER_H
 
 #include <stdbool.h>
+#include <stddef.h>
 
 enum prof_stage {
         PROF_FRAME = 0,   /* whole frame, measured automatically */
@@ -52,13 +53,12 @@ enum prof_stage {
         PROF_STAGE_COUNT
 };
 
-/* enabled: overlay accumulation. csv_path: optional CSV, NULL for none.
-   Both may be changed at runtime through prof_toggle()/prof_enabled(). */
+/* enabled: start with the overlay on. csv_path: optional CSV, NULL for none
+   (the CSV path also switches the overlay on). F9 calls prof_toggle(). */
 void prof_init(bool enabled, const char* csv_path);
 void prof_shutdown(void);
 
 bool prof_enabled(void);
-void prof_set_enabled(bool enabled);
 void prof_toggle(void);
 
 /* Starts a new frame sample. Called once at the top of the main loop. */
@@ -70,17 +70,15 @@ void prof_frame_end(void);
 void prof_stage_begin(enum prof_stage stage);
 void prof_stage_end(enum prof_stage stage);
 
-/* Rolling window statistics (ms). Valid even when disabled (last window). */
+/* Rolling window statistics (ms). Valid even when disabled: the window keeps
+   the last PROF_SAMPLES frames it saw. */
 double prof_frame_ms_avg(void);
-double prof_frame_ms_max(void);
 double prof_stage_ms_avg(enum prof_stage stage);
-double prof_stage_ms_max(enum prof_stage stage);
 double prof_stage_pct(enum prof_stage stage);
 const char* prof_stage_name(enum prof_stage stage);
 int prof_stage_count(void);
-int prof_sample_count(void);
 
 /* Human readable "12.3" style formatting helper for the overlay. */
-void prof_format_ms(char* out, unsigned long out_size, double ms);
+void prof_format_ms(char* out, size_t out_size, double ms);
 
 #endif /* PROFILER_H */

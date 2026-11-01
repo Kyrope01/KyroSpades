@@ -239,7 +239,10 @@ void player_reset(struct Player* p);
 void player_outfit_ext_set_negotiated(bool supported);
 void player_outfit_ext_reset_map(void);
 void player_outfit_ext_reset_player(unsigned char player_id);
-void player_outfit_ext_set_player(unsigned char player_id, unsigned char outfit);
+void player_outfit_ext_set_player(unsigned char player_id, unsigned char outfit, unsigned char colour);
+/* The team whose colour this player's model wears while the outfit extension is
+   negotiated: the Set Outfit Colour when it names a team, else their own. */
+unsigned char player_outfit_ext_colour(unsigned char player_id);
 void player_outfit_ext_set_teams(const unsigned char* entries, int length);
 void player_outfit_ext_apply_player(unsigned char player_id);
 bool player_uses_undead_outfit(const struct Player* p);

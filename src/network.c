@@ -38,6 +38,7 @@
 #include "hud.h"
 #include "map.h"
 #include "player.h"
+#include "charset.h"
 #include "network.h"
 #include "teamplay.h"
 #include "flashlight_ext.h"
@@ -51,6 +52,9 @@
 #include "window.h"
 #include "bloodmarks.h"
 #include "damagenumbers.h"
+#include "client_key.h"
+#include "daytime_weather.h"
+#include "killfeed.h"
 #include "damagefx.h"
 #include "lighting.h"
 #include "glowing_blocks.h"
@@ -230,12 +234,24 @@ void read_PacketChatMessage(void* data, int len) {
                         break;
         }
 
-        size_t m_remaining = sizeof(m) - 1 - strlen(m);
+        /* UTF-8 Chat (aosprotocol extensions/utf-8-chat.md): a body that starts
+           with 0xff is UTF-8, everything else is Code Page 437 and is decoded
+           so the font, which takes UTF-8, draws it. Bytes below 0x80 are kept
+           as they are either way, so the inline colour codes survive. */
         size_t body_len = len - offsetof(struct PacketChatMessage, message);
-        if(body_len > m_remaining) {
-                body_len = m_remaining;
+        const unsigned char* body = (const unsigned char*)p->message;
+        if(body_len && body[0] == CHARSET_UTF8_PREFIX) {
+                body++;
+                body_len--;
+                if(body_len > sizeof(m) - 1 - strlen(m))
+                        body_len = sizeof(m) - 1 - strlen(m);
+                strncat(m, (const char*)body, body_len);
+        } else {
+                char decoded[3 * sizeof(p->message) + 1];
+                charset_cp437_to_utf8(decoded, sizeof(decoded), body, body_len);
+                size_t m_remaining = sizeof(m) - 1 - strlen(m);
+                strncat(m, decoded, m_remaining);
         }
-        strncat(m, p->message, body_len);
 
         unsigned int color;
         switch(p->chat_type) {
@@ -252,6 +268,32 @@ void read_PacketChatMessage(void* data, int len) {
         }
 
         chat_add(0, color, m);
+}
+
+/* Damage Markers (aosprotocol extension 0x20, packet 0x60): the server sends
+   the player who dealt the damage the amount it applied, one packet per hit.
+   The length picks the width of the amount; anything else is dropped. */
+void read_PacketDamageMarker(void* data, int len) {
+        if(!data || len < 2)
+                return;
+        const unsigned char* packet = (const unsigned char*)data;
+        int amount;
+        switch(len) {
+                case 2: /* UByte */
+                        amount = packet[1];
+                        break;
+                case 3: /* LE Short, signed: a negative value is a heal */
+                        amount = (int)(int16_t)(uint16_t)(packet[1] | (packet[2] << 8));
+                        break;
+                case 5: /* LE Int, signed */
+                        amount = (int)(int32_t)((uint32_t)packet[1] | ((uint32_t)packet[2] << 8)
+                                                | ((uint32_t)packet[3] << 16) | ((uint32_t)packet[4] << 24));
+                        break;
+                default:
+                        log_warn("Ignoring a Damage Markers packet of length %d", len + 1);
+                        return;
+        }
+        damagenumbers_add_server(packet[0], amount);
 }
 
 void read_PacketBlockAction(void* data, int len) {
@@ -935,7 +977,15 @@ void read_PacketKillAction(void* data, int len) {
 
                 char color_killer = team_color_char(players[p->killer_id].team);
                 char color_dead   = team_color_char(players[p->player_id].team);
-                char color_kill   = '\4';
+                /* The names keep their team colours; the rest of the line is
+                   white, so a kill reads the same whoever made it, except when
+                   the local player is involved: green when they got the kill,
+                   red when they were the one killed. */
+                int local_made_kill = p->killer_id == local_player_id && p->player_id != local_player_id;
+                int local_was_killed = p->player_id == local_player_id;
+                int team_or_weapon_change = p->kill_type == KILLTYPE_TEAMCHANGE
+                        || p->kill_type == KILLTYPE_CLASSCHANGE;
+                char color_kill = killfeed_text_color(local_made_kill, local_was_killed, team_or_weapon_change);
                 switch(p->kill_type) {
                         case KILLTYPE_WEAPON:
                                 snprintf(m, sizeof(m), "%c%s%c killed %c%s%c (%s)", color_killer, players[p->killer_id].name, color_kill, color_dead, players[p->player_id].name,
@@ -955,8 +1005,26 @@ void read_PacketKillAction(void* data, int len) {
                         case KILLTYPE_TEAMCHANGE: snprintf(m, sizeof(m), "%c%s%c changed teams", color_dead, players[p->player_id].name, color_kill); break;
                         case KILLTYPE_CLASSCHANGE: snprintf(m, sizeof(m), "%c%s%c changed weapons", color_dead, players[p->player_id].name, color_kill); break;
                 }
-                if(p->killer_id == local_player_id || p->player_id == local_player_id) {
-                        chat_add(1, 0x0000FF, m);
+                /* Killfeed distance: how far the shot came from, appended to
+                   every real kill (including one the local player made). Team
+                   and weapon changes arrive as kill packets too but travel no
+                   distance, and a player the client has no position for yet
+                   would report the whole map. */
+                if(settings.killfeed_distance && p->killer_id != p->player_id
+                   && p->kill_type != KILLTYPE_TEAMCHANGE && p->kill_type != KILLTYPE_CLASSCHANGE) {
+                        const struct Player* killer = &players[p->killer_id];
+                        const struct Player* victim = &players[p->player_id];
+                        float distance = killfeed_distance(killer->physics.eye.x, killer->physics.eye.y,
+                                                           killer->physics.eye.z, victim->physics.eye.x,
+                                                           victim->physics.eye.y, victim->physics.eye.z);
+                        if(distance >= 0.0F)
+                                killfeed_append_distance(m, sizeof(m), distance);
+                }
+                /* The entry's side bar follows the same rule as its words. */
+                if(local_made_kill) {
+                        chat_add(1, rgb(0, 255, 0), m);
+                } else if(local_was_killed) {
+                        chat_add(1, rgb(255, 0, 0), m);
                 } else {
                         switch(players[p->killer_id].team) {
                                 case TEAM_1:
@@ -964,6 +1032,12 @@ void read_PacketKillAction(void* data, int len) {
                                         break;
                                 case TEAM_2:
                                         chat_add(1, rgb(gamestate.team_2.red, gamestate.team_2.green, gamestate.team_2.blue), m);
+                                        break;
+                                default:
+                                        /* Zombie and other custom teams have no
+                                           gamestate colour; the kill still
+                                           belongs in the killfeed. */
+                                        chat_add(1, rgb(255, 255, 255), m);
                                         break;
                         }
                 }
@@ -1409,12 +1483,15 @@ static void read_PacketPlayerOutfit(void* data, int len) {
         if(!data || len < 1) return;
         const unsigned char* packet = (const unsigned char*)data;
         switch(packet[0]) {
-                case 0: /* Set Outfit: sub-id, player-id, outfit */
-                        if(len != 3) {
+                case 0: /* Set Outfit: sub-id, player-id, outfit, colour */
+                        /* The Colour byte was added to the extension after it
+                           was first drafted; a server built before that sends
+                           one byte fewer, which means the player's own team. */
+                        if(len != 4 && len != 3) {
                                 log_warn("Invalid Player Outfit Set Outfit packet size: %d", len + 1);
                                 return;
                         }
-                        player_outfit_ext_set_player(packet[1], packet[2]);
+                        player_outfit_ext_set_player(packet[1], packet[2], len == 4 ? packet[3] : 255);
                         break;
                 case 1: /* Team Outfits: sub-id followed by team-id/outfit pairs */
                         if(((len - 1) % 2) != 0) {
@@ -1427,6 +1504,26 @@ static void read_PacketPlayerOutfit(void* data, int len) {
                         log_debug("Ignoring unknown Player Outfit sub-packet %u", packet[0]);
                         break;
         }
+}
+
+/* Client Key (extension 2): the server sends one Challenge, this client answers
+   it at most once per connection, and a client that was told not to identify
+   itself stays quiet. */
+void read_PacketClientKey(void* data, int len) {
+        if(!data || len < 1 + CLIENT_KEY_NONCE_LEN) return;
+        uint8_t* packet = (uint8_t*)data;
+        if(packet[0] != CLIENT_KEY_SUB_CHALLENGE) return;
+        uint8_t response[CLIENT_KEY_RESPONSE_LEN];
+        int length = client_key_build_response(packet + 1, response, sizeof response);
+        if(length > 0)
+                network_send(PACKET_CLIENT_KEY_ID, response, length);
+}
+
+/* Daytime and Weather (extension 0x33): one Sky says day or night, and the
+   connection keeps that Time across Map Start. */
+void read_PacketDaytimeWeather(void* data, int len) {
+        if(!data || len <= 0) return;
+        daytime_weather_receive((const uint8_t*)data, len);
 }
 
 void read_PacketExtInfo(void* data, int len) {
@@ -1466,10 +1563,32 @@ void read_PacketExtInfo(void* data, int len) {
                 for(int k = 0; k < p->length; k++)
                         if(p->entries[k].id == PIE_MENU_EXT_ID && p->entries[k].version >= 1)
                                 supports_pie_menu = true;
+                /* Damage Markers: the server reports the damage it applied, so
+                   the client stops estimating it from the weapon table. */
+                bool supports_damage_markers = false;
+                for(int k = 0; k < p->length; k++)
+                        if(p->entries[k].id == EXT_DAMAGE_MARKERS && p->entries[k].version >= 1)
+                                supports_damage_markers = true;
+                damagenumbers_set_server_authoritative(supports_damage_markers);
                 pie_menu_ext_set_negotiated(supports_pie_menu);
+                /* Client Key: only claim it when the player allows it, so a
+                   server that logs the extension sees the truth. */
+                bool supports_client_key = false;
+                for(int k = 0; k < p->length; k++)
+                        if(p->entries[k].id == EXT_CLIENT_KEY && p->entries[k].version >= 1)
+                                supports_client_key = client_key_enabled();
+                client_key_set_negotiated(supports_client_key);
+                bool supports_daytime_weather = false;
+                for(int k = 0; k < p->length; k++)
+                        if(p->entries[k].id == EXT_DAYTIME_WEATHER
+                           && p->entries[k].version >= DAYTIME_WEATHER_VERSION)
+                                supports_daytime_weather = true;
+                daytime_weather_set_negotiated(supports_daytime_weather);
                 struct PacketExtInfo reply;
                 reply.length = 4 + (supports_teamplay ? 1 : 0) + (supports_flashlight ? 1 : 0)
-                        + (supports_player_outfit ? 1 : 0) + (supports_pie_menu ? 1 : 0);
+                        + (supports_player_outfit ? 1 : 0) + (supports_pie_menu ? 1 : 0)
+                        + (supports_damage_markers ? 1 : 0) + (supports_client_key ? 1 : 0)
+                        + (supports_daytime_weather ? 1 : 0);
                 reply.entries[0] = (struct PacketExtInfoEntry) {
                         .id = EXT_PLAYER_PROPERTIES,
                         .version = 1,
@@ -1497,6 +1616,13 @@ void read_PacketExtInfo(void* data, int len) {
                    PR #11, so it answers with the v1 it implements. */
                 if(supports_pie_menu)
                         reply.entries[next_entry++] = (struct PacketExtInfoEntry){ PIE_MENU_EXT_ID, 1 };
+                if(supports_damage_markers)
+                        reply.entries[next_entry++] = (struct PacketExtInfoEntry){ EXT_DAMAGE_MARKERS, 1 };
+                if(supports_client_key)
+                        reply.entries[next_entry++] = (struct PacketExtInfoEntry){ EXT_CLIENT_KEY, 1 };
+                if(supports_daytime_weather)
+                        reply.entries[next_entry++] =
+                                (struct PacketExtInfoEntry){ EXT_DAYTIME_WEATHER, DAYTIME_WEATHER_VERSION };
                 network_send(PACKET_EXTINFO_ID, &reply, reply.length * sizeof(struct PacketExtInfoEntry) + 1);
         }
 }
@@ -1574,16 +1700,44 @@ void network_send(int id, void* data, int len) {
                 enet_host_flush(client);
 }
 
+/* UTF-8 Chat (aosprotocol extensions/utf-8-chat.md): a Chat Message whose body
+   starts with 0xff is UTF-8, and one without the prefix is Code Page 437. Only
+   printable ASCII means the same in both, so a line that is all printable ASCII
+   goes out bare and anything else carries the prefix; that keeps a plain
+   "/command arg" exactly as the server's command parser expects it. */
+void network_send_chat(unsigned char chat_type, const char* text) {
+        unsigned char packet[2 + sizeof(((struct PacketChatMessage*)0)->message)];
+        if(!text) text = "";
+        size_t length = strlen(text);
+        /* The message field holds the prefix, the body and its terminator. */
+        const size_t capacity = sizeof(((struct PacketChatMessage*)0)->message) - 1;
+        if(length > capacity) length = capacity;
+        bool prefix = !charset_is_printable_ascii(text, length);
+        if(prefix && length == capacity) length = capacity - 1;
+        size_t offset = 0;
+        packet[offset++] = local_player_id;
+        packet[offset++] = chat_type;
+        if(prefix)
+                packet[offset++] = CHARSET_UTF8_PREFIX;
+        memcpy(packet + offset, text, length);
+        offset += length;
+        packet[offset++] = 0;
+        network_send(PACKET_CHATMESSAGE_ID, packet, (int)offset);
+}
+
 unsigned int network_ping() {
         return network_connected ? peer->roundTripTime : 0;
 }
 
 void network_disconnect() {
         teamplay_reset_connection();
+        daytime_weather_reset_connection();
         flashlight_ext_reset_connection();
         pie_menu_ext_reset_connection();
+        damagenumbers_set_server_authoritative(false);
         player_outfit_ext_set_negotiated(false);
         player_outfit_ext_reset_map();
+        client_key_reset_connection();
         lighting_flashlight_reset();
         glowing_blocks_clear();
         if(demo_is_playing()) {
@@ -1640,6 +1794,11 @@ int network_connect_sub(char* ip, int port, int version) {
                 strncpy(network_current_ip, ip, sizeof(network_current_ip) - 1);
                 network_current_ip[sizeof(network_current_ip) - 1] = 0;
                 network_current_port = port;
+                /* Client keys are per server address so two servers cannot
+                   recognise the same player by comparing public keys. */
+                char client_key_address[CLIENT_KEY_ADDRESS_LEN + 16];
+                snprintf(client_key_address, sizeof client_key_address, "%s:%i", ip, port);
+                client_key_set_server(client_key_address);
                 log_debug("Connected to %s:%i (version %i)", ip, port, version);
 
                 float start = window_time();
@@ -1659,10 +1818,13 @@ int network_connect_sub(char* ip, int port, int version) {
 
 int network_connect(char* ip, int port) {
         teamplay_reset_connection();
+        daytime_weather_reset_connection();
         flashlight_ext_reset_connection();
         pie_menu_ext_reset_connection();
+        damagenumbers_set_server_authoritative(false);
         player_outfit_ext_set_negotiated(false);
         player_outfit_ext_reset_map();
+        client_key_reset_connection();
         log_info("Connecting to %s at port %i", ip, port);
         if(network_connected) {
                 network_disconnect();
@@ -1779,8 +1941,10 @@ void network_service(void) {
                                 network_logged_in = 0;
                                 network_map_transfer_end = 0;
                                 teamplay_reset_connection();
+                                daytime_weather_reset_connection();
                                 flashlight_ext_reset_connection();
                                 pie_menu_ext_reset_connection();
+        damagenumbers_set_server_authoritative(false);
                                 player_outfit_ext_set_negotiated(false);
                                 player_outfit_ext_reset_map();
                                 lighting_flashlight_reset();
@@ -1933,6 +2097,7 @@ static void read_PacketTeamplay(void* data, int len) {
 }
 
 void network_init() {
+        daytime_weather_reset_connection();
         player_outfit_ext_set_negotiated(false);
         player_outfit_ext_reset_map();
         enet_initialize();
@@ -1957,6 +2122,7 @@ void network_init() {
         packets[PACKET_STATEDATA_ID] = read_PacketStateData;
         packets[PACKET_KILLACTION_ID] = read_PacketKillAction;
         packets[PACKET_CHATMESSAGE_ID] = read_PacketChatMessage;
+        packets[PACKET_DAMAGEMARKER_ID] = read_PacketDamageMarker;
         packets[PACKET_MAPSTART_ID] = read_PacketMapStart;
         packets[PACKET_MAPCHUNK_ID] = read_PacketMapChunk;
         packets[PACKET_PLAYERLEFT_ID] = read_PacketPlayerLeft;
@@ -1978,4 +2144,6 @@ void network_init() {
         packets[PIE_MENU_PACKET_ID] = read_PacketPieMenu;
         packets[PACKET_EXT_BASE + EXT_PLAYER_PROPERTIES] = read_PacketPlayerProperties;
         packets[PACKET_EXT_BASE + EXT_PLAYER_OUTFIT] = read_PacketPlayerOutfit;
+        packets[PACKET_CLIENT_KEY_ID] = read_PacketClientKey;
+        packets[DAYTIME_WEATHER_PACKET_ID] = read_PacketDaytimeWeather;
 }

@@ -245,7 +245,7 @@ with tempfile.TemporaryDirectory() as d:
     exe = Path(d) / 'pie_menu_ext_test'
     c.write_text(harness)
     subprocess.run(['cc', '-std=c99', '-Wall', '-Wextra', '-Werror', '-I' + str(root / 'src'), str(c),
-                    str(root / 'src/pie_menu_ext.c'), '-o', str(exe)], check=True)
+                    str(root / 'src/pie_menu_ext.c'), str(root / 'src/charset.c'), '-o', str(exe)], check=True)
     subprocess.run([str(exe)], check=True)
 
 # The dispatch wiring in network.c cannot be compiled here without SDL/GL/ENet,
@@ -358,5 +358,5 @@ with tempfile.TemporaryDirectory() as d:
     exe = Path(d) / 'docs'
     c.write_text(docs)
     subprocess.run(['cc', '-std=c99', '-Wall', '-Wextra', '-Werror', '-I' + str(root / 'src'), str(c),
-                    str(root / 'src/pie_menu_ext.c'), '-o', str(exe)], check=True)
+                    str(root / 'src/pie_menu_ext.c'), str(root / 'src/charset.c'), '-o', str(exe)], check=True)
     subprocess.run([str(exe)], check=True)

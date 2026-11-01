@@ -274,14 +274,11 @@ void pie_menu_update(float dt) {
 }
 static void send_chat(const char* text, bool global) {
     if(!network_connected || !network_logged_in || !text) return;
-    struct PacketChatMessage msg = {0};
-    msg.player_id = local_player_id;
-    msg.chat_type = global ? CHAT_ALL : CHAT_TEAM;
-    snprintf(msg.message, sizeof(msg.message), "%s", text);
     /* ZeroSpades sends the request without pretending the server accepted it.
        Wait for the server's chat echo or /pm reply instead of displaying a
-       local "success" even when a command was rejected or throttled. */
-    network_send(PACKET_CHATMESSAGE_ID, &msg, (int)(2 + strlen(msg.message) + 1));
+       local "success" even when a command was rejected or throttled.
+       network_send_chat() carries a non-ASCII Text behind the 0xff prefix. */
+    network_send_chat(global ? CHAT_ALL : CHAT_TEAM, text);
 }
 /* Pie Menu v1 "Sending": a chosen slice sends its Text as the client normally
    sends chat, GLOBAL included, and the client interprets none of it: a Text

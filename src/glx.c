@@ -222,6 +222,7 @@ static const char* default_fs =
         "uniform sampler2D u_Texture;\n"
         "uniform float u_TextureEnabled;\n"
         "uniform vec3 u_FogColor;\n"
+        "uniform vec3 u_Camera;\n"
         "uniform float u_LightingEnabled;\n"
         "uniform float u_AlphaCutoff;\n"
         "uniform float u_LightScale;\n"
@@ -283,7 +284,10 @@ static const char* default_fs =
         "            fill = 0.30 * fill * fill * range;\n"
         "            light += u_SpotColorCone[3].rgb * ci.a * (cone * range + fill) * (0.18 + 0.82 * diffuse);\n"
         "        }\n"
-        "        c.rgb *= light;\n"
+        /* A glowing block's faces are the light themselves (marker alpha written
+           by the mesher), so the accumulated light must not dim them. */
+        "        float emissive = 1.0 - step(0.9995, v_Color.a);\n"
+        "        c.rgb *= mix(light, vec3(1.25), emissive);\n"
         "    }\n"
         "    float fog = v_FogDistance * v_FogDistance * (3.0 - 2.0 * v_FogDistance);\n"
         "    gl_FragColor = vec4(mix(c.rgb, u_FogColor, fog), c.a);\n"
@@ -813,18 +817,33 @@ void glx_displaylist_update(struct glx_displaylist* x, size_t size, int type, vo
 #define CS_NORMAL   4u
 #define CS_TEXCOORD 8u
 
-static bool cs_scope = false;
+/* cs_trusted is true only between glx_client_state_begin() and
+   glx_client_state_end(), i.e. while a run of draws may legitimately leave the
+   client arrays enabled. Outside that window - and after anything that touches
+   client state - every draw enables and releases its own arrays. */
 static bool cs_trusted = false;
-static unsigned cs_arrays = 0;
+static unsigned cs_arrays = 0; /* arrays the shadow believes are enabled */
 
-void glx_client_state_begin(void) {
-        cs_scope = true;
-        cs_trusted = true;
-        cs_arrays = 0;
+#ifndef OPENGL_CORE
+
+/* Enable/disable a client array unless the shadow already knows the state.
+   With cs_trusted clear this is a plain call that also records the result. */
+static void cs_enable(unsigned bit, GLenum cap) {
+        if(!cs_trusted || !(cs_arrays & bit)) {
+                glEnableClientState(cap);
+                cs_arrays |= bit;
+        }
 }
 
-void glx_client_state_end(void) {
-#ifndef OPENGL_CORE
+static void cs_disable(unsigned bit, GLenum cap) {
+        if(!cs_trusted || (cs_arrays & bit)) {
+                glDisableClientState(cap);
+                cs_arrays &= ~bit;
+        }
+}
+
+/* Release everything the shadow enabled and drop the array-buffer binding. */
+static void cs_release(void) {
         if(cs_arrays & CS_TEXCOORD)
                 glDisableClientState(GL_TEXTURE_COORD_ARRAY);
         if(cs_arrays & CS_NORMAL)
@@ -835,9 +854,58 @@ void glx_client_state_end(void) {
                 glDisableClientState(GL_VERTEX_ARRAY);
         if(cs_arrays)
                 glBindBuffer(GL_ARRAY_BUFFER, 0);
-#endif
         cs_arrays = 0;
-        cs_scope = false;
+}
+
+/* Point the client arrays at one display list's per-attribute buffer. Shared
+   by the per-draw path and the in-scope path so the two cannot drift apart. */
+static void cs_bind(struct glx_displaylist* x, int type, size_t len_vertex, size_t len_color, size_t len_normal) {
+        cs_enable(CS_VERTEX, GL_VERTEX_ARRAY);
+        glBindBuffer(GL_ARRAY_BUFFER, x->modern);
+
+        switch(type) {
+                case GLX_DISPLAYLIST_NORMAL: glVertexPointer(3, GL_SHORT, 0, NULL); break;
+                case GLX_DISPLAYLIST_POINTS:
+                case GLX_DISPLAYLIST_ENHANCED: glVertexPointer(3, GL_FLOAT, 0, NULL); break;
+        }
+
+        size_t offset = x->size * len_vertex;
+
+        if(x->has_color) {
+                cs_enable(CS_COLOR, GL_COLOR_ARRAY);
+                glColorPointer(4, GL_UNSIGNED_BYTE, 0, (const void*)offset);
+                offset += x->size * len_color;
+        } else {
+                cs_disable(CS_COLOR, GL_COLOR_ARRAY);
+        }
+
+        if(x->has_normal) {
+                cs_enable(CS_NORMAL, GL_NORMAL_ARRAY);
+                glNormalPointer(GL_BYTE, 0, (const void*)offset);
+                offset += x->size * len_normal;
+        } else {
+                cs_disable(CS_NORMAL, GL_NORMAL_ARRAY);
+        }
+
+        if(x->has_texcoord) {
+                cs_enable(CS_TEXCOORD, GL_TEXTURE_COORD_ARRAY);
+                glTexCoordPointer(2, GL_FLOAT, 0, (const void*)offset);
+        } else {
+                cs_disable(CS_TEXCOORD, GL_TEXTURE_COORD_ARRAY);
+        }
+}
+
+#endif /* OPENGL_CORE */
+
+void glx_client_state_begin(void) {
+        cs_trusted = true;
+        cs_arrays = 0;
+}
+
+void glx_client_state_end(void) {
+#ifndef OPENGL_CORE
+        cs_release();
+#endif
         cs_trusted = false;
 }
 
@@ -845,30 +913,15 @@ void glx_client_state_invalidate(void) {
         cs_trusted = false;
 }
 
-#ifndef OPENGL_CORE
-/* Enable a client array unless the shadow says it is already on. Only
-   meaningful inside a scope; outside one the caller uses the direct path. */
-static void cs_enable(unsigned bit, GLenum cap) {
-        if(cs_trusted && (cs_arrays & bit))
-                return;
-        glEnableClientState(cap);
-        cs_arrays |= bit;
-}
-
-static void cs_disable(unsigned bit, GLenum cap) {
-        if(cs_trusted && !(cs_arrays & bit))
-                return;
-        glDisableClientState(cap);
-        cs_arrays &= ~bit;
-}
-#endif
-
 void glx_displaylist_draw(struct glx_displaylist* x, int type) {
         glx_batch2d_flush();
         if(x->size == 0)
                 return;
 #ifndef GLX_PROGRAMMABLE
         if(!glx_version || settings.force_displaylist) {
+                /* A compiled list re-issues its own client-state commands, so
+                   the shadow cannot be trusted across it. */
+                glx_client_state_invalidate();
                 if(x->has_texcoord) {
                         glEnableClientState(GL_TEXTURE_COORD_ARRAY);
                         glx_stats_draw();
@@ -973,113 +1026,32 @@ void glx_displaylist_draw(struct glx_displaylist* x, int type) {
                         if(x->has_normal) glDisableVertexAttribArray(3);
                         glBindBuffer(GL_ARRAY_BUFFER, 0);
 #ifndef OPENGL_CORE
-                } else if(cs_scope && cs_trusted) {
-                        /* Inside a client-state scope (a run of chunk draws):
-                           the arrays stay enabled across meshes and only the
-                           buffer and the pointers change. */
-                        cs_enable(CS_VERTEX, GL_VERTEX_ARRAY);
-                        glBindBuffer(GL_ARRAY_BUFFER, x->modern);
-
-                        switch(type) {
-                                case GLX_DISPLAYLIST_NORMAL: glVertexPointer(3, GL_SHORT, 0, NULL); break;
-                                case GLX_DISPLAYLIST_POINTS:
-                                case GLX_DISPLAYLIST_ENHANCED: glVertexPointer(3, GL_FLOAT, 0, NULL); break;
-                        }
-
-                        size_t offset = x->size * len_vertex;
-
-                        if(x->has_color) {
-                                cs_enable(CS_COLOR, GL_COLOR_ARRAY);
-                                glColorPointer(4, GL_UNSIGNED_BYTE, 0, (const void*)offset);
-                                offset += x->size * len_color;
-                        } else {
-                                cs_disable(CS_COLOR, GL_COLOR_ARRAY);
-                        }
-
-                        if(x->has_normal) {
-                                cs_enable(CS_NORMAL, GL_NORMAL_ARRAY);
-                                glNormalPointer(GL_BYTE, 0, (const void*)offset);
-                                offset += x->size * len_normal;
-                        } else {
-                                cs_disable(CS_NORMAL, GL_NORMAL_ARRAY);
-                        }
-
-                        if(x->has_texcoord) {
-                                cs_enable(CS_TEXCOORD, GL_TEXTURE_COORD_ARRAY);
-                                glTexCoordPointer(2, GL_FLOAT, 0, (const void*)offset);
-                        } else {
-                                cs_disable(CS_TEXCOORD, GL_TEXTURE_COORD_ARRAY);
-                        }
-
-                        if(type == GLX_DISPLAYLIST_POINTS) {
-                                glx_stats_draw();
-                                glDrawArrays(GL_POINTS, 0, x->size);
-                        } else {
-                                glx_stats_draw();
-#ifdef GLX_PROGRAMMABLE
-                                glDrawArrays(GL_TRIANGLES, 0, x->size);
-#else
-                                glDrawArrays(GL_QUADS, 0, x->size);
-#endif
-                        }
                 } else {
-                        /* GLES 1.1 / desktop GL 2.0+ fallback: use client-state arrays */
-                        glx_client_state_invalidate();
-                        glEnableClientState(GL_VERTEX_ARRAY);
-                        glBindBuffer(GL_ARRAY_BUFFER, x->modern);
+                        /* Client-state path: no explicit-attribute shader is
+                           in use, so the mesh is drawn straight from its
+                           buffer. Inside a scope the arrays and the binding
+                           survive between meshes; outside one they are
+                           released after every draw. */
+                        bool scoped = cs_trusted;
 
-                        switch(type) {
-                                case GLX_DISPLAYLIST_NORMAL: glVertexPointer(3, GL_SHORT, 0, NULL); break;
-                                case GLX_DISPLAYLIST_POINTS:
-                                case GLX_DISPLAYLIST_ENHANCED: glVertexPointer(3, GL_FLOAT, 0, NULL); break;
-                        }
-
-                        size_t offset = x->size * len_vertex;
-
-                        if(x->has_color) {
-                                glEnableClientState(GL_COLOR_ARRAY);
-                                glColorPointer(4, GL_UNSIGNED_BYTE, 0, (const void*)offset);
-                                offset += x->size * len_color;
-                        }
-
-                        if(x->has_normal) {
-                                glEnableClientState(GL_NORMAL_ARRAY);
-                                glNormalPointer(GL_BYTE, 0, (const void*)offset);
-                                offset += x->size * len_normal;
-                        }
-
-                        if(x->has_texcoord) {
-                                glEnableClientState(GL_TEXTURE_COORD_ARRAY);
-                                glTexCoordPointer(2, GL_FLOAT, 0, (const void*)offset);
-                        }
-
-                        glBindBuffer(GL_ARRAY_BUFFER, 0);
-
-                        if(type == GLX_DISPLAYLIST_POINTS) {
-                                glx_stats_draw();
-                                glDrawArrays(GL_POINTS, 0, x->size);
-                        } else {
-                                glx_stats_draw();
+                        cs_bind(x, type, len_vertex, len_color, len_normal);
+                        glx_stats_draw();
 #ifdef GLX_PROGRAMMABLE
-                                glDrawArrays(GL_TRIANGLES, 0, x->size);
+                        glDrawArrays((type == GLX_DISPLAYLIST_POINTS) ? GL_POINTS : GL_TRIANGLES, 0, x->size);
 #else
-                                glDrawArrays(GL_QUADS, 0, x->size);
+                        glDrawArrays((type == GLX_DISPLAYLIST_POINTS) ? GL_POINTS : GL_QUADS, 0, x->size);
 #endif
-                        }
-
-                        if(x->has_texcoord)
-                                glDisableClientState(GL_TEXTURE_COORD_ARRAY);
-                        if(x->has_normal)
-                                glDisableClientState(GL_NORMAL_ARRAY);
-                        if(x->has_color)
-                                glDisableClientState(GL_COLOR_ARRAY);
-                        glDisableClientState(GL_VERTEX_ARRAY);
-#endif
+                        if(!scoped)
+                                cs_release();
                 }
+#else
+                } /* core profile: there is no client-state path to fall back to */
+#endif
 #ifndef GLX_PROGRAMMABLE
         }
 #endif
 }
+
 
 /* ── Programmable helper draw functions ────────────────────────────────────────── */
 
@@ -1480,6 +1452,10 @@ void glx_batch2d_flush(void) {
                 glDisableClientState(GL_NORMAL_ARRAY);
                 glEnableClientState(GL_VERTEX_ARRAY);
                 glEnableClientState(GL_COLOR_ARRAY);
+                /* The pointers below are client memory, so no buffer may be
+                   bound: a display list can leave its own VBO bound when this
+                   flush happens inside a chunk draw scope. */
+                glBindBuffer(GL_ARRAY_BUFFER, 0);
                 glVertexPointer(3, GL_FLOAT, 0, batch2d_pos);
                 glColorPointer(4, GL_UNSIGNED_BYTE, 0, batch2d_col);
                 glx_stats_draw();

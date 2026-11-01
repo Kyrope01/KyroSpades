@@ -2,7 +2,7 @@
 
 Run: python3 tests/water_tile_stride_test.py
 
-Tiled wave mode (the shipped default, `water_wave_mode = 1`) draws one solid
+Tiled wave mode (`water_wave_mode = 1`) draws one solid
 block per wave tile, so only the cell at the tile origin does any work: every
 other cell used to run the whole per-cell body (wrap computation, camera disc
 test, water-wave branch) only to be thrown away by

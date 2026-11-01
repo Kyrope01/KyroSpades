@@ -176,6 +176,7 @@ contrast/vignette/outlines/… are non-zero. Shipped defaults
 
 ```
 exposure = 20.0      saturation = -15.0     object_outlines = 1
+                                      (outlines later shipped off by default)
 multisamples = 2     ambient_occlusion = 1   camera_fov = 100
 ```
 

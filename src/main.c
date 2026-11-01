@@ -54,6 +54,7 @@
 #include "teamplay.h"
 #include "chathistory.h"
 #include "config.h"
+#include "daytime_weather.h"
 #include "log.h"
 #include "ping.h"
 #include "matrix.h"
@@ -64,6 +65,7 @@
 #include "shadow.h"
 #include "water.h"
 #include "postprocess.h"
+#include "sky.h"
 #include "texture.h"
 #include "chunk.h"
 #include "skins.h"
@@ -109,11 +111,7 @@ static struct {
            filmic tone-mapping flag */
         int uni_pp_ca_strength;
         int uni_pp_filmic;
-        int uni_pp_bloom;
-        int uni_pp_bloom_threshold;
-        int uni_pp_bloom_separate;
         int uni_pp_texel;
-        int uni_pp_bloom_texture;
         int uni_pp_dmg; /* damage feedback: red edge vignette (0..1) */
         int uni_pp_outlines;
         int uni_pp_depthmap;
@@ -587,7 +585,6 @@ void display() {
            vignette fades out, even when every other post-process is off. HDR
            alone must not force a no-op pass on non-Core or 2.1 fallback paths. */
         int hdr_postproc = settings.hdr_rendering && postprocess_hdr_supported();
-        int bloom_postproc = settings.bloom && settings.bloom_strength > 0.001F;
         float outline_fog_range = camera_mode == CAMERAMODE_SPECTATOR
                 ? settings.spectator_fog_distance : settings.render_distance;
         if(outline_fog_range < 1.0F)
@@ -603,10 +600,10 @@ void display() {
                                   || settings.contrast < -0.5F || settings.contrast > 0.5F
                                   || settings.vignette > 0.5F
                                   || settings.lens_flare || settings.chromatic_aberration || settings.filmic_tonemapping
-                                  || hdr_postproc || bloom_postproc || outlines_postproc
+                                  || hdr_postproc || outlines_postproc
                                   || damagefx_vignette() > 0.003F));
         int desired_hdr = postprocess_hdr_supported()
-                && (settings.hdr_rendering || bloom_postproc);
+                && settings.hdr_rendering;
         if(needs_postproc && postproc.target_failed) {
                 if(postproc.w == settings.window_width && postproc.h == settings.window_height
                    && postproc.hdr_requested == desired_hdr) {
@@ -629,7 +626,7 @@ void display() {
                         window_gl_default_framebuffer = (int)live_screen_fbo;
         }
 
-        if(network_map_transfer) {
+        if(network_map_transfer || daytime_weather_awaiting_sky()) {
                 glClearColor(0.0F, 0.0F, 0.0F, 1.0F);
         } else {
                 float fc[3];
@@ -653,8 +650,6 @@ void display() {
 #endif
 
                 if(needs_postproc) {
-                        /* Bloom also needs the floating-point scene target so
-                           highlights above display white survive extraction. */
                         if(postproc.texture && (postproc.w != settings.window_width || postproc.h != settings.window_height
                                                 || postproc.hdr_requested != desired_hdr))
                                 postproc_release_targets();
@@ -836,9 +831,6 @@ void display() {
                                                 "uniform float pp_vig;\n"
                                                 "uniform float pp_ca_strength;\n"
                                                 "uniform float pp_filmic;\n"
-                                                "uniform float pp_bloom;\n"
-                                                "uniform float pp_bloom_threshold;\n"
-                                                "uniform float pp_bloom_separate;\n"
                                                 "uniform vec2 pp_texel;\n"
                                                 "uniform float pp_dmg;\n"
                                                 "uniform float pp_outlines;\n"
@@ -848,7 +840,6 @@ void display() {
                                                 "uniform float pp_depth_far;\n"
                                                 "uniform sampler2D depthmap;\n"
                                                 "uniform sampler2D tex;\n"
-                                                "uniform sampler2D pp_bloom_texture;\n"
                                                 "vec3 acesFilm(vec3 x){\n"
                                                 "    const float a=2.51; const float b=0.03;\n"
                                                 "    const float c=2.43; const float d=0.59; const float e=0.14;\n"
@@ -866,25 +857,6 @@ void display() {
                                                 "        c.b = texture2D(tex, uv - off).b;\n"
                                                 "    } else {\n"
                                                 "        c = texture2D(tex, uv).rgb;\n"
-                                                "    }\n"
-                                                "    if(pp_bloom > 0.001){\n"
-                                                "        if(pp_bloom_separate > 0.5){\n"
-                                                "            c += texture2D(pp_bloom_texture, uv).rgb * pp_bloom;\n"
-                                                "        } else {\n"
-                                                "            vec3 glow = vec3(0.0);\n"
-                                                "            glow += texture2D(tex, uv + pp_texel * vec2( 2.0, 0.0)).rgb;\n"
-                                                "            glow += texture2D(tex, uv + pp_texel * vec2(-2.0, 0.0)).rgb;\n"
-                                                "            glow += texture2D(tex, uv + pp_texel * vec2(0.0,  2.0)).rgb;\n"
-                                                "            glow += texture2D(tex, uv + pp_texel * vec2(0.0, -2.0)).rgb;\n"
-                                                "            glow += texture2D(tex, uv + pp_texel * vec2( 1.5,  1.5)).rgb;\n"
-                                                "            glow += texture2D(tex, uv + pp_texel * vec2(-1.5,  1.5)).rgb;\n"
-                                                "            glow += texture2D(tex, uv + pp_texel * vec2( 1.5, -1.5)).rgb;\n"
-                                                "            glow += texture2D(tex, uv + pp_texel * vec2(-1.5, -1.5)).rgb;\n"
-                                                "            glow *= 0.125;\n"
-                                                "            float peak = max(glow.r, max(glow.g, glow.b));\n"
-                                                "            float gate = max(peak - pp_bloom_threshold, 0.0) / max(peak, 0.0001);\n"
-                                                "            c += glow * gate * pp_bloom;\n"
-                                                "        }\n"
                                                 "    }\n"
                                                 "    float g = dot(c, vec3(0.299, 0.587, 0.114));\n"
                                                 "    c = mix(vec3(g), c, pp_sat);\n"
@@ -929,9 +901,6 @@ void display() {
                                         "uniform float pp_vig;"
                                         "uniform float pp_ca_strength;"
                                         "uniform float pp_filmic;"
-                                        "uniform float pp_bloom;"
-                                        "uniform float pp_bloom_threshold;"
-                                        "uniform float pp_bloom_separate;"
                                         "uniform vec2 pp_texel;"
                                         "uniform float pp_dmg;"
                                         "uniform float pp_outlines;"
@@ -941,7 +910,6 @@ void display() {
                                         "uniform float pp_depth_far;"
                                         "uniform sampler2D depthmap;"
                                         "uniform sampler2D tex;"
-                                        "uniform sampler2D pp_bloom_texture;"
                                         "vec3 acesFilm(vec3 x){"
                                         "const float a=2.51;const float b=0.03;"
                                         "const float c=2.43;const float d=0.59;const float e=0.14;"
@@ -958,23 +926,6 @@ void display() {
                                         "c.g=texture2D(tex,uv).g;"
                                         "c.b=texture2D(tex,uv-off).b;"
                                         "}else{c=texture2D(tex,uv).rgb;}"
-                                        "if(pp_bloom>0.001){"
-                                        "if(pp_bloom_separate>0.5){c+=texture2D(pp_bloom_texture,uv).rgb*pp_bloom;}"
-                                        "else{"
-                                        "vec3 glow=vec3(0.0);"
-                                        "glow+=texture2D(tex,uv+pp_texel*vec2(2.0,0.0)).rgb;"
-                                        "glow+=texture2D(tex,uv+pp_texel*vec2(-2.0,0.0)).rgb;"
-                                        "glow+=texture2D(tex,uv+pp_texel*vec2(0.0,2.0)).rgb;"
-                                        "glow+=texture2D(tex,uv+pp_texel*vec2(0.0,-2.0)).rgb;"
-                                        "glow+=texture2D(tex,uv+pp_texel*vec2(1.5,1.5)).rgb;"
-                                        "glow+=texture2D(tex,uv+pp_texel*vec2(-1.5,1.5)).rgb;"
-                                        "glow+=texture2D(tex,uv+pp_texel*vec2(1.5,-1.5)).rgb;"
-                                        "glow+=texture2D(tex,uv+pp_texel*vec2(-1.5,-1.5)).rgb;"
-                                        "glow*=0.125;"
-                                        "float peak=max(glow.r,max(glow.g,glow.b));"
-                                        "float gate=max(peak-pp_bloom_threshold,0.0)/max(peak,0.0001);"
-                                        "c+=glow*gate*pp_bloom;"
-                                        "}}"
                                         "float g=dot(c,vec3(0.299,0.587,0.114));"
                                         "c=mix(vec3(g),c,pp_sat);"
                                         "c=c*pp_scale+pp_bias;"
@@ -1001,9 +952,6 @@ void display() {
                                         postproc.uni_pp_vig = glx_uniform_location(postproc.shader, "pp_vig");
                                         postproc.uni_pp_ca_strength = glx_uniform_location(postproc.shader, "pp_ca_strength");
                                         postproc.uni_pp_filmic = glx_uniform_location(postproc.shader, "pp_filmic");
-                                        postproc.uni_pp_bloom = glx_uniform_location(postproc.shader, "pp_bloom");
-                                        postproc.uni_pp_bloom_threshold = glx_uniform_location(postproc.shader, "pp_bloom_threshold");
-                                        postproc.uni_pp_bloom_separate = glx_uniform_location(postproc.shader, "pp_bloom_separate");
                                         postproc.uni_pp_texel = glx_uniform_location(postproc.shader, "pp_texel");
                                         postproc.uni_pp_dmg = glx_uniform_location(postproc.shader, "pp_dmg");
                                         postproc.uni_pp_outlines = glx_uniform_location(postproc.shader, "pp_outlines");
@@ -1012,17 +960,15 @@ void display() {
                                         postproc.uni_pp_depth_near = glx_uniform_location(postproc.shader, "pp_depth_near");
                                         postproc.uni_pp_depth_far = glx_uniform_location(postproc.shader, "pp_depth_far");
                                         postproc.uni_pp_depthmap = glx_uniform_location(postproc.shader, "depthmap");
-                                        postproc.uni_pp_bloom_texture = glx_uniform_location(postproc.shader, "pp_bloom_texture");
                                         GLint scene_sampler = glx_uniform_location(postproc.shader, "tex");
                                         if(postproc.uni_pp_sat < 0 || postproc.uni_pp_scale < 0 || postproc.uni_pp_bias < 0
                                            || postproc.uni_pp_vig < 0 || postproc.uni_pp_ca_strength < 0
-                                           || postproc.uni_pp_filmic < 0 || postproc.uni_pp_bloom < 0
-                                           || postproc.uni_pp_bloom_threshold < 0 || postproc.uni_pp_bloom_separate < 0
+                                           || postproc.uni_pp_filmic < 0
                                            || postproc.uni_pp_texel < 0 || postproc.uni_pp_dmg < 0
                                            || postproc.uni_pp_outlines < 0 || postproc.uni_pp_depthmap < 0
                                            || postproc.uni_pp_outline_thickness < 0 || postproc.uni_pp_fog_range < 0
                                            || postproc.uni_pp_depth_near < 0 || postproc.uni_pp_depth_far < 0
-                                           || postproc.uni_pp_bloom_texture < 0 || scene_sampler < 0) {
+                                           || scene_sampler < 0) {
                                                 log_error("Post-process shader contract is incomplete; rendering without post-processing");
                                                 glx_delete_program(postproc.shader);
                                                 postproc.shader = 0;
@@ -1033,7 +979,6 @@ void display() {
                                                 previous_program = (GLint)glx_current_program();
                                                 glx_use_program(postproc.shader);
                                                 glUniform1i(scene_sampler, 0);
-                                                glUniform1i(postproc.uni_pp_bloom_texture, 1);
                                                 glUniform1i(postproc.uni_pp_depthmap, 2);
                                                 glx_use_program((GLuint)previous_program);
                                         }
@@ -1062,6 +1007,7 @@ void display() {
                                                 "uniform float sunBrightness;\n"
                                                 "uniform float lensFlareStrength;\n"
                                                 "uniform float includeScene;\n"
+                                                "uniform float useCloudMask;\n"
                                                 "void main(){\n"
                                                 "    vec2 uv = v_TexCoord;\n"
                                                 "    vec3 color = vec3(0.0);\n"
@@ -1071,6 +1017,7 @@ void display() {
                                                 "        float onScreen = step(0.0, min(sunUV.x, sunUV.y)) * step(max(sunUV.x, sunUV.y), 1.0);\n"
                                                 "        float sunDepth = texture2D(depthmap, clamp(sunUV, vec2(0.0), vec2(1.0))).r;\n"
                                                 "        float occlusion = onScreen * step(1.0, sunDepth);\n"
+                                                "        if (useCloudMask > 0.5) occlusion *= smoothstep(0.4, 0.8, texture2D(rendered, clamp(sunUV, vec2(0.0), vec2(1.0))).a);\n"
                                                 "        if (occlusion > 0.0) {\n"
                                                 "        vec2 dir = uv - sunUV;\n"
                                                 "        float dist = length(dir);\n"
@@ -1107,6 +1054,7 @@ void display() {
                                         "uniform float sunBrightness;"
                                         "uniform float lensFlareStrength;"
                                         "uniform float includeScene;"
+                                        "uniform float useCloudMask;"
                                         "void main(){"
                                         "vec2 uv=gl_TexCoord[0].xy;"
                                         "vec3 color=vec3(0.0);"
@@ -1116,6 +1064,7 @@ void display() {
                                         "float onScreen=step(0.0,min(sunUV.x,sunUV.y))*step(max(sunUV.x,sunUV.y),1.0);"
                                         "float sunDepth=texture2D(depthmap,clamp(sunUV,vec2(0.0),vec2(1.0))).r;"
                                         "float occlusion=onScreen*step(1.0,sunDepth);"
+                                        "if(useCloudMask>0.5)occlusion*=smoothstep(0.4,0.8,texture2D(rendered,clamp(sunUV,vec2(0.0),vec2(1.0))).a);"
                                         "if(occlusion>0.0){"
                                         "vec2 dir=uv-sunUV;"
                                         "float dist=length(dir);"
@@ -1191,23 +1140,21 @@ void display() {
 
                 camera_ads_update(dt_float);
 
-                if(settings.opengl14) {
-                        matrix_identity(matrix_projection);
-                        matrix_perspective(matrix_projection, camera_fov_scaled(dt_float),
-                                                           ((float)settings.window_width) / ((float)settings.window_height), 0.1F,
-                                                           settings.render_distance + CHUNK_SIZE * 4.0F);
-                        matrix_upload_p();
+                matrix_identity(matrix_projection);
+                matrix_perspective(matrix_projection, camera_fov_scaled(dt_float),
+                                                   ((float)settings.window_width) / ((float)settings.window_height), 0.1F,
+                                                   settings.render_distance + CHUNK_SIZE * 4.0F);
+                matrix_upload_p();
 
-                        matrix_identity(matrix_view);
-                        camera_apply();
-                        matrix_identity(matrix_model);
-                        matrix_upload();
+                matrix_identity(matrix_view);
+                camera_apply();
+                matrix_identity(matrix_model);
+                matrix_upload();
 
 #ifndef OPENGL_CORE
-                        float lpos[4] = {0.0F, -1.0F, 1.0F, 0.0F};
-                        glLightfv(GL_LIGHT0, GL_POSITION, lpos);
+                float lpos[4] = {0.0F, -1.0F, 1.0F, 0.0F};
+                glLightfv(GL_LIGHT0, GL_POSITION, lpos);
 #endif
-                }
 
                 /* The local eye beam follows the rendered view. On V1 servers
                    its on/off state and beam come from the server; without the
@@ -1246,19 +1193,26 @@ void display() {
                 if(settings.damage_numbers)
                         damagenumbers_capture_camera();
 
-                if(!network_map_transfer) {
+                /* Daytime and Weather: a negotiated world waits for the first
+                   Sky, so the time it is drawn with is never a guess. */
+                bool daytime_weather_holds_world = daytime_weather_awaiting_sky() != 0;
+                if(network_map_transfer || daytime_weather_holds_world) {
+                        /* The block below restores this; skipping it while the
+                           world is not drawn must not leak a spectator fog
+                           distance into the next frame. */
+                        settings.render_distance = saved_render_distance;
+                }
+                if(!network_map_transfer && !daytime_weather_holds_world) {
                         /* Refresh the cached sun depth map from the real camera
-                           state before HUD/view-model matrices overwrite it. */
-                        shadow_render();
+                           state before HUD/view-model matrices overwrite it.
+                           At night there is no sun to cast one. */
+                        if(!daytime_weather_is_night())
+                                shadow_render();
 
-                        /* Sky gradient: drawn as a background BEFORE the 3D scene so
-                           terrain correctly draws on top of it. The gradient makes the
-                           upper sky darker (like real atmospheric perspective), blending
-                           from fog_color at the horizon to a darker tint at the top.
-                           Previously this was drawn AFTER the scene with GL_FLAT shade
-                           model still active, which made per-vertex colors not
-                           interpolate — the entire quad rendered as fog_color (invisible). */
-                        if(settings.sky_gradient) {
+                        /* Draw the camera-oriented sky before scene geometry. If
+                           shaders are unavailable, retain the legacy gradient. */
+                        bool sky_drawn = (settings.sky_gradient || settings.sky_clouds) && sky_render();
+                        if(!sky_drawn && settings.sky_gradient) {
                                 matrix_push(matrix_projection);
                                 matrix_push(matrix_view);
                                 matrix_push(matrix_model);
@@ -1566,7 +1520,7 @@ void display() {
                                 glActiveTexture(GL_TEXTURE0);
 
                                 postproc.flare_applied = 0;
-
+                                unsigned int scene_texture = postproc.texture;
                                 /* === Lens flare pass === */
                                 if(settings.lens_flare
                                    && postproc.flare_shader && postproc.flare_fbo && postproc.flare_tex
@@ -1604,12 +1558,14 @@ void display() {
                                                 glActiveTexture(GL_TEXTURE1);
                                                 glBindTexture(GL_TEXTURE_2D, postproc.depth_tex);
                                                 glActiveTexture(GL_TEXTURE0);
-                                                glBindTexture(GL_TEXTURE_2D, postproc.texture);
+                                                glBindTexture(GL_TEXTURE_2D, scene_texture);
 
                                                 glx_use_program(postproc.flare_shader);
                                                 glUniform3f(postproc.uni_flare_sun_pos, fl_sun_clip[0], fl_sun_clip[1], fl_sun_clip[2]);
                                                 glUniform1f(postproc.uni_flare_sun_brightness, fl_sun_brightness);
                                                 glUniform1f(postproc.uni_flare_strength, 1.0F);
+                                                glUniform1f(glx_uniform_location(postproc.flare_shader, "useCloudMask"),
+                                                            sky_drawn && settings.sky_clouds ? 1.0F : 0.0F);
 
                                                 if(postproc.flare_applied) {
                                                         glUniform1f(postproc.uni_flare_include_scene, 0.0F);
@@ -1645,20 +1601,7 @@ void display() {
                                         }
                                 }
 
-                                unsigned int scene_texture = postproc.flare_applied ? postproc.flare_tex : postproc.texture;
-                                unsigned int bloom_texture = 0;
-                                if(bloom_postproc && postproc.fbo && scene_texture) {
-                                        /* Strict Core uses a half-resolution bright pass followed by
-                                           three horizontal/vertical Gaussian pairs. If allocation or
-                                           compilation fails, a zero result selects the established
-                                           single-pass compatibility bloom in the composite shader. */
-                                        postprocess_bloom_debug_test();
-                                        bloom_texture = postprocess_bloom_render(scene_texture,
-                                                                                 settings.window_width,
-                                                                                 settings.window_height,
-                                                                                 settings.bloom_threshold);
-                                }
-
+                                if(postproc.flare_applied) scene_texture = postproc.flare_tex;
                                 if(postproc.fbo) {
                                         /* Off-screen-FBO path (desktop/non-iOS): bind the screen and
                                            sample the world texture we rendered into. */
@@ -1675,11 +1618,6 @@ void display() {
                                         glActiveTexture(GL_TEXTURE0);
                                         glBindTexture(GL_TEXTURE_2D, postproc.texture);
                                         glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, settings.window_width, settings.window_height);
-                                }
-                                if(bloom_texture) {
-                                        glActiveTexture(GL_TEXTURE1);
-                                        glBindTexture(GL_TEXTURE_2D, bloom_texture);
-                                        glActiveTexture(GL_TEXTURE0);
                                 }
                                 if(postproc.depth_tex && postproc.fbo) {
                                         glActiveTexture(GL_TEXTURE2);
@@ -1699,9 +1637,6 @@ void display() {
                                         glUniform1f(postproc.uni_pp_ca_strength,
                                                     settings.chromatic_aberration ? settings.chromatic_aberration_strength * 0.01F : 0.0F);
                                         glUniform1f(postproc.uni_pp_filmic, settings.filmic_tonemapping ? 1.0F : 0.0F);
-                                        glUniform1f(postproc.uni_pp_bloom, bloom_postproc ? settings.bloom_strength : 0.0F);
-                                        glUniform1f(postproc.uni_pp_bloom_threshold, settings.bloom_threshold);
-                                        glUniform1f(postproc.uni_pp_bloom_separate, bloom_texture ? 1.0F : 0.0F);
                                         glUniform2f(postproc.uni_pp_texel, 1.0F / settings.window_width, 1.0F / settings.window_height);
                                         glUniform1f(postproc.uni_pp_dmg, damagefx_vignette()); // pp_dmg
                                         glUniform1f(postproc.uni_pp_outlines,
@@ -2309,8 +2244,9 @@ void deinit() {
         sound_deinit();
         glowing_blocks_deinit();
         lighting_deinit();
+        sky_deinit();
         shadow_deinit();
-        texture_blocks_release_materials();
+        texture_blocks_release_normal_map();
         glx_deinit();
         window_deinit();
 }
@@ -2429,9 +2365,9 @@ static void main_apply_perf_preset_bs(void) {
         settings.chromatic_aberration = 0;
         settings.object_outlines = 0;
         settings.hdr_rendering = 0;
-        settings.bloom = 0;
         settings.lens_flare = 0;
         settings.sky_gradient = 0;
+        settings.sky_clouds = 0;
 
         /* Upstream terrain is fixed-function with baked vertex colours. */
         settings.dynamic_lights = 0;
@@ -2439,7 +2375,6 @@ static void main_apply_perf_preset_bs(void) {
         settings.tracer_lights = 0;
         settings.shadow_quality = 0;
         settings.shadow_intensity = 0.0F;
-        settings.shadow_entities = 0;
         settings.textured_blocks = 0;
 
         /* Upstream water is static map geometry. */
@@ -2455,20 +2390,19 @@ static void main_apply_perf_preset_bs(void) {
 }
 
 int main(int argc, char** argv) {
-        settings.opengl14 = 1;
-        settings.color_correction = 0;
         settings.multisamples = 2;
-        settings.shadow_entities = 0;
         settings.ambient_occlusion = 1;
         settings.ao_multiplier = 1.0F;
         settings.shadow_quality = 1; /* directional terrain shadows */
         settings.shadow_intensity = 0.40F;
         settings.sky_gradient = 0;
         settings.sky_gradient_intensity = 0.5F;
+        settings.sky_clouds = 0;
+        settings.sky_cloud_coverage = 0.5F;
         settings.water_waves = 1;
         settings.water_wave_intensity = 2.0F;
         settings.water_wave_speed = 1.0F;
-        settings.water_wave_mode = 1;
+        settings.water_wave_mode = 0;
         settings.water_wave_tile_size = 2;
         settings.render_distance = 128.0F;
         settings.spectator_fog_distance = 128.0F;
@@ -2527,21 +2461,14 @@ int main(int argc, char** argv) {
         settings.saturation = -15.0F;
         settings.contrast = 0.0F;
         settings.vignette = 0.0F;
-        /* ── Post-processing ─────────────────────────────────────────────────
-           Bloom is disabled for new installations; each saved client setting
-           remains independently configurable. */
-        settings.object_outlines = 1; /* dark contours from the scene depth buffer */
-        settings.object_outline_thickness = 0.7F;
-        settings.chromatic_aberration = 1; /* edge chromatic fringe, on by default */
+        /* ── Post-processing ───────────────────────────────────────────────── */
+        settings.object_outlines = 0; /* off: the antialiased scene reads well without contours */
+        settings.object_outline_thickness = 0.7F; /* kept for anyone who turns outlines back on */
+        settings.chromatic_aberration = 0; /* off by default; user can enable it */
         settings.chromatic_aberration_strength = 1.5F;
-        /* Filmic tone mapping and chromatic aberration retain the established
-           client defaults. Bloom uses HDR on OpenGL Core and retains a
-           compatibility fallback on older renderers. */
-        settings.filmic_tonemapping = 1;
+        /* Keep filmic tone mapping opt-in as well. */
+        settings.filmic_tonemapping = 0;
         settings.hdr_rendering = 0;
-        settings.bloom = 0;
-        settings.bloom_strength = 0.35F;
-        settings.bloom_threshold = 0.8F;
         settings.dynamic_lights = 1;
         settings.all_player_flashlights = 0; /* Opt-in: never alter remote visuals on upgrade. */
         settings.flash_lights = 1;
@@ -2568,6 +2495,7 @@ int main(int argc, char** argv) {
            disabled individually in settings): floating damage numbers,
            session/technical stats, the live player counter and spectator ESP. */
         settings.damage_numbers = 1;
+        settings.killfeed_distance = 1; /* killfeed says how far the kill came from */
         settings.player_stats = 1;
         settings.player_technical_stats = 1;
         settings.show_live_player_count = 1;
@@ -2966,6 +2894,10 @@ int main(int argc, char** argv) {
                                  teamplay_apply_pending();
                                  network_map_transfer_end = 0;
                                  loading_screen_seen_time = 0.0F;
+                                 /* The map is in; if the server negotiated Daytime and
+                                    Weather it still owes us the Sky before the world may
+                                    be drawn. */
+                                 daytime_weather_world_entered();
                          }
                  }
                  prof_stage_begin(PROF_SOUND);

@@ -18,6 +18,7 @@
 #include "file.h"
 #include "window.h"
 #include "network.h"
+#include "daytime_weather.h"
 #include "teamplay.h"
 #include "map.h"
 #include "player.h"
@@ -152,6 +153,10 @@ void demo_start_record(void) {
     CurrentDemo.start_time = (float)window_time();
     if(CurrentDemo.fp && network_logged_in && teamplay_negotiated())
         teamplay_record_initial(demo_record_teamplay_packet);
+    /* A recording that starts after the Sky was sent would otherwise replay as
+       day; write the time in force right now. */
+    if(CurrentDemo.fp && network_logged_in)
+        daytime_weather_record_initial(demo_record_teamplay_packet);
     log_info("Demo Recording started.");
 }
 
@@ -519,6 +524,8 @@ static int demo_reset_world(float time) {
     chunk_rebuild_all();
     player_init();
     teamplay_reset_connection();
+    /* The Time is per map, so a seek replays it from the packets. */
+    daytime_weather_reset_world();
 
     /* Wipe chat so the silent replay rebuilds it from scratch instead of
        appending duplicate join/disconnect lines on every backward seek. */

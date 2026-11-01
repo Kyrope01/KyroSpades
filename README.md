@@ -58,7 +58,7 @@ corpse models. The current draft Player Outfit extension is also supported:
 server-assigned outfit <code>Undead</code> uses these models regardless of team.
 
 <dt>Object Outlines
-<dd>    Optional dark depth-edge outlines around visible map geometry and players (when a sampleable scene-depth buffer is available; unavailable on iOS copy mode). Enabled by default at 0.7 px; enter a thickness from 0.5 to 8 px under Visual Effects → Post Processing. Outlines fade with scene fog.
+<dd>    Optional dark depth-edge outlines around visible map geometry and players (when a sampleable scene-depth buffer is available; unavailable on iOS copy mode). Off by default, since the antialiased scene reads well without it; turn it on, and enter a thickness from 0.5 to 8 px, under Visual Effects → Post Processing. Outlines fade with scene fog.
 
 <dt>Dynamic Wallpapers
 <dd>    Sets a random image from the <code>png/bg/</code> folder as your
@@ -133,8 +133,10 @@ to the top of the server list.
 
 <dt>Glowing Blocks
 <dd>    The advanced colour selector can mark newly placed blocks as client-only,
-session-persistent coloured point lights. Their illumination fades smoothly
-with distance and remains independent of the water and post-processing passes.
+session-persistent coloured point lights. A glowing block's own faces are drawn
+as the light they emit — flat, unshaded and as bright at night as at noon — so
+the block reads as the source instead of a block lit from outside, while its
+illumination still fades smoothly across the terrain with distance.
 
 <dt>Water Shader and Waves
 <dd>    Water remains voxel-styled while adding animated waves and reflections.
@@ -143,17 +145,22 @@ lights and terrain shadows, with the established compatibility fallback kept.
 
 <dt>Graphical Effects
 <dd>    Filmic tonemapping, chromatic aberration, smooth forward lighting and lens flare.
-OpenGL Core also supports a floating-point HDR scene and soft multipass bloom,
-with compatibility rendering retained when those resources are unavailable.
-Bloom defaults on for new installations; existing saved settings keep their own
-value. To check the actual GPU bright-pass and blur once, launch with
-`KS_BLOOM_TEST=1` and inspect the log for "Bloom GPU self-test passed".
+OpenGL Core also supports a floating-point HDR scene, with compatibility rendering retained when HDR resources are unavailable.
 
 <dt>Blood Stains
 <dd>    Blood stains option added.
 
 <dt>Damage Numbers
 <dd>    Damage done to enemy on hit shown as floating numbers when this option is enabled.
+
+<dt>Killfeed Distance
+<dd>    Every kill in the killfeed says how far the shot came from, in blocks:
+    <code>Proman killed Zero (Rifle) from 42.5 blocks</code>. The number is the
+    straight line between the two players' eyes, so a shot from a tower or a
+    rooftop reads as far as it is. Player names keep their team colours while
+    the rest of the line is white — green when you got the kill, red when you
+    were the one killed. On by default; toggle the distance under HUD/UI
+    Settings → Killfeed distance.
 
 <dt>Discord Rich Presence
 <dd>    Shows "Playing KyroSpades" as your Discord activity, with the server name,
@@ -205,9 +212,19 @@ shadows as a safe fallback.
 spotlight while alive in first-person view. The binding can be changed under
 Controls and follows the master dynamic-light setting.
 
-<dt>Sky Gradient
-<dd>    The sky is rendered as a blended gradient with adjustable intensity
-instead of a flat color.
+<dt>Atmospheric Sky
+<dd>    The sky is drawn by a camera-oriented shader instead of a flat color, with
+an adjustable gradient and optional procedural volumetric clouds that scroll over
+the map and dim the lens flare where they cover the sun. Both are off by default
+and fall back to the old gradient quad when shaders are unavailable.
+
+<dt>Day and Night
+<dd>    Servers that offer the Daytime and Weather extension (<code>0x33</code>)
+say whether it is day or night. At night the sun, its shadows, the fog and the
+sky all go dark, and only dynamic lights — your flashlight, glowing blocks,
+torches — light the world. The client holds the map back until the server has
+said what time it is (for at most three seconds), so a night map never flashes
+past in daylight first.
 
 <dt>3D Rain and Snow
 <dd>    Weather particles can optionally be rendered as full 3D cubes instead

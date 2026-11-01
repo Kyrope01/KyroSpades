@@ -33,18 +33,8 @@ unsigned int postprocess_msaa_target(void);
 void postprocess_msaa_resolve(unsigned int resolve_fbo);
 void postprocess_msaa_reset(void);
 
-/* The HDR/bloom upgrade is intentionally isolated to strict OpenGL Core.
- * Compatibility desktop and GLES retain the established single-pass effect. */
+/* Floating-point HDR scene targets are supported on desktop Core. */
 bool postprocess_hdr_supported(void);
-
-/* Build a half-resolution bright pass and four separable Gaussian blur pairs.
- * Returns the blurred texture, or 0 so the caller can use its safe fallback.
- * All OpenGL state touched by this function is restored before it returns. */
-unsigned int postprocess_bloom_render(unsigned int scene_texture, int width, int height, float threshold);
-
-/* Set KS_BLOOM_TEST=1 to render a synthetic HDR highlight once and report
- * whether the real GPU bloom pipeline spreads it to adjacent pixels. */
-void postprocess_bloom_debug_test(void);
 
 void postprocess_deinit(void);
 
