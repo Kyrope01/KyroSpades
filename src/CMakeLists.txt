@@ -509,6 +509,9 @@ if(NOT ANDROID)
         set_property(TARGET ${KS_TARGET} APPEND PROPERTY LINK_DEPENDS
                 "${KyroSpades_SOURCE_DIR}/bsresources.zip"
                 "${KyroSpades_SOURCE_DIR}/resources.override/kv6/semi(Kar-98K).kv6"
+                "${KyroSpades_SOURCE_DIR}/resources.override/kv6/shotgun(SPAS-12).kv6"
+                "${KyroSpades_SOURCE_DIR}/resources.override/png/shotgun(SPAS-12).png"
+                "${KyroSpades_SOURCE_DIR}/resources.override/wav/shotgunshoot(SPAS-12).wav"
                 "${KyroSpades_SOURCE_DIR}/resources.override/png/semi(Kar-98K).png"
                 "${KyroSpades_SOURCE_DIR}/resources.override/wav/semishoot(Kar-98K).wav")
         add_custom_command(
