@@ -267,30 +267,6 @@ static void window_impl_error(int i, const char* s) {
 static void window_impl_reshape(GLFWwindow* window, int width, int height) {
 	reshape(hud_window, width, height);
 }
-/* On Windows, GLFW's own re-capture on focus gain can leave the cursor
-   visible (e.g. when alt-tabbing back while the pointer is outside the
-   window, or refocusing via the title bar). The requested mode still reads
-   back as disabled, so window_mousemode() never re-applies it. Re-apply it
-   ourselves once the window is focused again. */
-static int window_refocus_pending = 0;
-
-static void window_impl_focus(GLFWwindow* window, int focused) {
-	if(focused)
-		window_refocus_pending = 1;
-}
-
-static void window_reapply_mousemode() {
-	if(!window_refocus_pending)
-		return;
-	if(!glfwGetWindowAttrib(hud_window->impl, GLFW_FOCUSED))
-		return;
-	window_refocus_pending = 0;
-	if(glfwGetInputMode(hud_window->impl, GLFW_CURSOR) == GLFW_CURSOR_DISABLED) {
-		glfwSetInputMode(hud_window->impl, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-		glfwSetInputMode(hud_window->impl, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-	}
-}
-
 static void window_impl_textinput(GLFWwindow* window, unsigned int codepoint) {
 	char buf[5];
 	int n = 0;
@@ -606,7 +582,6 @@ void window_init() {
 	glfwSetMouseButtonCallback(hud_window->impl, window_impl_mouseclick);
 	glfwSetScrollCallback(hud_window->impl, window_impl_mousescroll);
 	glfwSetCharCallback(hud_window->impl, window_impl_textinput);
-	glfwSetWindowFocusCallback(hud_window->impl, window_impl_focus);
 	glfwSetJoystickCallback(window_impl_joystick);
 
 	if(!settings.disable_raw_input && glfwRawMouseMotionSupported())
@@ -750,7 +725,6 @@ static void gamepad_translate_button(GLFWgamepadstate* state, GLFWgamepadstate* 
 void window_update() {
 	glfwSwapBuffers(hud_window->impl);
 	glfwPollEvents();
-	window_reapply_mousemode();
 
 	if(joystick_available && glfwJoystickIsGamepad(joystick_id)) {
 		GLFWgamepadstate state;
