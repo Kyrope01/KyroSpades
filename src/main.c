@@ -490,7 +490,7 @@ void drawScene() {
    NON-zero EAGL viewFramebuffer and object 0 is off-screen. The id lives
    in window.c and is now captured in two places that are both reliable:
    (1) once at window_init after a forced initial swap (so SDL's lazy FBO
-   exists and is bound) and (2) every frame in window_update right after
+   exists and is bound) and (2) every frame in window_present right after
    SDL_GL_SwapWindow, where SDL's bindBackbuffer has just re-bound it.
    Both updates use a non-zero guard so a transient 0 read can never wipe
    out the captured value — that was v12's silent regression: a single 0
@@ -2060,10 +2060,10 @@ void keys(struct window_instance* window, int key, int scancode, int action, int
 
         if(key == WINDOW_KEY_SCREENSHOT && action == WINDOW_PRESS) { // take screenshot
                 /* Only latch the request here: this callback fires from inside
-                   glfwPollEvents()/SDL's event pump, which runs AFTER the frame
-                   has already been swapped, so the back buffer is undefined and
-                   the front buffer is unreadable on Wayland. screenshot_capture()
-                   grabs the next finished frame instead. */
+                   glfwPollEvents()/SDL's event pump, i.e. at the top of the
+                   frame before anything is drawn, so there is no finished frame
+                   to read yet. screenshot_capture() grabs the frame this
+                   request produces, which display() draws before the swap. */
                 screenshot_capture_pending = true;
         }
 
@@ -2085,16 +2085,16 @@ void keys(struct window_instance* window, int key, int scancode, int action, int
 /* Read the frame that display() just finished and write it out as a PNG.
    ────────────────────────────────────────────────────────────────────────
    Called once per frame from the main loop, AFTER display() has drawn the
-   whole frame and BEFORE window_update() swaps the buffers - exactly where
+   whole frame and BEFORE window_present() swaps the buffers - exactly where
    recorder_capture_frame() reads its frames.
 
    Why it cannot be done from the key handler (which is where it used to
-   live): keys() is dispatched by glfwPollEvents()/SDL's event pump, and
-   window_update() calls that AFTER glfwSwapBuffers()/SDL_GL_SwapWindow().
-   So when the key arrives, the frame the player was looking at has already
-   been swapped away and the back buffer's contents are undefined - the only
-   thing that is still "the visible image" is the front buffer, which is what
-   the old code read.
+   live): keys() is dispatched by glfwPollEvents()/SDL's event pump, i.e. at
+   the top of the frame. At that point nothing has been drawn yet for this
+   frame, and the previous frame has already been swapped away, so there is no
+   readable image. (The old order polled after the swap, where the back
+   buffer's contents were undefined too - the only thing that was still "the
+   visible image" was the front buffer, which is what the old code read.)
 
    Reading GL_FRONT only works where the window system actually hands the
    driver a front buffer. GLX does, so this worked on X11 and XWayland. EGL
@@ -2389,6 +2389,56 @@ static void main_apply_perf_preset_bs(void) {
                  "no water mesh, no baked shadows, fov %.0f)", settings.camera_fov);
 }
 
+/* Frame-cap wait. Called at the TOP of the loop, before window_poll(), so the
+   wait happens before input is read rather than after it. The old order slept
+   at the end of the frame, i.e. right after glfwPollEvents()/SDL_PollEvent()
+   had already collected the newest mouse and key state - so every event then
+   sat through the rest of the sleep plus a whole update+draw before anything
+   used it. At 420 fps that is small, but a 144 Hz or 240 Hz cap is 4-7 ms of
+   pure added latency, worst felt in mouse look.
+
+   settings.vsync > 1 means "software cap at that rate" (vsync itself is off;
+   see window_swapping()). settings.vsync <= 1 means "no cap": vblank or
+   nothing already paces us, so there is nothing to wait for. */
+static double frame_pace_remaining(double now, double frame_start, int cap_hz) {
+        if(cap_hz <= 1)
+                return 0.0;
+        double remain = frame_start + 1.0 / cap_hz - now;
+        return remain > 0.0 ? remain : 0.0;
+}
+
+/* Wait out this frame's remaining slot. Precise pacing (the default) sleeps
+   coarsely down to the last millisecond and spins the rest, because a plain
+   nanosleep regularly overshoots by milliseconds - which shows up as judder. */
+static void frame_pace_wait(double frame_start) {
+        if(settings.vsync <= 1)
+                return;
+        double remain = frame_pace_remaining(window_time(), frame_start, settings.vsync);
+        if(remain <= 0.0)
+                return;
+
+        if(!settings.precise_pacing) {
+                struct timespec ts;
+                ts.tv_sec = (int)remain;
+                ts.tv_nsec = (remain - (double)ts.tv_sec) * 1000000000.0;
+                nanosleep(&ts, NULL);
+                return;
+        }
+
+        const double spin_window = 0.001;
+        double deadline = frame_start + 1.0 / settings.vsync;
+        while(remain > 0.0) {
+                if(remain > spin_window * 1.2) {
+                        double sl = remain - spin_window;
+                        struct timespec ts;
+                        ts.tv_sec = (int)sl;
+                        ts.tv_nsec = (sl - (double)ts.tv_sec) * 1000000000.0;
+                        nanosleep(&ts, NULL);
+                }
+                remain = deadline - window_time();
+        }
+}
+
 int main(int argc, char** argv) {
         settings.multisamples = 2;
         settings.ambient_occlusion = 1;
@@ -2484,6 +2534,9 @@ int main(int argc, char** argv) {
         settings.net_unsequenced_orient = 1;
         settings.render_interpolation = 1;
         settings.precise_pacing = 1;
+        /* Opt-in: glFinish() after the swap. Off by default because it costs
+           some fps; it only buys anything on top of the frame order above. */
+        settings.present_finish = 0;
         settings.raw_aim = 1;
         settings.crouch_instant = 1;
         settings.view_bob = 1;
@@ -2702,13 +2755,30 @@ int main(int argc, char** argv) {
         double physics_time_fixed = 0.0F;
         double physics_time_fast = 0.0F;
 
+        int first_frame = 1;
         while(!window_closed()) {
+                /* Frame cap first, then input: the pacing wait now happens
+                   before the newest events are read instead of after them, so
+                   this frame uses the input the player just produced. The very
+                   first frame has no previous start to pace against. */
+                if(!first_frame)
+                        frame_pace_wait(last_frame_start);
+                first_frame = 0;
+
                 prof_frame_begin();
                 glx_frame_stats_reset();
 
-                double dt = window_time() - last_frame_start;
-                last_frame_start = window_time();
+                double now = window_time();
+                double dt = now - last_frame_start;
+                last_frame_start = now;
                 dt_float = (float)dt;
+
+                /* Read this frame's input as late as possible before it is
+                   used: network service, physics, camera and display below all
+                   work from the state polled here. */
+                window_poll();
+                if(window_closed())
+                        break;
 
                 /* Process incoming network events as early as possible so
                    this frame's physics, input and render see them (instead
@@ -2842,10 +2912,11 @@ int main(int argc, char** argv) {
  
                  recorder_capture_frame();
 
-                 /* Screenshot readback. Has to sit between display() and
-                    window_update(): the back buffer still holds the frame we
-                    just drew, and window_update() swaps it away (and only then
-                    dispatches the key that asked for this). */
+                 /* Screenshot readback. Sits between display() and
+                    window_present(): the back buffer still holds the frame we
+                    just drew, and the swap is what discards it. Still correct
+                    with the key handled at the top of the frame - the request
+                    latched there is served by this frame's readback. */
                  screenshot_capture();
  
 #ifndef OPENGL_ES
@@ -2921,42 +2992,22 @@ int main(int argc, char** argv) {
                  prof_stage_end(PROF_NETWORK_OUT);
 
                  prof_stage_begin(PROF_SWAP);
-                 window_update();
+                 window_present();
+                 /* Opt-in: block until the driver has really finished the
+                    frame. With vsync on, a driver may queue a frame or two
+                    ahead, which hides more latency than the ordering above
+                    fixes; it costs fps, so it is a setting (off by default). */
+                 if(settings.present_finish)
+                         glFinish();
                  prof_stage_end(PROF_SWAP);
                  rpc_update();
 
-                 /* The sample ends before the vsync/pacing sleep: this is the
-                    cost of producing a frame, not how long we waited for one. */
+                 /* The sample ends here: this is the cost of producing and
+                    presenting a frame, not how long we waited for one. That
+                    wait is frame_pace_wait() at the top of the next
+                    iteration, just before window_poll(). */
                  prof_frame_end();
- 
-                 if(settings.vsync > 1 && (window_time() - last_frame_start) < (1.0 / settings.vsync)) {
-                         if(settings.precise_pacing) {
-                                 /* precise pacing: coarse nanosleep until ~1ms
-                                    before the deadline, then spin the rest.
-                                    A plain nanosleep regularly overshoots by
-                                    milliseconds, which shows up as judder. */
-                                 double target = last_frame_start + 1.0 / settings.vsync;
-                                 for(;;) {
-                                         double remain = target - window_time();
-                                         if(remain <= 0.0)
-                                                 break;
-                                         if(remain > 0.0012) {
-                                                 double sl = remain - 0.001;
-                                                 struct timespec ts;
-                                                 ts.tv_sec = (int)sl;
-                                                 ts.tv_nsec = (sl - ts.tv_sec) * 1000000000.0;
-                                                 nanosleep(&ts, NULL);
-                                         }
-                                 }
-                         } else {
-                                 double sleep_s = 1.0 / settings.vsync - (window_time() - last_frame_start);
-                                 struct timespec ts;
-                                 ts.tv_sec = (int)sleep_s;
-                                 ts.tv_nsec = (sleep_s - ts.tv_sec) * 1000000000.0;
-                                 nanosleep(&ts, NULL);
-                         }
-                 }
- 
+
                  fps = 1.0F / dt;
 
         }

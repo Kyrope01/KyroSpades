@@ -9,3 +9,21 @@ This client implements [zerospades/aosprotocol `extensions/flashlight.md`](https
 5. Confirm the light a server has not switched on is never drawn, the client's own included. Confirm **Create Player / Kill Action** switch only that player's light off; **Player Left** also clears its personal beam; **Map Start** clears every on bit but preserves beam configurations. Disconnect and reconnect: all bits and configurations reset. Without extension negotiation, F and the old optional all-player approximation continue working locally; no packet `0x72` should be sent.
 
 The renderer selects at most four relevant lights per frame, including the local beam, so on a busy scene farther sources may have a visible tip but no projected illumination. A live server/GPU test is required to validate appearance and actual relay behavior; the included C harnesses verify only the client protocol and source wiring.
+
+### Server-controlled brightness and legacy settings
+
+Light Config V1 has **no separate intensity field**. Its red, green and blue
+bytes are linear light levels, so lowering all three dims the light; a server
+must send those channels to control brightness. On a negotiated connection KS
+uses those levels without its legacy flashlight brightness/HDR boost or the
+client's dynamic-light intensity multiplier. Reach, cone and flicker also come
+from the server's default or per-player Light Config. Before any config has
+arrived, the client retains a fallback beam; on servers without the extension,
+the old local flashlight settings and multipliers remain in effect.
+
+Test by sending e.g. RGB (255,255,255), then (64,64,64), with identical reach
+and cone, for both local and remote lights. The second must be dimmer even if
+the dynamic-light intensity slider or HDR settings change. Also check an
+individual player's override, global default, zero reach/cone, flicker and
+reconnection. The renderer is an approximation and uses a limited number of
+simultaneous dynamic-light slots; this test does not prove full V1 compliance.

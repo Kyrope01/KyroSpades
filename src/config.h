@@ -157,6 +157,7 @@ extern struct RENDER_OPTIONS {
         int net_unsequenced_orient;   /* send orientation as unsequenced (drop-tolerant) packets */
         int render_interpolation;     /* partial-tick interpolation of the 60 Hz physics tic */
         int precise_pacing;           /* precise frame pacing for the software fps cap */
+        int present_finish;           /* glFinish() after the swap: no driver frame queueing, costs fps */
         int raw_aim;                  /* 1:1 view orientation (no artificial low-pass filter) */
         int crouch_instant;           /* instant crouch physics, camera eases separately */
         int view_bob;                 /* subtle first-person view bob while walking */

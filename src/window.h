@@ -200,6 +200,16 @@ void window_windowed_size(int* width, int* height);
    left. Ignored for non-positive values. */
 void window_set_windowed_size(int width, int height);
 void window_deinit(void);
+/* Swap/present the frame just drawn. Nothing else: the main loop calls this at
+   the very bottom of the frame. */
+void window_present(void);
+/* Pump this frame's input (events, cursor, gamepad). The main loop calls this
+   at the very top of the frame, after the frame-cap wait, so everything else
+   in the frame works from the newest input. Doing it after the swap instead
+   means each event waits out the pacing sleep plus a whole update and draw
+   before it is used - roughly one frame of avoidable input latency. */
+void window_poll(void);
+/* window_present() + window_poll(), i.e. the old order. */
 void window_update(void);
 int window_closed(void);
 int window_cpucores();

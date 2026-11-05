@@ -13,5 +13,8 @@ int main(void) {
     assert(fabsf(weapon_skin_scale(s, 64) * 64 - s * 36) < 0.00001f);
     assert(fabsf(weapon_skin_scale(s, 128) * 128 - s * 36) < 0.00001f);
     assert(fabsf(weapon_skin_scale(s, 143) * 143 - s * 36) < 0.00001f);
+    /* Default rifle keeps its original 44-voxel physical size at high res. */
+    assert(weapon_default_rifle_scale(s, 44) == s);
+    assert(fabsf(weapon_default_rifle_scale(s, 176) * 176 - s * 44) < 0.00001f);
     return 0;
 }

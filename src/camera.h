@@ -77,6 +77,11 @@ unsigned char camera_PointInFrustum(float x, float y, float z);
 int camera_CubeInFrustum(float x, float y, float z, float size, float size_y);
 int* camera_terrain_pick(unsigned char mode);
 int* camera_terrain_pickEx(unsigned char mode, float x, float y, float z, float ray_x, float ray_y, float ray_z);
+/* Block-only hit limited to `range` world units: no player hitboxes, no walk
+   past the range. For callers that only need "is a wall in the way" (the audio
+   occlusion and room probes); returns 1 on a block hit within range. */
+int camera_block_hit(struct Camera_HitType* hit, float x, float y, float z, float ray_x, float ray_y, float ray_z,
+                     float range);
 /* Same as camera_terrain_pick but the ray originates from the local player's
    physics eye (not the rendered camera, which carries view-only bob/lag/dip
    offsets).  Use this for anything gameplay-relevant: block placement, drag,

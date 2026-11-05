@@ -689,8 +689,8 @@ static void hud_ingame_render3D() {
                                 matrix_translate(matrix_model, tool_overlay_x, tool_overlay_y, -6.0F);
                                 matrix_translate(matrix_model, tool_overlay_spacing * 2.0F, 0.0F, 0.0F);
                                 matrix_rotate(matrix_model, window_time() * 57.4F, 0.0F, 1.0F, 0.0F);
-                                matrix_translate(matrix_model, (gun->xpiv - gun->xsiz / 2) * 0.05F, (gun->zpiv - gun->zsiz / 2) * 0.05F,
-                                                                 (gun->ypiv - gun->ysiz / 2) * 0.05F);
+                                matrix_translate(matrix_model, (gun->xpiv - gun->xsiz / 2) * gun->scale, (gun->zpiv - gun->zsiz / 2) * gun->scale,
+                                                                 (gun->ypiv - gun->ysiz / 2) * gun->scale);
                                 matrix_scale3(matrix_model, tool_overlay_scale);
                                 if(players[local_player_id].held_item == TOOL_GUN) {
                                         matrix_scale(matrix_model, 1.5F, 1.5F, 1.5F);
@@ -704,9 +704,9 @@ static void hud_ingame_render3D() {
                                 matrix_translate(matrix_model, tool_overlay_x, tool_overlay_y, -6.0F);
                                 matrix_translate(matrix_model, tool_overlay_spacing * 3.0F, 0.0F, 0.0F);
                                 matrix_rotate(matrix_model, window_time() * 57.4F, 0.0F, 1.0F, 0.0F);
-                                matrix_translate(matrix_model, (model_grenade.xpiv - model_grenade.xsiz / 2) * 0.05F,
-                                                                 (model_grenade.zpiv - model_grenade.zsiz / 2) * 0.05F,
-                                                                 (model_grenade.ypiv - model_grenade.ysiz / 2) * 0.05F);
+                                matrix_translate(matrix_model, (model_grenade.xpiv - model_grenade.xsiz / 2) * model_grenade.scale,
+                                                                 (model_grenade.zpiv - model_grenade.zsiz / 2) * model_grenade.scale,
+                                                                 (model_grenade.ypiv - model_grenade.ysiz / 2) * model_grenade.scale);
                                 matrix_scale3(matrix_model, tool_overlay_scale);
                                 if(players[local_player_id].held_item == TOOL_GRENADE) {
                                         matrix_scale(matrix_model, 1.5F, 1.5F, 1.5F);

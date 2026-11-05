@@ -377,7 +377,13 @@ int* camera_terrain_pick(unsigned char mode) {
    mode 1: returns the first solid cell (ret[0..2]) plus the air cell before
            it (ret[3..5]).  NULL when the ray leaves the map.
 */
-int* camera_terrain_pickEx(unsigned char mode, float gx0, float gy0, float gz0, float ray_x, float ray_y, float ray_z) {
+/* Longest walk any pick may make. The traversal used to hardcode this, which
+   meant every caller - including the audio probes, which only ever care about
+   a few blocks - paid for a walk that continued to the map edge. */
+#define CAMERA_PICK_MAXDIST 128.0F
+
+static int* camera_terrain_traverse(unsigned char mode, float gx0, float gy0, float gz0, float ray_x, float ray_y,
+                                    float ray_z, float maxdist) {
 	static int ret[6];
 
 	float len = sqrtf(ray_x * ray_x + ray_y * ray_y + ray_z * ray_z);
@@ -410,7 +416,6 @@ int* camera_terrain_pickEx(unsigned char mode, float gx0, float gy0, float gz0, 
 	float dtz = (dz != 0.0F) ? fabsf(1.0F / dz) : INFINITY;
 
 	float t = 0.0F;
-	const float maxdist = 128.0F;
 
 	while(t <= maxdist) {
 		if(gx < 0 || gx >= map_size_x || gy < 0 || gy >= map_size_y || gz < 0 || gz >= map_size_z)
@@ -457,6 +462,58 @@ int* camera_terrain_pickEx(unsigned char mode, float gx0, float gy0, float gz0, 
 	}
 
 	return NULL;
+}
+
+int* camera_terrain_pickEx(unsigned char mode, float gx0, float gy0, float gz0, float ray_x, float ray_y, float ray_z) {
+	return camera_terrain_traverse(mode, gx0, gy0, gz0, ray_x, ray_y, ray_z, CAMERA_PICK_MAXDIST);
+}
+
+/* Block-only hit, limited to `range` world units. The sound code only cares
+   whether a wall stands between a source and the listener, and it asks this
+   dozens of times per frame: 27 occlusion rays per playing source plus the
+   room probe. Going through camera_hit_mask() made each of those rays run the
+   full hitbox test (player_collision: glm_rotate_make + glmc_mat4_inv +
+   sincosf) against every player in range, on top of a block walk that kept
+   going to the map edge even when the sound was three blocks away. That is why
+   sound occlusion cost ~35% of the main thread and spiked exactly when a fight
+   started. Blocks are all audio needs, so skip the players entirely and stop
+   the walk at the sound's own distance.
+
+   Returns 1 and fills `hit` (CAMERA_HITTYPE_BLOCK + the AABB entry distance)
+   when a solid voxel is hit within `range`, 0 otherwise. */
+int camera_block_hit(struct Camera_HitType* hit, float x, float y, float z, float ray_x, float ray_y, float ray_z,
+                     float range) {
+	hit->type = CAMERA_HITTYPE_NONE;
+	hit->distance = FLT_MAX;
+	if(range <= 0.0F)
+		return 0;
+
+	int* pos = camera_terrain_traverse(1, x, y, z, ray_x, ray_y, ray_z, range);
+	if(pos == NULL)
+		return 0;
+
+	AABB block = (AABB) {
+		.min = {pos[0], pos[1], pos[2]},
+		.max = {pos[0] + 1, pos[1] + 1, pos[2] + 1},
+	};
+	Ray dir = (Ray) {
+		.origin.coords = {x, y, z},
+		.direction.coords = {ray_x, ray_y, ray_z},
+	};
+
+	float d;
+	if(!aabb_intersection_ray(&block, &dir, &d) || d > range)
+		return 0;
+
+	hit->type = CAMERA_HITTYPE_BLOCK;
+	hit->distance = d;
+	hit->x = pos[0];
+	hit->y = pos[1];
+	hit->z = pos[2];
+	hit->xb = pos[3];
+	hit->yb = pos[4];
+	hit->zb = pos[5];
+	return 1;
 }
 
 void camera_local_eye(float* x, float* y, float* z) {

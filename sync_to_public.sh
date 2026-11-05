@@ -55,6 +55,35 @@ git fetch --quiet "$PUBLIC_REMOTE"
 # that is exactly the situation that produces an unusable PR.
 BASE_SHA="$(git rev-parse "${PUBLIC_REMOTE}/${BASE}")"
 
+# The sync replaces the public tree wholesale, so any commit that landed in
+# KyroSpades directly - a contributor PR, a hotfix - is reverted the next time
+# KS-Dev is synced, with nothing in the output saying so. That is how Detank's
+# "re-capture cursor after regaining window focus" fix (KyroSpades #61)
+# disappeared in the 2026-11-02 sync. Warn about anything merged into the public
+# repo since its last sync whose change is not in KS-Dev yet: port it here
+# first, then sync.
+PUBLIC_ONLY=""
+LAST_SYNC="$(git rev-list --max-count=1 --grep='^Sync from KS-Dev' "${PUBLIC_REMOTE}/${BASE}" 2>/dev/null || true)"
+if [ -n "$LAST_SYNC" ]; then
+	CHERRY="$(git cherry -v "$SRC" "${PUBLIC_REMOTE}/${BASE}" 2>/dev/null || true)"
+	for sha in $(git rev-list --no-merges "${LAST_SYNC}..${PUBLIC_REMOTE}/${BASE}"); do
+		subject="$(git log -1 --format='%h %s' "$sha")"
+		case "$subject" in
+			*"Sync from KS-Dev"*) continue ;;
+		esac
+		if printf '%s\n' "$CHERRY" | grep -q "^+ $sha"; then
+			PUBLIC_ONLY="${PUBLIC_ONLY}    ${subject}"$'\n'
+		fi
+	done
+fi
+if [ -n "$PUBLIC_ONLY" ]; then
+	echo "warning: these commits are in ${PUBLIC_REPO}/${BASE} but not in ${SRC}, and this" >&2
+	echo "         sync replaces the public tree, so it would undo them:" >&2
+	printf '%s' "$PUBLIC_ONLY" >&2
+	echo "         Port them into ${SRC} first (cherry-pick + resolve), then sync." >&2
+	echo >&2
+fi
+
 STAMP="$(date -u +%Y%m%d-%H%M%S)"
 SAFE_SRC="${SRC//\//-}"
 # Overridable so repeated CI runs update one ongoing PR instead of piling up

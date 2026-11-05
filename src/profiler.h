@@ -49,7 +49,7 @@ enum prof_stage {
         PROF_HUD,         /* HUD/UI command list and draw */
         PROF_NETWORK_OUT, /* network_update() */
         PROF_SOUND,       /* sound_update() */
-        PROF_SWAP,        /* window_update()/buffer swap */
+        PROF_SWAP,        /* window_present()/buffer swap */
         PROF_STAGE_COUNT
 };
 

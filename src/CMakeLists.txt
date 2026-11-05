@@ -65,11 +65,16 @@ endif()
 
 # OpenAL: HRTF (real binaural, inter-aural time+level delay) and EFX
 # (reverb, occlusion filters) only exist in OpenAL SOFT. Apple's
-# OpenAL.framework and Windows' bundled/generic OpenAL32.dll are NOT
-# openal-soft and support neither. We only accept a system install if its
-# dev headers include AL/efx.h — a solid signal it really is openal-soft
-# (e.g. distro libopenal-dev on Linux ships that header; Apple/Windows
-# system installs don't). Otherwise build openal-soft from source, same
+# OpenAL.framework and the generic OpenAL32.dll that ships with Windows
+# games are NOT openal-soft and support neither. We only accept a system
+# install if its dev headers include AL/efx.h — a solid signal it really is
+# openal-soft. Distro libopenal-dev on Linux ships that header, and so does
+# the MSYS2/MinGW openal package (it *is* openal-soft), which is what the
+# Windows CI installs; letting CMake find it saves rebuilding openal-soft
+# from source on every Windows run. The bare OpenAL32.dll has no headers at
+# all so find_package never sees it, and Creative's old SDK keeps efx.h flat
+# in include/ rather than under AL/, so both fall through to the source
+# build. Otherwise build openal-soft from source, same
 # prefer-system/fallback-to-FetchContent pattern as SDL2 above.
 if(ENABLE_SOUND)
         set(OPENAL_USE_FETCHCONTENT FALSE)
@@ -80,7 +85,7 @@ if(ENABLE_SOUND)
         if(OPENAL_LIBRARY AND OPENAL_INCLUDE_DIR AND EXISTS "${OPENAL_INCLUDE_DIR}/AL/efx.h")
                 message(STATUS "OpenAL: using pre-supplied openal-soft (${OPENAL_LIBRARY})")
                 set(OPENAL_FOUND TRUE)
-        elseif(NOT APPLE AND NOT WIN32 AND NOT ANDROID)
+        elseif(NOT APPLE AND NOT ANDROID)
                 find_package(OpenAL QUIET)
                 if(OPENAL_FOUND)
                         find_path(OPENAL_EFX_INCLUDE_DIR AL/efx.h
@@ -508,6 +513,40 @@ if(NOT ANDROID)
         # when the archive changes so its post-build extraction runs again.
         set_property(TARGET ${KS_TARGET} APPEND PROPERTY LINK_DEPENDS
                 "${KyroSpades_SOURCE_DIR}/bsresources.zip"
+                "${KyroSpades_SOURCE_DIR}/resources.override/kv6/grenade(Baseball Penguano).kv6"
+                "${KyroSpades_SOURCE_DIR}/resources.override/kv6/semi(Desert Eagle Asiimov).kv6"
+                "${KyroSpades_SOURCE_DIR}/resources.override/kv6/semi(Desert Eagle Blaze).kv6"
+                "${KyroSpades_SOURCE_DIR}/resources.override/kv6/semi(M9 Diamond).kv6"
+                "${KyroSpades_SOURCE_DIR}/resources.override/kv6/semi(USP-S BluePrint).kv6"
+                "${KyroSpades_SOURCE_DIR}/resources.override/kv6/semi(USP-S RoyalBlue).kv6"
+                "${KyroSpades_SOURCE_DIR}/resources.override/kv6/smg(AK-12 Black).kv6"
+                "${KyroSpades_SOURCE_DIR}/resources.override/kv6/smg(AK-12 Kobra).kv6"
+                "${KyroSpades_SOURCE_DIR}/resources.override/kv6/smg(AK-12 Nickel).kv6"
+                "${KyroSpades_SOURCE_DIR}/resources.override/kv6/smg(AK-12 PSO-1).kv6"
+                "${KyroSpades_SOURCE_DIR}/resources.override/kv6/smg(Uzi Ember).kv6"
+                "${KyroSpades_SOURCE_DIR}/resources.override/png/semi(Desert Eagle Asiimov).png"
+                "${KyroSpades_SOURCE_DIR}/resources.override/png/semi(Desert Eagle Blaze).png"
+                "${KyroSpades_SOURCE_DIR}/resources.override/png/semi(M9 Diamond).png"
+                "${KyroSpades_SOURCE_DIR}/resources.override/png/semi(USP-S BluePrint).png"
+                "${KyroSpades_SOURCE_DIR}/resources.override/png/semi(USP-S RoyalBlue).png"
+                "${KyroSpades_SOURCE_DIR}/resources.override/png/smg(AK-12 Black).png"
+                "${KyroSpades_SOURCE_DIR}/resources.override/png/smg(AK-12 Kobra).png"
+                "${KyroSpades_SOURCE_DIR}/resources.override/png/smg(AK-12 Nickel).png"
+                "${KyroSpades_SOURCE_DIR}/resources.override/png/smg(AK-12 PSO-1).png"
+                "${KyroSpades_SOURCE_DIR}/resources.override/png/smg(Uzi Ember).png"
+                "${KyroSpades_SOURCE_DIR}/resources.override/wav/semireload(Desert Eagle Asiimov).wav"
+                "${KyroSpades_SOURCE_DIR}/resources.override/wav/semireload(Desert Eagle Blaze).wav"
+                "${KyroSpades_SOURCE_DIR}/resources.override/wav/semireload(M9 Diamond).wav"
+                "${KyroSpades_SOURCE_DIR}/resources.override/wav/semireload(USP-S BluePrint).wav"
+                "${KyroSpades_SOURCE_DIR}/resources.override/wav/semireload(USP-S RoyalBlue).wav"
+                "${KyroSpades_SOURCE_DIR}/resources.override/wav/semishoot(Desert Eagle Asiimov).wav"
+                "${KyroSpades_SOURCE_DIR}/resources.override/wav/semishoot(Desert Eagle Blaze).wav"
+                "${KyroSpades_SOURCE_DIR}/resources.override/wav/semishoot(M9 Diamond).wav"
+                "${KyroSpades_SOURCE_DIR}/resources.override/wav/semishoot(USP-S BluePrint).wav"
+                "${KyroSpades_SOURCE_DIR}/resources.override/wav/semishoot(USP-S RoyalBlue).wav"
+                "${KyroSpades_SOURCE_DIR}/resources.override/wav/smgshoot(Uzi Ember).wav"
+                "${KyroSpades_SOURCE_DIR}/resources.override/kv6/semi.kv6"
+                "${KyroSpades_SOURCE_DIR}/resources.override/png/semi.png"
                 "${KyroSpades_SOURCE_DIR}/resources.override/kv6/semi(Kar-98K).kv6"
                 "${KyroSpades_SOURCE_DIR}/resources.override/kv6/smg(SCAR-H).kv6"
                 "${KyroSpades_SOURCE_DIR}/resources.override/png/smg(SCAR-H).png"
