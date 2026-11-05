@@ -33,6 +33,7 @@
 #include "map.h"
 #include "config.h"
 #include "model.h"
+#include "weapon_skin_scale.h"
 #include "model_normals.h"
 #include "texture.h"
 
@@ -169,6 +170,9 @@ void kv6_init() {
 	kv6_load_file(&model_tent, "kv6/cp.kv6", 0.278F);
 
 	kv6_load_file(&model_semi, "kv6/semi.kv6", 0.05F);
+	/* Normalize the default rifle before the startup dimension check; skins
+	   applies the same policy when loading its preview and selected model. */
+	model_semi.scale = weapon_default_rifle_scale(model_semi.scale, model_semi.ysiz);
 	kv6_load_file(&model_smg, "kv6/smg.kv6", 0.05F);
 	kv6_load_file(&model_shotgun, "kv6/shotgun.kv6", 0.05F);
 	kv6_load_file(&model_spade, "kv6/spade.kv6", 0.05F);
@@ -748,6 +752,7 @@ void kv6_render(struct kv6_t* kv6, unsigned char team) {
 									 "uniform float u_SunIntensity;\n"
 									 "uniform vec4 u_LightPositionRadius[4];\n"
 									 "uniform vec4 u_LightColorIntensity[4];\n"
+									 "uniform vec4 u_SpotColorCone[4];\n"
 									 "uniform vec4 u_FlashlightDirection;\n"
 									 "varying vec4 v_Color;\n"
 									 "void main(void) {\n"
@@ -772,11 +777,11 @@ void kv6_render(struct kv6_t* kv6, unsigned char team) {
 					 "            float diffuse = max(dot(N, light_direction), 0.0);\n"
 					 "            float facing = 0.18 + 0.82 * diffuse;\n"
 					 "            if(pr.w < 0.0) {\n"
-					 "                float cone = smoothstep(0.70710678, 0.82710678,\n"
+					 "                float cone = smoothstep(u_SpotColorCone[i].w, mix(u_SpotColorCone[i].w, 1.0, 0.15),\n"
 					 "                                        dot(-light_direction, normalize(ci.rgb)));\n"
 					 "                float fill = clamp(1.0 - distance_to_light / 10.0, 0.0, 1.0);\n"
 					 "                fill = 0.30 * fill * fill;\n"
-					 "                light += vec3(1.0, 0.70, 0.50) * ci.a * (cone * attenuation + fill) * facing;\n"
+					 "                light += u_SpotColorCone[i].rgb * ci.a * cone * (attenuation + fill * attenuation) * facing;\n"
 					 "            } else {\n"
 					 "                light += ci.rgb * ci.a * attenuation * facing;\n"
 					 "            }\n"
@@ -788,14 +793,14 @@ void kv6_render(struct kv6_t* kv6, unsigned char team) {
 					 "        vec3 from_light = world - pr.xyz;\n"
 					 "        float light_distance = length(from_light);\n"
 					 "        vec3 ray_direction = from_light / max(light_distance, 0.0001);\n"
-					 "        float cone = smoothstep(u_FlashlightDirection.w, min(u_FlashlightDirection.w + 0.12, 0.999),\n"
+					 "        float cone = smoothstep(u_SpotColorCone[3].w, mix(u_SpotColorCone[3].w, 1.0, 0.15),\n"
 					 "                                dot(ray_direction, normalize(u_FlashlightDirection.xyz)));\n"
 					 "        float range = clamp(1.0 - light_distance / max(pr.w, 0.0001), 0.0, 1.0);\n"
 					 "        range *= range;\n"
 					 "        float diffuse = max(dot(N, -ray_direction), 0.0);\n"
 					 "        float fill = clamp(1.0 - light_distance / 10.0, 0.0, 1.0);\n"
 					 "        fill = 0.30 * fill * fill;\n"
-					 "        light += ci.rgb * ci.a * (cone * range + fill) * (0.18 + 0.82 * diffuse);\n"
+					 "        light += u_SpotColorCone[3].rgb * ci.a * cone * (range + fill * range) * (0.18 + 0.82 * diffuse);\n"
 					 "    }\n"
 					 "    vec4 lit = vec4(light, 1.0) * a_Color * u_TeamColor;\n"
 									 "    v_Color = mix(lit, vec4(fog, 1.0), min(dist, 1.0));\n"
@@ -828,6 +833,7 @@ void kv6_render(struct kv6_t* kv6, unsigned char team) {
 								 "uniform float u_SunIntensity;\n"
 								 "uniform vec4 u_LightPositionRadius[4];\n"
 								 "uniform vec4 u_LightColorIntensity[4];\n"
+									 "uniform vec4 u_SpotColorCone[4];\n"
 								 "uniform vec4 u_FlashlightDirection;\n"
 								 "void main(void) {\n"
 								 "	gl_Position = gl_ModelViewProjectionMatrix*gl_Vertex;\n"
@@ -851,9 +857,9 @@ void kv6_render(struct kv6_t* kv6, unsigned char team) {
 								 "			float diffuse=max(dot(N,light_direction),0.0);\n"
 								 "			float facing=0.18+0.82*diffuse;\n"
 								 "			if(pr.w<0.0){\n"
-								 "				float cone=smoothstep(0.70710678,0.82710678,dot(-light_direction,normalize(ci.rgb)));\n"
+								 "				float cone=smoothstep(u_SpotColorCone[i].w,mix(u_SpotColorCone[i].w,1.0,0.15),dot(-light_direction,normalize(ci.rgb)));\n"
 								 "				float fill=clamp(1.0-distance_to_light/10.0,0.0,1.0);fill=0.30*fill*fill;\n"
-								 "				light+=vec3(1.0,0.70,0.50)*ci.a*(cone*attenuation+fill)*facing;\n"
+								 "				light+=u_SpotColorCone[i].rgb*ci.a*cone*(attenuation+fill*attenuation)*facing;\n"
 								 "			}else{\n"
 								 "				light+=ci.rgb*ci.a*attenuation*facing;\n"
 								 "			}\n"
@@ -864,11 +870,11 @@ void kv6_render(struct kv6_t* kv6, unsigned char team) {
 								 "		vec3 from_light=world-pr.xyz;\n"
 								 "		float light_distance=length(from_light);\n"
 								 "		vec3 ray_direction=from_light/max(light_distance,0.0001);\n"
-								 "		float cone=smoothstep(u_FlashlightDirection.w,min(u_FlashlightDirection.w+0.12,0.999),dot(ray_direction,normalize(u_FlashlightDirection.xyz)));\n"
+								 "		float cone=smoothstep(u_SpotColorCone[3].w,mix(u_SpotColorCone[3].w,1.0,0.15),dot(ray_direction,normalize(u_FlashlightDirection.xyz)));\n"
 								 "		float range=clamp(1.0-light_distance/max(pr.w,0.0001),0.0,1.0);range*=range;\n"
 								 "		float diffuse=max(dot(N,-ray_direction),0.0);\n"
 								 "		float fill=clamp(1.0-light_distance/10.0,0.0,1.0);fill=0.30*fill*fill;\n"
-								 "		light+=ci.rgb*ci.a*(cone*range+fill)*(0.18+0.82*diffuse);\n"
+								 "		light+=u_SpotColorCone[3].rgb*ci.a*cone*(range+fill*range)*(0.18+0.82*diffuse);\n"
 								 "	}\n"
 								 "	gl_FrontColor = mix(vec4(light,1.0)*gl_Color,vec4(fog,1.0),min(dist,1.0));\n"
 								 "	gl_PointSize = size/gl_Position.w;\n"

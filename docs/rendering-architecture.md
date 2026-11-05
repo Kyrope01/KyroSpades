@@ -16,6 +16,34 @@ Code that behaves differently per backend uses `#ifdef OPENGL_CORE`,
 `#ifndef OPENGL_CORE` and the runtime `glx_version` / `gles_version` flags.
 `water.c` is the place where this matters most (see below).
 
+## One frame, at the top level
+
+```
+frame_pace_wait()          <- frame cap (settings.vsync > 1); BEFORE input
+window_poll()              <- newest mouse/keys/gamepad, for THIS frame
+network_service()          <- when net_early_opt
+physics / camera / particles (fixed 60 Hz tick + fast catch-up ticks)
+display()                  <- see below
+recorder_capture_frame(), screenshot_capture()
+sound_update(), network_update()
+window_present()           <- buffer swap (+ glFinish when present_finish)
+```
+
+`window_present()` and `window_poll()` are deliberately separate, and the pacing
+wait sits between them at the top of the next frame. The old single
+`window_update()` swapped *and then* polled, so the events it read sat through
+the rest of the frame-cap sleep plus a whole update and draw before anything
+used them: about one frame of input latency, 4-7 ms at a 144/240 Hz cap, most
+noticeable in mouse look. Poll first, use it, present last.
+
+Mouse look is applied where the event arrives (`camera_look_delta()` from the
+HUD's mouse callback) and `camera_apply()` reads the angles while drawing, so
+the view turns in the same frame the mouse moved; movement and shooting still
+run on the fixed tick.
+
+`screenshot_capture()` must stay between `display()` and `window_present()`:
+that is the only moment the back buffer holds the frame that was just drawn.
+
 ## One frame, in order
 
 ```
@@ -219,3 +247,9 @@ draws after it fall back to the per-draw path and still render correctly.
 - Measure with `make -C tools/bench run` for CPU-side passes and the F9 overlay
   for everything else. `make -C tools/bench check` type-checks the renderer's
   translation units without a GPU.
+- Anything that fires many rays per frame and only cares about walls belongs on
+  `camera_block_hit()`, not `camera_hit_mask()`. The audio occlusion (27 rays
+  per source) and room probes used the gun's hit test, which ran the full player
+  hitbox test per player per ray and walked the map until something blocked -
+  ~35% of the main thread, spiking exactly when a fight started. The block-only
+  ray skips the players and stops at the sound's own distance.

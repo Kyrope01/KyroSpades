@@ -267,6 +267,30 @@ static void window_impl_error(int i, const char* s) {
 static void window_impl_reshape(GLFWwindow* window, int width, int height) {
 	reshape(hud_window, width, height);
 }
+/* On Windows, GLFW's own re-capture on focus gain can leave the cursor
+   visible (e.g. when alt-tabbing back while the pointer is outside the
+   window, or refocusing via the title bar). The requested mode still reads
+   back as disabled, so window_mousemode() never re-applies it. Re-apply it
+   ourselves once the window is focused again. */
+static int window_refocus_pending = 0;
+
+static void window_impl_focus(GLFWwindow* window, int focused) {
+	if(focused)
+		window_refocus_pending = 1;
+}
+
+static void window_reapply_mousemode() {
+	if(!window_refocus_pending)
+		return;
+	if(!glfwGetWindowAttrib(hud_window->impl, GLFW_FOCUSED))
+		return;
+	window_refocus_pending = 0;
+	if(glfwGetInputMode(hud_window->impl, GLFW_CURSOR) == GLFW_CURSOR_DISABLED) {
+		glfwSetInputMode(hud_window->impl, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+		glfwSetInputMode(hud_window->impl, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+	}
+}
+
 static void window_impl_textinput(GLFWwindow* window, unsigned int codepoint) {
 	char buf[5];
 	int n = 0;
@@ -582,6 +606,7 @@ void window_init() {
 	glfwSetMouseButtonCallback(hud_window->impl, window_impl_mouseclick);
 	glfwSetScrollCallback(hud_window->impl, window_impl_mousescroll);
 	glfwSetCharCallback(hud_window->impl, window_impl_textinput);
+	glfwSetWindowFocusCallback(hud_window->impl, window_impl_focus);
 	glfwSetJoystickCallback(window_impl_joystick);
 
 	if(!settings.disable_raw_input && glfwRawMouseMotionSupported())
@@ -722,9 +747,19 @@ static void gamepad_translate_button(GLFWgamepadstate* state, GLFWgamepadstate* 
 	}
 }
 
-void window_update() {
+/* Present and poll are split so the main loop can pump events at the TOP of
+   the frame, after the frame-cap wait, instead of right after the swap. See
+   window.h for why: with the old single window_update() the events read after
+   the swap then sat through the pacing sleep and a whole update+draw before
+   they were used, which is one frame of avoidable input latency at any capped
+   frame rate. */
+void window_present() {
 	glfwSwapBuffers(hud_window->impl);
+}
+
+void window_poll() {
 	glfwPollEvents();
+	window_reapply_mousemode();
 
 	if(joystick_available && glfwJoystickIsGamepad(joystick_id)) {
 		GLFWgamepadstate state;
@@ -756,6 +791,13 @@ void window_update() {
 
 		joystick_state = state;
 	}
+}
+
+/* Kept for callers that want the old both-at-once order; the main loop uses the
+   two halves separately so input is read before it is used. */
+void window_update() {
+	window_present();
+	window_poll();
 }
 
 int window_closed() {
@@ -1204,7 +1246,12 @@ void window_deinit() {
 }
 
 static int quit = 0;
-void window_update() {
+
+/* Same split as the GLFW backend: the swap (and the iOS default-FBO capture
+   that has to follow it, plus the drawable reshape check) stays here, the
+   event pump moves to window_poll() so the main loop can read input at the top
+   of the frame instead of after the swap. */
+void window_present() {
 	SDL_GL_SwapWindow(hud_window->impl);
 
 #if defined(OS_IOS)
@@ -1238,7 +1285,9 @@ void window_update() {
 		   && (dw != settings.window_width || dh != settings.window_height))
 			reshape(hud_window, dw, dh);
 	}
+}
 
+void window_poll() {
 	SDL_Event event;
 	while(SDL_PollEvent(&event)) {
 		switch(event.type) {
@@ -1499,6 +1548,13 @@ void window_update() {
 				hud_active->input_mouseclick(f->start.x, f->start.y, WINDOW_MOUSE_RMB, WINDOW_PRESS, 0);
 		}
 	}
+}
+
+/* Kept for callers that want the old both-at-once order; the main loop uses the
+   two halves separately so input is read before it is used. */
+void window_update() {
+	window_present();
+	window_poll();
 }
 
 int window_closed() {

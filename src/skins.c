@@ -8,6 +8,7 @@
 #include "common.h"
 #include "skins.h"
 #include "weapon_skin_scale.h"
+#include "legacy_mod_skin.h"
 #include "file.h"
 #include "config.h"
 #include "log.h"
@@ -31,7 +32,9 @@ static int skin_reload_model(enum skin_category_type category, struct skin_categ
                              int model, struct kv6_t* target, const char* path) {
 	if(kv6_reload(target, path, cat->models[model].scale) != 0)
 		return -1;
-	if(category == SKIN_RIFLE || category == SKIN_SMG || category == SKIN_SHOTGUN)
+	if(category == SKIN_RIFLE && strcmp(path, "kv6/semi.kv6") == 0)
+		target->scale = weapon_default_rifle_scale(target->scale, target->ysiz);
+	else if(category == SKIN_RIFLE || category == SKIN_SMG || category == SKIN_SHOTGUN)
 		target->scale = weapon_skin_scale(target->scale, target->ysiz);
 	return 0;
 }
@@ -65,8 +68,9 @@ void skins_scan(void) {
 				strcpy(cat->label, "Rifle");
 				cat->model_count = 1;
 				cat->models[0] = (struct skin_model_def){&model_semi, "semi", 0.05F};
-				cat->sound_count = 1;
+				cat->sound_count = 2;
 				cat->sounds[0] = (struct skin_sound_def){&sound_rifle_shoot, "semishoot"};
+				cat->sounds[1] = (struct skin_sound_def){&sound_rifle_reload, "semireload"};
 				break;
 			case SKIN_SMG:
 				strcpy(cat->label, "SMG");
@@ -204,7 +208,7 @@ int skins_apply(enum skin_category_type category, int entry, int models) {
 
 	for(int s = 0; s < cat->sound_count; s++) {
 		char path[256];
-		if(e->suffix[0]) {
+		if(e->suffix[0] && (s == 0 || category != SKIN_RIFLE || legacy_mod_reload_suffix(e->suffix))) {
 			snprintf(path, sizeof(path), "wav/%s(%s).wav",
 				cat->sounds[s].basename, e->suffix);
 			if(!file_exists(path))

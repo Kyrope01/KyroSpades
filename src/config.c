@@ -403,6 +403,7 @@ void config_save() {
         config_seti("client", "net_unsequenced_orient", settings.net_unsequenced_orient);
         config_seti("client", "render_interpolation", settings.render_interpolation);
         config_seti("client", "precise_pacing", settings.precise_pacing);
+        config_seti("client", "present_finish", settings.present_finish);
         config_seti("client", "raw_aim", settings.raw_aim);
         config_seti("client", "crouch_instant", settings.crouch_instant);
         config_seti("client", "view_bob", settings.view_bob);
@@ -605,6 +606,7 @@ IMPORT_SETTING(settings.camera_movement, camera_movement, atoi(value));
                 IMPORT_SETTING(settings.net_unsequenced_orient, net_unsequenced_orient, atoi(value));
                 IMPORT_SETTING(settings.render_interpolation, render_interpolation, atoi(value));
                 IMPORT_SETTING(settings.precise_pacing, precise_pacing, atoi(value));
+                IMPORT_SETTING(settings.present_finish, present_finish, atoi(value));
                 IMPORT_SETTING(settings.raw_aim, raw_aim, atoi(value));
                 IMPORT_SETTING(settings.crouch_instant, crouch_instant, atoi(value));
 				IMPORT_SETTING(settings.view_bob, view_bob, atoi(value));
@@ -1934,6 +1936,18 @@ void config_reload() {
                                  .max = 1,
                                  .help = "Sleep+spin to hit frame-cap deadlines exactly",
                                  .name = "Precise frame pacing",
+                                 .category = "Gameplay Feel",
+                                 .subcategory = "Rendering",
+                         });
+        list_add(&config_settings,
+                         &(struct config_setting) {
+                                 .value = &settings_tmp.present_finish,
+                                 .type = CONFIG_TYPE_INT,
+                                 .min = 0,
+                                 .max = 1,
+                                 .help = "Finish each frame after the swap: less driver queueing, lower latency, "
+                                         "costs some fps",
+                                 .name = "Low-latency present (glFinish)",
                                  .category = "Gameplay Feel",
                                  .subcategory = "Rendering",
                          });

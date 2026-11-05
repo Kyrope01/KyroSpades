@@ -321,7 +321,14 @@ static void sound_source_free(struct Sound_source* s) {
 /* ---- occlusion ------------------------------------------------------ */
 
 /* 3x3x3 grid (+-0.2u) around the source, ray each point -> listener.
- * Returns blocked fraction [0..1]. Continuous, unlike YSR's 1.0/0.4 step. */
+ * Returns blocked fraction [0..1]. Continuous, unlike YSR's 1.0/0.4 step.
+ *
+ * Uses the block-only camera_block_hit(): audio only cares about
+ * blocks, and the mask variant ran the full player hitbox test for every
+ * player in range on all 27 rays of every playing source, every 4th frame -
+ * the cost that made occlusion spike the moment a fight started. The range
+ * here is the source's own distance to the listener, so a quiet sound three
+ * blocks away walks three blocks, not 128. */
 static float sound_occlusion_probe(float sx, float sy, float sz) {
         float dx = camera_x - sx, dy = camera_y - sy, dz = camera_z - sz;
         float dist = sqrtf(dx * dx + dy * dy + dz * dz);
@@ -335,7 +342,7 @@ static float sound_occlusion_probe(float sx, float sy, float sz) {
                         for(int iz = -1; iz <= 1; iz++) {
                                 float ox = sx + ix * 0.2F, oy = sy + iy * 0.2F, oz = sz + iz * 0.2F;
                                 float rx = camera_x - ox, ry = camera_y - oy, rz = camera_z - oz;
-                                camera_hit_mask(&hit, -1, ox, oy, oz, rx, ry, rz, dist);
+                                camera_block_hit(&hit, ox, oy, oz, rx, ry, rz, dist);
                                 if(hit.type == CAMERA_HITTYPE_BLOCK && hit.distance < dist - 0.5F)
                                         blocked++;
                         }
@@ -373,10 +380,12 @@ static void sound_room_probe(void) {
 
                 float d = -1.0F;
                 unsigned char fb = 0;
-                camera_hit_mask(&hit, -1, camera_x, camera_y, camera_z, rx, ry, rz, ROOM_RAY_RANGE);
+                /* Block-only, range-limited: same reason as the occlusion
+                   probe above. A room is made of walls, not players. */
+                camera_block_hit(&hit, camera_x, camera_y, camera_z, rx, ry, rz, ROOM_RAY_RANGE);
                 if(hit.type == CAMERA_HITTYPE_BLOCK) {
                         d = hit.distance;
-                        camera_hit_mask(&hit, -1, camera_x, camera_y, camera_z, -rx, -ry, -rz, ROOM_RAY_RANGE);
+                        camera_block_hit(&hit, camera_x, camera_y, camera_z, -rx, -ry, -rz, ROOM_RAY_RANGE);
                         fb = (hit.type == CAMERA_HITTYPE_BLOCK);
                 }
 

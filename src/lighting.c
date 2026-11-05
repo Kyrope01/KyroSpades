@@ -189,11 +189,11 @@ static const char* model_fragment_shader =
         "            vec3 direction = delta / max(distance_to_light, 0.0001);\n"
         "            float facing = 0.18 + 0.82 * max(dot(normal, direction), 0.0);\n"
         "            if(pr.w < 0.0) {\n"
-        "                float cone = smoothstep(u_SpotColorCone[i].w, min(u_SpotColorCone[i].w + 0.12, 1.0),\n"
+        "                float cone = smoothstep(u_SpotColorCone[i].w, mix(u_SpotColorCone[i].w, 1.0, 0.15),\n"
         "                                        dot(-direction, normalize(ci.rgb)));\n"
         "                float fill = clamp(1.0 - distance_to_light / 10.0, 0.0, 1.0);\n"
         "                fill = 0.30 * fill * fill * attenuation;\n"
-        "                light += u_SpotColorCone[i].rgb * ci.a * (cone * attenuation + fill) * facing;\n"
+        "                light += u_SpotColorCone[i].rgb * ci.a * (cone * (attenuation + fill)) * facing;\n"
         "            } else {\n"
         "                light += ci.rgb * ci.a * attenuation * facing;\n"
         "            }\n"
@@ -205,14 +205,14 @@ static const char* model_fragment_shader =
         "        vec3 from_light = v_WorldPosition - pr.xyz;\n"
         "        float distance_to_light = length(from_light);\n"
         "        vec3 direction = from_light / max(distance_to_light, 0.0001);\n"
-        "        float cone = smoothstep(u_SpotColorCone[3].w, min(u_SpotColorCone[3].w + 0.12, 1.0),\n"
+        "        float cone = smoothstep(u_SpotColorCone[3].w, mix(u_SpotColorCone[3].w, 1.0, 0.15),\n"
         "                                dot(direction, normalize(u_FlashlightDirection.xyz)));\n"
         "        float range = clamp(1.0 - distance_to_light / max(pr.w, 0.0001), 0.0, 1.0);\n"
         "        range *= range;\n"
         "        float diffuse = max(dot(normal, -direction), 0.0);\n"
         "        float fill = clamp(1.0 - distance_to_light / 10.0, 0.0, 1.0);\n"
         "        fill = 0.30 * fill * fill * range;\n"
-        "        light += u_SpotColorCone[3].rgb * ci.a * (cone * range + fill) * (0.18 + 0.82 * diffuse);\n"
+        "        light += u_SpotColorCone[3].rgb * ci.a * (cone * (range + fill)) * (0.18 + 0.82 * diffuse);\n"
         "    }\n"
         "    vec3 color = v_Color.rgb * u_Tint * light;\n"
         "    float distance_fog = clamp(length(v_WorldPosition.xz - u_Camera.xz) * u_FogDistance, 0.0, 1.0);\n"
@@ -318,12 +318,12 @@ static const char* world_fragment_shader =
         "            float diffuse = max(dot(normal, light_direction), 0.0);\n"
         "            float facing = 0.18 + 0.82 * diffuse;\n"
         "            if(position_radius.w < 0.0) {\n"
-        "                float cone = smoothstep(u_SpotColorCone[i].w, min(u_SpotColorCone[i].w + 0.12, 1.0),\n"
+        "                float cone = smoothstep(u_SpotColorCone[i].w, mix(u_SpotColorCone[i].w, 1.0, 0.15),\n"
         "                                        dot(-light_direction, normalize(color_intensity.rgb)));\n"
         "                float fill = clamp(1.0 - distance_ratio * radius / 10.0, 0.0, 1.0);\n"
         "                fill = 0.30 * fill * fill * attenuation;\n"
         "                added += u_SpotColorCone[i].rgb * color_intensity.a\n"
-        "                         * (cone * attenuation + fill) * facing;\n"
+        "                         * (cone * (attenuation + fill)) * facing;\n"
         "            } else {\n"
         "                added += color_intensity.rgb * color_intensity.a * attenuation * facing;\n"
         "            }\n"
@@ -335,14 +335,14 @@ static const char* world_fragment_shader =
         "        vec3 from_light = v_WorldPosition - pr.xyz;\n"
         "        float light_distance = length(from_light);\n"
         "        vec3 ray_direction = from_light / max(light_distance, 0.0001);\n"
-        "        float cone = smoothstep(u_SpotColorCone[3].w, min(u_SpotColorCone[3].w + 0.12, 1.0),\n"
+        "        float cone = smoothstep(u_SpotColorCone[3].w, mix(u_SpotColorCone[3].w, 1.0, 0.15),\n"
         "                                dot(ray_direction, normalize(u_FlashlightDirection.xyz)));\n"
         "        float range = clamp(1.0 - light_distance / max(pr.w, 0.0001), 0.0, 1.0);\n"
         "        range *= range;\n"
         "        float diffuse = max(dot(normal, -ray_direction), 0.0);\n"
         "        float fill = clamp(1.0 - light_distance / 10.0, 0.0, 1.0);\n"
         "        fill = 0.30 * fill * fill * range;\n"
-        "        added += u_SpotColorCone[3].rgb * ci.a * (cone * range + fill) * (0.18 + 0.82 * diffuse);\n"
+        "        added += u_SpotColorCone[3].rgb * ci.a * (cone * (range + fill)) * (0.18 + 0.82 * diffuse);\n"
         "    }\n"
         "    vec3 sun_direction = normalize(u_SunDirection);\n"
         "    float sun_diffuse = max(dot(normal, sun_direction), 0.0);\n"
@@ -454,12 +454,12 @@ static const char* world_fragment_shader_330 =
         "            float diffuse = max(dot(normal, light_direction), 0.0);\n"
         "            float facing = 0.18 + 0.82 * diffuse;\n"
         "            if(position_radius.w < 0.0) {\n"
-        "                float cone = smoothstep(u_SpotColorCone[i].w, min(u_SpotColorCone[i].w + 0.12, 1.0),\n"
+        "                float cone = smoothstep(u_SpotColorCone[i].w, mix(u_SpotColorCone[i].w, 1.0, 0.15),\n"
         "                                        dot(-light_direction, normalize(color_intensity.rgb)));\n"
         "                float fill = clamp(1.0 - distance_ratio * radius / 10.0, 0.0, 1.0);\n"
         "                fill = 0.30 * fill * fill * attenuation;\n"
         "                added += u_SpotColorCone[i].rgb * color_intensity.a\n"
-        "                         * (cone * attenuation + fill) * facing;\n"
+        "                         * (cone * (attenuation + fill)) * facing;\n"
         "            } else {\n"
         "                added += color_intensity.rgb * color_intensity.a * attenuation * facing;\n"
         "            }\n"
@@ -471,14 +471,14 @@ static const char* world_fragment_shader_330 =
         "        vec3 from_light = v_WorldPosition - pr.xyz;\n"
         "        float light_distance = length(from_light);\n"
         "        vec3 ray_direction = from_light / max(light_distance, 0.0001);\n"
-        "        float cone = smoothstep(u_SpotColorCone[3].w, min(u_SpotColorCone[3].w + 0.12, 1.0),\n"
+        "        float cone = smoothstep(u_SpotColorCone[3].w, mix(u_SpotColorCone[3].w, 1.0, 0.15),\n"
         "                                dot(ray_direction, normalize(u_FlashlightDirection.xyz)));\n"
         "        float range = 1.0 - smoothstep(0.0, 1.0, light_distance / max(pr.w, 0.0001));\n"
         "        range *= range;\n"
         "        float diffuse = max(dot(normal, -ray_direction), 0.0);\n"
         "        float fill = clamp(1.0 - light_distance / 10.0, 0.0, 1.0);\n"
         "        fill = 0.30 * fill * fill * range;\n"
-        "        added += u_SpotColorCone[3].rgb * ci.a * (cone * range + fill) * (0.18 + 0.82 * diffuse);\n"
+        "        added += u_SpotColorCone[3].rgb * ci.a * (cone * (range + fill)) * (0.18 + 0.82 * diffuse);\n"
         "    }\n"
         "    vec3 sun_direction = normalize(u_SunDirection);\n"
         "    float sun_diffuse = max(dot(normal, sun_direction), 0.0);\n"
@@ -974,9 +974,12 @@ void lighting_prepare_frame(double now, float view_x, float view_y, float view_z
                         source.spot_color[1] = beam.green / 255.0F;
                         source.spot_color[2] = beam.blue / 255.0F;
                         source.cone_cos = cosf(beam.cone * (PI / 512.0F));
-                        source.intensity = 1.5F;
+                        /* V1 RGB values are linear light levels, not just a
+                           hue. Do not amplify a negotiated server's light with
+                           the legacy flashlight or dynamic-light multipliers. */
+                        source.intensity = flashlight_ext_negotiated() ? 1.0F : 1.5F;
 #ifdef OPENGL_CORE
-                        if(settings.hdr_rendering)
+                        if(!flashlight_ext_negotiated() && settings.hdr_rendering)
                                 source.intensity = 3.0F;
 #endif
                         source.spotlight = true;
@@ -1028,7 +1031,9 @@ static void lighting_build_uniform_arrays(float* position_radius, float* color_i
                 for(int axis = 0; axis < 3; axis++)
                         color_intensity[i * 4 + axis] = frame_lights[i].spotlight
                                 ? frame_lights[i].direction[axis] : frame_lights[i].color[axis];
-                color_intensity[i * 4 + 3] = frame_lights[i].intensity * intensity_multiplier;
+                color_intensity[i * 4 + 3] = frame_lights[i].intensity
+                        * ((frame_lights[i].spotlight && flashlight_ext_negotiated())
+                           ? 1.0F : intensity_multiplier);
                 if(frame_lights[i].spotlight) {
                         for(int axis = 0; axis < 3; ++axis)
                                 spot_color_cone[i * 4 + axis] = frame_lights[i].spot_color[axis];
@@ -1040,9 +1045,9 @@ static void lighting_build_uniform_arrays(float* position_radius, float* color_i
                 const int i = LIGHTING_SHADER_LIGHTS - 1;
                 float age = fmaxf((float)(window_time() - flashlight.turned_on), 0.0F);
                 float fade = 1.0F - expf(-age * 5.0F);
-                float brightness = 1.5F;
+                float brightness = flashlight_ext_negotiated() ? 1.0F : 1.5F;
 #ifdef OPENGL_CORE
-                if(settings.hdr_rendering)
+                if(!flashlight_ext_negotiated() && settings.hdr_rendering)
                         brightness = 3.0F;
 #endif
                 position_radius[i * 4 + 0] = flashlight.position[0];
@@ -1056,10 +1061,10 @@ static void lighting_build_uniform_arrays(float* position_radius, float* color_i
                 spot_color_cone[i * 4 + 1] = beam.green / 255.0F;
                 spot_color_cone[i * 4 + 2] = beam.blue / 255.0F;
                 spot_color_cone[i * 4 + 3] = cosf(beam.cone * (PI / 512.0F));
-                color_intensity[i * 4 + 0] = 1.0F;
-                color_intensity[i * 4 + 1] = 0.70F;
-                color_intensity[i * 4 + 2] = 0.50F;
-                color_intensity[i * 4 + 3] = brightness * fade * intensity_multiplier;
+                /* RGB for spotlights comes from spot_color_cone; these
+                   unused components must not impose a fixed warm tint. */
+                color_intensity[i * 4 + 3] = brightness * fade
+                        * (flashlight_ext_negotiated() ? 1.0F : intensity_multiplier);
                 flashlight_direction[0] = flashlight.direction[0];
                 flashlight_direction[1] = flashlight.direction[1];
                 flashlight_direction[2] = flashlight.direction[2];
