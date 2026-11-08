@@ -2508,7 +2508,7 @@ int main(int argc, char** argv) {
         settings.skin_tent = 0;
         /* Default colour settings; saved user preferences override these. */
         settings.lighten_colors = 120;
-        settings.exposure = 43.64F;
+        settings.exposure = 3.0F;
         settings.saturation = -22.42F;
         settings.contrast = 0.0F;
         settings.vignette = 0.0F;
