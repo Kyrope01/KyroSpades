@@ -12,3 +12,6 @@ tools/bench/bench
 *.obj
 *.swp
 .DS_Store
+
+# Local per-skin orientation preferences
+skin-flips.txt

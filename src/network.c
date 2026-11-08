@@ -345,6 +345,8 @@ void read_PacketBlockAction(void* data, int len) {
                                         player_stats_blocks_placed++;
                                 }
                                 bool play_sound = map_isair(p->x, 63 - p->z, p->y);
+                                if(play_sound && p->player_id == local_player_id && !demo_is_playing() && local_player_blocks)
+                                        local_player_blocks--;
                                 uint32_t color = players[p->player_id].block.red
                                         | (players[p->player_id].block.green << 8)
                                         | (players[p->player_id].block.blue << 16);
@@ -382,6 +384,8 @@ void read_PacketBlockLine(void* data, int len) {
                 | (players[p->player_id].block.green << 8)
                 | (players[p->player_id].block.blue << 16);
         if(p->sx == p->ex && p->sy == p->ey && p->sz == p->ez) {
+                if(p->player_id == local_player_id && !demo_is_playing() && local_player_blocks &&
+                   map_isair(p->sx, 63 - p->sz, p->sy)) local_player_blocks--;
                 map_set(p->sx, 63 - p->sz, p->sy, color);
                 if(p->player_id == local_player_id)
                         glowing_blocks_confirm_local_build(p->sx, 63 - p->sz, p->sy);
@@ -393,6 +397,8 @@ void read_PacketBlockLine(void* data, int len) {
                         int y = 63 - blocks[len - 1].z;
                         int z = blocks[len - 1].y;
                         if(map_isair(x, y, z)) {
+                                if(p->player_id == local_player_id && !demo_is_playing() && local_player_blocks)
+                                        local_player_blocks--;
                                 map_set(x, y, z, color);
                                 if(p->player_id == local_player_id)
                                         glowing_blocks_confirm_local_build(x, y, z);
@@ -1688,6 +1694,28 @@ static void network_note_glowing_build(int id, const void* data, int len) {
         }
 }
 
+/* Queue the current input and selected tool before a block packet. All are
+   reliable on the same channel, so jump/tool changes cannot be overtaken by
+   the immediate build flush. Do not alter position-report rate limits. */
+void network_sync_build_state(void) {
+        if(!network_connected || !network_logged_in || demo_is_playing()) return;
+        struct Player* p = &players[local_player_id];
+        if(p->input.keys.packed != network_keys_last) {
+                struct PacketInputData in = {0};
+                in.player_id = local_player_id;
+                in.keys = p->input.keys.packed;
+                network_send_flags(PACKET_INPUTDATA_ID, &in, sizeof(in), ENET_PACKET_FLAG_RELIABLE);
+                network_keys_last = p->input.keys.packed;
+        }
+        if(p->held_item != network_tool_last) {
+                struct PacketSetTool t = {0};
+                t.player_id = local_player_id;
+                t.tool = p->held_item;
+                network_send_flags(PACKET_SETTOOL_ID, &t, sizeof(t), ENET_PACKET_FLAG_RELIABLE);
+                network_tool_last = p->held_item;
+        }
+}
+
 void network_send(int id, void* data, int len) {
         network_note_glowing_build(id, data, len);
         network_send_flags(id, data, len, ENET_PACKET_FLAG_RELIABLE);
@@ -1730,6 +1758,7 @@ unsigned int network_ping() {
 }
 
 void network_disconnect() {
+        player_cancel_pending_block();
         teamplay_reset_connection();
         daytime_weather_reset_connection();
         flashlight_ext_reset_connection();

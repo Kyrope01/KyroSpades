@@ -2489,7 +2489,8 @@ int main(int argc, char** argv) {
         settings.smooth_fog = 0;
         settings.water_shader = 1;
         settings.particle_animations = 1;
-        settings.camera_fov = CAMERA_DEFAULT_FOV;
+        /* The gameplay default is wider; keep the 70-degree minimum and ADS defaults. */
+        settings.camera_fov = 90.0F;
         settings.rifle_ads_fov = CAMERA_DEFAULT_FOV;
         settings.shotgun_ads_fov = CAMERA_DEFAULT_FOV;
         settings.smg_ads_fov = CAMERA_DEFAULT_FOV;
@@ -2876,6 +2877,10 @@ int main(int argc, char** argv) {
                 } else {
                         physics_tick_alpha = 1.0F;
                 }
+
+                /* Pending jump builds must be checked even after a short click
+                   is released, and outside the render/interpolation pass. */
+                player_update_pending_block();
 
                 /* Damage-feedback vignette fades out every frame, including
                    while a menu is open over the world. */

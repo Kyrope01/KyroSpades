@@ -44,6 +44,7 @@ const char* network_reason_disconnect(int code);
 
 unsigned int network_ping(void);
 void network_send(int id, void* data, int len);
+void network_sync_build_state(void);
 /* Sends a Chat Message carrying `text` as UTF-8: the line goes out as it is
    when it is all printable ASCII and otherwise behind the 0xff prefix of the
    UTF-8 Chat extension, so a server reads the bytes the player typed. */
