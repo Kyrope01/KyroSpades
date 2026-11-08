@@ -28,6 +28,7 @@
 
 #include "common.h"
 #include "camera.h"
+#include "block_placement.h"
 #include "player.h"
 #include "sound.h"
 #include "map.h"
@@ -241,50 +242,21 @@ static int player_in_view(struct Player* p) {
 	       && distance2D(p->pos.x, p->pos.z, camera_x, camera_z) <= rd * rd;
 }
 
-/* Check if a block position overlaps with the local player's AABB */
+/* ZeroSpades' build box and 3-block Chebyshev range, transformed from
+   protocol-down coordinates to the map-up coordinates used by KS. */
 int overlaps_with_player(int bx, int by, int bz) {
-        if(camera_mode != CAMERAMODE_FPS || local_player_id >= PLAYERS_MAX) {
-                return 0;
-        }
-        
-        struct Player* p = &players[local_player_id];
-        if(!p->alive || p->team == TEAM_SPECTATOR) {
-                return 0;
-        }
-        
-        /* Horizontal footprint: the player is 0.9 wide, centered on pos
-           (the same +/-0.45 player_clipbox sweeps). */
-        if(bx < (int)floorf(p->pos.x - 0.45F) || bx > (int)floorf(p->pos.x + 0.45F))
-                return 0;
-        if(bz < (int)floorf(p->pos.z - 0.45F) || bz > (int)floorf(p->pos.z + 0.45F))
-                return 0;
-
-        /* player_boxclipmove samples in network Z and player_clipbox maps
-           that sample with 63 - (int)z. This labels each sampled voxel one
-           cell ABOVE floorf(63 - z) for noninteger z. Account for that cell
-           when comparing with camera_terrain_pick_local's map-up voxel
-           indices: standing feet are at pos.y - 1.25, crouched feet at
-           pos.y - 0.35, and the head reaches pos.y + 1.45. Using the raw
-           physics sample heights here wrongly required a two-block jump. */
-        float feet = p->pos.y - (p->input.keys.crouch ? 0.35F : 1.25F);
-        float head = p->pos.y + 1.45F;
-        return (float)by < head && (float)(by + 1) > feet;
+    if(camera_mode != CAMERAMODE_FPS || local_player_id == PLAYER_ID_SERVER)
+        return 0;
+    struct Player* p = &players[local_player_id];
+    if(!p->alive || p->team == TEAM_SPECTATOR)
+        return 0;
+    return block_placement_overlaps(bx, by, bz, p->physics.eye.x, p->physics.eye.y,
+                                    p->physics.eye.z, p->input.keys.crouch);
 }
 
-/* Keep the usual camera-based reach for walls and overhead blocks. Looking
-   down from a standing player's camera can put the floor below their feet
-   outside that range even during a jump; permit nearby below-body targets
-   measured from the physical player position instead. The overlap check is
-   still required before sending any build. */
 bool player_block_in_range(int bx, int by, int bz) {
-	float ex, ey, ez;
-	camera_local_eye(&ex, &ey, &ez);
-	if(chebyshev(bx - ex, by - ey, bz - ez) < 3.0F)
-		return true;
-	const struct Player* p = &players[local_player_id];
-	return (float)(by + 1) <= p->pos.y
-	       && chebyshev(bx + 0.5F - p->pos.x, by + 0.5F - p->pos.y,
-	                    bz + 0.5F - p->pos.z) < 4.0F;
+    const struct Player* p = &players[local_player_id];
+    return block_placement_in_range(bx, by, bz, p->physics.eye.x, p->physics.eye.y, p->physics.eye.z);
 }
 
 int button_map[3];
@@ -319,36 +291,73 @@ float player_intersection_dist = 1024.0F;
 
 struct Player players[PLAYERS_MAX];
 
-/* Both a new click and held-button repeat use this path. Trying on the press
-   avoids losing short clicks between physics ticks; repeating still respects
-   the normal half-second block-tool cooldown. Never predict a map edit here:
-   the server may reject the build and sends the authoritative block packet. */
+/* Keep a short click during a jump until the player clears the target. This
+   remains server-authoritative: neither the map nor stock is predicted. */
+static bool pending_block;
+static int pending_x, pending_y, pending_z;
+
+void player_cancel_pending_block(void) { pending_block = false; }
+
+static bool build_context_valid(void) {
+    if(!network_connected || !network_logged_in || network_map_transfer || demo_is_playing() ||
+       local_player_id == PLAYER_ID_SERVER || button_map[1] || camera_mode != CAMERAMODE_FPS || !local_player_blocks || screen_current != SCREEN_NONE ||
+       chat_input_mode != CHAT_NO_INPUT || !hud_active->render_world)
+        return false;
+    const struct Player* p = &players[local_player_id];
+    return p->connected && p->alive && p->team != TEAM_SPECTATOR &&
+           p->held_item == TOOL_BLOCK && !p->input.keys.sprint;
+}
+
+static bool block_target_valid(int x, int y, int z) {
+    if(x < 0 || x >= map_size_x || y <= 1 || y >= map_size_y || z < 0 || z >= map_size_z ||
+       !map_isair(x, y, z) || !player_block_in_range(x, y, z))
+        return false;
+    static const int dirs[6][3] = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
+    for(int i = 0; i < 6; ++i) {
+        int nx=x+dirs[i][0], ny=y+dirs[i][1], nz=z+dirs[i][2];
+        if(nx >= 0 && nx < map_size_x && ny >= 0 && ny < map_size_y && nz >= 0 && nz < map_size_z &&
+           !map_isair(nx,ny,nz)) return true;
+    }
+    return false;
+}
+
+static bool send_block(int x, int y, int z) {
+    struct Player* p = &players[local_player_id];
+    if(!build_context_valid() || window_time() - p->item_showup < 0.5F ||
+       !block_target_valid(x,y,z) || overlaps_with_player(x,y,z)) return false;
+    struct PacketBlockAction blk = {0};
+    blk.player_id = local_player_id;
+    blk.action_type = ACTION_BUILD;
+    blk.x = x; blk.y = z; blk.z = 63-y;
+    network_sync_build_state();
+    network_send(PACKET_BLOCKACTION_ID, &blk, sizeof(blk));
+    p->item_showup = window_time();
+    return true;
+}
+
 bool player_try_place_block(void) {
-	if(!network_connected || network_map_transfer || demo_is_playing()
-	   || camera_mode != CAMERAMODE_FPS || !local_player_blocks)
-		return false;
-	struct Player* p = &players[local_player_id];
-	if(!p->connected || !p->alive || p->team == TEAM_SPECTATOR || p->held_item != TOOL_BLOCK)
-		return false;
-	float now = window_time();
-	if(now - p->item_showup < 0.5F)
-		return false;
+    if(!build_context_valid() || pending_block || window_time() - players[local_player_id].item_showup < 0.5F)
+        return false;
+    int* pos = camera_terrain_pick_local(0);
+    if(!pos || !block_target_valid(pos[0],pos[1],pos[2])) return false;
+    if(overlaps_with_player(pos[0],pos[1],pos[2])) {
+        if(players[local_player_id].physics.airborne) {
+            pending_x=pos[0]; pending_y=pos[1]; pending_z=pos[2]; pending_block=true;
+        }
+        return false;
+    }
+    return send_block(pos[0],pos[1],pos[2]);
+}
 
-	int* pos = camera_terrain_pick_local(0);
-	if(!pos || pos[1] <= 1 || !player_block_in_range(pos[0], pos[1], pos[2])
-	   || overlaps_with_player(pos[0], pos[1], pos[2]))
-		return false;
-
-	struct PacketBlockAction blk = {0};
-	blk.player_id = local_player_id;
-	blk.action_type = ACTION_BUILD;
-	blk.x = pos[0];
-	blk.y = pos[2];
-	blk.z = 63 - pos[1];
-	network_send(PACKET_BLOCKACTION_ID, &blk, sizeof(blk));
-	p->item_showup = now;
-	local_player_blocks--;
-	return true;
+void player_update_pending_block(void) {
+    if(!pending_block) return;
+    struct Player* p = &players[local_player_id];
+    if(!build_context_valid() || !p->physics.airborne || !block_target_valid(pending_x,pending_y,pending_z)) {
+        pending_block = false;
+        return;
+    }
+    if(!overlaps_with_player(pending_x,pending_y,pending_z) && send_block(pending_x,pending_y,pending_z))
+        pending_block = false;
 }
 
 #define FALL_DAMAGE_VELOCITY 0.58F
@@ -483,6 +492,7 @@ void player_init() {
 }
 
 void player_reset(struct Player* p) {
+	if(local_player_id != PLAYER_ID_SERVER && p == &players[local_player_id]) player_cancel_pending_block();
 	p->connected = 0;
 	p->alive = 0;
 	p->outfit = 0;

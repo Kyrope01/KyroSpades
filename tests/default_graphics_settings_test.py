@@ -28,6 +28,12 @@ assert "settings.exposure = 43.64F;" in main
 assert "settings.saturation = -22.42F;" in main
 assert "exposure                       = 43.64" in config
 assert "saturation                     = -22.42" in config
+assert "settings.camera_fov = 90.0F;" in main
+assert "camera_fov                     = 90.00000" in config
+assert main.index("settings.camera_fov = 90.0F;") < main.index("        config_reload();")
+assert "#define CAMERA_DEFAULT_FOV 70.0F" in (root / "src/camera.h").read_text()
+for weapon in ("rifle", "shotgun", "smg"):
+    assert f"settings.{weapon}_ads_fov = CAMERA_DEFAULT_FOV;" in main
 assert "settings.ads_zoom_animation = 0;" in main
 assert "ads_zoom_animation             = 0" in config
 

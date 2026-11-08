@@ -249,10 +249,12 @@ bool player_uses_undead_outfit(const struct Player* p);
 int player_move(struct Player* p, float fsynctics, int id);
 int player_uncrouch(struct Player* p);
 int overlaps_with_player(int bx, int by, int bz);
-/* Placement reach: usual camera ray, plus nearby below-body jump targets. */
+/* Placement reach and player overlap, in map coordinates. */
 bool player_block_in_range(int bx, int by, int bz);
 /* Attempt one local block build; false if the target/cooldown is invalid. */
 bool player_try_place_block(void);
+void player_update_pending_block(void);
+void player_cancel_pending_block(void);
 void player_save_corpse(int player_id);
 void player_clear_corpses(void);
 void player_update_corpses(float dt);

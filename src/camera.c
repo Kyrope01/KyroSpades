@@ -531,6 +531,10 @@ int* camera_terrain_pick_local(unsigned char mode) {
 
 	float ox, oy, oz;
 	camera_local_eye(&ox, &oy, &oz);
+	/* Build picks use the protocol eye transformed to the map-up cell grid.
+	   Other local picks retain the visual/gameplay eye height. */
+	if(mode == 0)
+		oy = players[local_player_id].physics.eye.y + 1.0F;
 	return camera_terrain_pickEx(mode, ox, oy, oz, rx, ry, rz);
 }
 

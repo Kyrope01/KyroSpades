@@ -3577,8 +3577,8 @@ void hud_ingame_mouseclick(double x, double y, int button, int action, int mods)
                                         line.ex = pos[0];
                                         line.ey = pos[2];
                                         line.ez = 63 - pos[1];
+                                        network_sync_build_state();
                                         network_send(PACKET_BLOCKLINE_ID, &line, sizeof(line));
-                                        local_player_blocks -= amount;
                                 }
                                 players[local_player_id].item_showup = window_time();
                         }
@@ -6378,6 +6378,15 @@ static void hud_skins_render(mu_Context* ctx, float scalex, float scaley) {
                 struct skin_category* cat = &skin_categories[skins_selected_category];
 
                 if(cat->count > 0) {
+                        int selected = skins_selected_entry[skins_selected_category];
+                        if(skins_weapon_category(skins_selected_category) && selected >= 0 && selected < cat->count) {
+                                char flip_label[128];
+                                snprintf(flip_label, sizeof(flip_label), "Flip selected weapon: %s",
+                                         skins_flip_get(skins_selected_category, selected) ? "On" : "Off");
+                                mu_layout_row(ctx, 1, (int[]) {-1}, 0);
+                                if(mu_button(ctx, flip_label))
+                                        skins_flip_toggle(skins_selected_category, selected);
+                        }
                         int cell_w = 140 * scalex;
                         int cell_h = 160 * scaley;
                         int panel_w = mu_get_current_container(ctx)->body.w;

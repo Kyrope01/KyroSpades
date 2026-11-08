@@ -105,3 +105,9 @@ Source: `M9 (Diamond).zip`.
 Source: `Baseball Grenade (Penguano).zip`.
 
 ![Baseball Penguano model](<previews/legacy-mods/Baseball-Penguano-model.png>)
+
+### Reversed weapons and custom tracers
+
+In the **Skins** menu, select a rifle, SMG, or shotgun skin and use **Flip selected weapon** if its model points backwards. The setting is saved separately for each weapon category and skin name in `skin-flips.txt` in the game's writable directory; it affects both the menu preview and the in-game model. It does not flip the sight image or the tracer model.
+
+A weapon skin can provide a matching projectile model in `kv6/`. For example, `semi(RPG7).kv6` uses `semitracer(RPG7).kv6`; SMG and shotgun skins use `smgtracer(NAME).kv6` and `shotguntracer(NAME).kv6` respectively. If no matching tracer is available, the game's standard tracer for that weapon is used. Tracers use the usual KV6 tracer scale.

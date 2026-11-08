@@ -19,6 +19,89 @@
 
 struct skin_category skin_categories[SKIN_CATEGORIES];
 
+/* Flip preferences are keyed by category + filename suffix, never by the
+   sorted menu index. Keep missing mods in the file across rescans/restarts. */
+struct skin_flip_entry { int category; char suffix[SKIN_NAME_MAX]; };
+static struct skin_flip_entry* skin_flips;
+static size_t skin_flip_count;
+
+bool skins_weapon_category(enum skin_category_type c) {
+    return c == SKIN_RIFLE || c == SKIN_SMG || c == SKIN_SHOTGUN;
+}
+static int flip_find(int c, const char* suffix) {
+    for(size_t i=0; i<skin_flip_count; i++)
+        if(skin_flips[i].category == c && !strcmp(skin_flips[i].suffix, suffix)) return (int)i;
+    return -1;
+}
+static void flip_add(int c, const char* suffix) {
+    if(!skins_weapon_category(c) || strlen(suffix) >= SKIN_NAME_MAX || flip_find(c,suffix) >= 0) return;
+    void* p = realloc(skin_flips,(skin_flip_count+1)*sizeof(*skin_flips));
+    if(!p) { log_warn("Could not store skin flip preference"); return; }
+    skin_flips=p;
+    skin_flips[skin_flip_count].category=c;
+    strcpy(skin_flips[skin_flip_count].suffix,suffix);
+    skin_flip_count++;
+}
+static void flip_load(void) {
+    free(skin_flips); skin_flips=NULL; skin_flip_count=0;
+    if(!file_exists("skin-flips.txt")) return;
+    char* data=(char*)file_load("skin-flips.txt");
+    if(!data) return;
+    for(char* line=strtok(data,"\r\n");line;line=strtok(NULL,"\r\n")) {
+        int c; char hex[SKIN_NAME_MAX*2+1], suffix[SKIN_NAME_MAX];
+        if(sscanf(line,"%d %96s",&c,hex)!=2) continue;
+        if(!strcmp(hex,"-")) suffix[0]=0;
+        else {
+            size_t n=strlen(hex); bool valid=!(n&1) && n/2 < SKIN_NAME_MAX;
+            for(size_t i=0;valid && i<n/2;i++) {
+                unsigned int v=0;
+                for(int j=0;j<2;j++) {
+                    char ch=hex[2*i+j];
+                    int digit=ch>='0' && ch<='9' ? ch-'0' : ch>='a' && ch<='f' ? ch-'a'+10 : -1;
+                    if(digit<0) {valid=false; break;}
+                    v=v*16+(unsigned)digit;
+                }
+                if(!v) valid=false;
+                suffix[i]=(char)v;
+            }
+            if(!valid) continue;
+            suffix[n/2]=0;
+        }
+        flip_add(c,suffix);
+    }
+    free(data);
+}
+static void flip_save(void) {
+    void* f=file_open("skin-flips.txt","w");
+    if(!f) {log_warn("Could not save skin flip preferences"); return;}
+    for(size_t i=0;i<skin_flip_count;i++) {
+        file_printf(f,"%d ",skin_flips[i].category);
+        const unsigned char* p=(const unsigned char*)skin_flips[i].suffix;
+        if(!*p) file_printf(f,"-");
+        while(*p) file_printf(f,"%02x",(unsigned)*p++);
+        file_printf(f,"\n");
+    }
+    file_close(f);
+}
+bool skins_flip_get(enum skin_category_type c, int entry) {
+    return skins_weapon_category(c) && entry>=0 && entry<skin_categories[c].count &&
+           flip_find(c,skin_categories[c].entries[entry].suffix)>=0;
+}
+void skins_flip_toggle(enum skin_category_type c, int entry) {
+    if(!skins_weapon_category(c) || entry<0 || entry>=skin_categories[c].count) return;
+    struct skin_entry* e=&skin_categories[c].entries[entry];
+    int idx=flip_find(c,e->suffix);
+    if(idx>=0) {
+        memmove(&skin_flips[idx],&skin_flips[idx+1],(skin_flip_count-(size_t)idx-1)*sizeof(*skin_flips));
+        skin_flip_count--;
+    } else flip_add(c,e->suffix);
+    bool flipped=flip_find(c,e->suffix)>=0;
+    e->previews[0].flip_yaw=flipped;
+    int selected = c==SKIN_RIFLE ? settings.skin_rifle : c==SKIN_SMG ? settings.skin_smg : settings.skin_shotgun;
+    if(selected==entry) skin_categories[c].models[0].ptr->flip_yaw=flipped;
+    flip_save();
+}
+
 static int entry_compare(const void* a, const void* b) {
 	const struct skin_entry* ea = (const struct skin_entry*)a;
 	const struct skin_entry* eb = (const struct skin_entry*)b;
@@ -121,6 +204,7 @@ void skins_scan(void) {
 			char mp[256];
 			snprintf(mp, sizeof(mp), "kv6/%s.kv6", cat->models[m].basename);
 			skin_reload_model((enum skin_category_type)c, cat, m, &cat->entries[0].previews[m], mp);
+			cat->entries[0].previews[m].flip_yaw = skins_weapon_category(c) && flip_find(c, "") >= 0;
 		}
 		cat->count = 1;
 
@@ -166,6 +250,7 @@ void skins_scan(void) {
 									snprintf(mp, sizeof(mp), "kv6/%s(%s).kv6",
 										cat->models[m].basename, e->suffix);
 									skin_reload_model((enum skin_category_type)c, cat, m, &e->previews[m], mp);
+									e->previews[m].flip_yaw = skins_weapon_category(c) && flip_find(c, e->suffix) >= 0;
 								}
 								cat->count++;
 							}
@@ -201,8 +286,27 @@ int skins_apply(enum skin_category_type category, int entry, int models) {
 				snprintf(path, sizeof(path), "kv6/%s.kv6",
 					cat->models[m].basename);
 
-			if(skin_reload_model(category, cat, m, cat->models[m].ptr, path) == 0)
+			if(skin_reload_model(category, cat, m, cat->models[m].ptr, path) == 0) {
+				cat->models[m].ptr->flip_yaw = skins_weapon_category(category) && flip_find(category, e->suffix) >= 0;
 				ok = 1;
+			}
+		}
+	}
+
+	/* Tracers follow the selected weapon skin. Unspecified models reset to
+	   the base tracer instead of retaining the previous skin's projectile. */
+	if(models && skins_weapon_category(category)) {
+		struct kv6_t* tracer = category == SKIN_RIFLE ? &model_semi_tracer :
+		                      category == SKIN_SMG ? &model_smg_tracer : &model_shotgun_tracer;
+		char tracer_path[256];
+		if(e->suffix[0])
+			snprintf(tracer_path, sizeof(tracer_path), "kv6/%stracer(%s).kv6", cat->models[0].basename, e->suffix);
+		else tracer_path[0] = 0;
+		int loaded = tracer_path[0] && file_exists(tracer_path) && kv6_reload(tracer, tracer_path, 0.05F) == 0;
+		if(!loaded) {
+			snprintf(tracer_path, sizeof(tracer_path), "kv6/%stracer.kv6", cat->models[0].basename);
+			if(kv6_reload(tracer, tracer_path, 0.05F) != 0)
+				log_warn("Could not load tracer: %s", tracer_path);
 		}
 	}
 
@@ -338,6 +442,7 @@ void skins_render_preview(enum skin_category_type category, int entry, float cx,
 }
 
 void skins_init(void) {
+	flip_load();
 	skins_scan();
 
 	settings.skin_spade = max(0, min(settings.skin_spade, skin_categories[SKIN_SPADE].count - 1));

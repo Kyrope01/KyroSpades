@@ -238,6 +238,7 @@ void kv6_rebuild_complete() {
 
 void kv6_load(struct kv6_t* kv6, void* bytes, float scale) {
 	kv6->colorize = false;
+	kv6->flip_yaw = false;
 	kv6->has_display_list = false;
 	kv6->scale = scale;
 
@@ -455,7 +456,7 @@ static bool model_programmable_active(void) {
 #endif
 }
 #endif
-void kv6_render(struct kv6_t* kv6, unsigned char team) {
+static void kv6_render_unflipped(struct kv6_t* kv6, unsigned char team) {
 	if(!kv6)
 		return;
 	if(team == TEAM_SPECTATOR)
@@ -1036,4 +1037,25 @@ void kv6_render(struct kv6_t* kv6, unsigned char team) {
 #endif
 #endif
 	}
+}
+
+/* Rotate the model about its horizontal bounds' center, not the KV6 pivot:
+   a reversed model often has an off-center grip pivot. Keep its center in
+   place while reversing its muzzle. This applies to mesh and point renderers. */
+void kv6_render(struct kv6_t* kv6, unsigned char team) {
+    if(!kv6) return;
+    if(kv6->flip_yaw) {
+        float cx = (kv6->xsiz * 0.5F - kv6->xpiv) * kv6->scale;
+        float cz = (kv6->ysiz * 0.5F - kv6->ypiv) * kv6->scale;
+        matrix_push(matrix_model);
+        matrix_translate(matrix_model, cx, 0.0F, cz);
+        matrix_rotate(matrix_model, 180.0F, 0.0F, 1.0F, 0.0F);
+        matrix_translate(matrix_model, -cx, 0.0F, -cz);
+        matrix_upload();
+    }
+    kv6_render_unflipped(kv6, team);
+    if(kv6->flip_yaw) {
+        matrix_pop(matrix_model);
+        matrix_upload();
+    }
 }

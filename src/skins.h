@@ -50,6 +50,9 @@ struct skin_category {
 
 extern struct skin_category skin_categories[SKIN_CATEGORIES];
 
+bool skins_weapon_category(enum skin_category_type category);
+bool skins_flip_get(enum skin_category_type category, int entry);
+void skins_flip_toggle(enum skin_category_type category, int entry);
 void skins_init(void);
 void skins_scan(void);
 int skins_apply(enum skin_category_type category, int entry, int models);
