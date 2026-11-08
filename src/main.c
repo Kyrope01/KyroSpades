@@ -2505,10 +2505,10 @@ int main(int argc, char** argv) {
         settings.skin_player = 0;
         settings.skin_intel = 0;
         settings.skin_tent = 0;
-        /* Start with a modest exposure lift and slightly restrained
-           saturation; both remain user-adjustable in Graphics settings. */
-        settings.exposure = 20.0F;
-        settings.saturation = -15.0F;
+        /* Default colour settings; saved user preferences override these. */
+        settings.lighten_colors = 120;
+        settings.exposure = 43.64F;
+        settings.saturation = -22.42F;
         settings.contrast = 0.0F;
         settings.vignette = 0.0F;
         /* ── Post-processing ───────────────────────────────────────────────── */
