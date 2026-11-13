@@ -43,6 +43,7 @@ struct Point {
 };
 
 void map_init();
+void map_stop_worker(void);
 void map_deinit(void);
 int map_object_visible(float x, float y, float z);
 int map_damage(int x, int y, int z, int damage);
@@ -51,11 +52,8 @@ bool map_damage_action(int x, int y, int z);
 void map_damaged_voxels_render();
 void map_update_physics(int x, int y, int z);
 float map_sunblock(int x, int y, int z);
-/* Hot, lock-free probes — MAIN THREAD ONLY (all current call sites are).
-   They take no lock on purpose: per-probe pthread rwlock cycles made combat
-   tank FPS on Windows (winpthreads rwlocks are mutex+condvar based). Worker
-   threads must use map_read_lock()/map_read_unlock() around the _nolock
-   variants instead (see map.c). */
+/* Public probes synchronize with the falling-block worker. Bulk readers can
+   hold one read lock and use the _nolock variants to avoid per-probe locking. */
 bool map_isair(int x, int y, int z);
 unsigned int map_get(int x, int y, int z);
 void map_read_lock(void);

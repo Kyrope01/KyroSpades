@@ -25,6 +25,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <limits.h>
+#include <errno.h>
 
 #include "libdeflate.h"
 #include "texture.h"
@@ -93,9 +94,13 @@ ENetPeer* peer;
 #define NETWORK_CUSTOM_REASON_MAX 252
 char network_custom_reason[NETWORK_CUSTOM_REASON_MAX + 1];
 
-void network_init_host() {
-        client = enet_host_create(NULL, 1, 1, 0, 0); // limit bandwidth here if you want to
-        enet_host_compress_with_range_coder(client);
+void network_init_host(void) {
+        if(client) enet_host_destroy(client);
+        client = NULL;
+        peer = NULL;
+        client = enet_host_create(NULL, 1, 1, 0, 0);
+        if(client) enet_host_compress_with_range_coder(client);
+        else log_error("Unable to create ENet host");
 }
 
 static inline char team_color_char(int team) {
@@ -184,18 +189,24 @@ void read_PacketMapChunk(void* data, int len) {
 }
 
 void read_PacketChatMessage(void* data, int len) {
-        if(len < 2)
+        const size_t header = offsetof(struct PacketChatMessage, message);
+        if(!data || len < 0 || (size_t)len < header)
                 return;
         struct PacketChatMessage* p = (struct PacketChatMessage*)data;
+        size_t body_len = (size_t)len - header;
+        if(body_len > sizeof(p->message)) body_len = sizeof(p->message);
+        char popup[sizeof(p->message) + 1];
+        memcpy(popup, p->message, body_len);
+        popup[body_len] = 0;
         char n[32] = {0};
-        char m[256];
+        char m[256] = {0};
         switch(p->chat_type) {
                 case CHAT_ERROR: sound_create(SOUND_LOCAL, &sound_beep2, 0.0F, 0.0F, 0.0F);
-                case CHAT_BIG: chat_showpopup(p->message, 5.0F, rgb(255, 0, 0)); return;
-                case CHAT_INFO: chat_showpopup(p->message, 5.0F, rgb(255, 255, 255)); return;
+                case CHAT_BIG: chat_showpopup(popup, 5.0F, rgb(255, 0, 0)); return;
+                case CHAT_INFO: chat_showpopup(popup, 5.0F, rgb(255, 255, 255)); return;
                 case CHAT_WARNING:
                         sound_create(SOUND_LOCAL, &sound_beep1, 0.0F, 0.0F, 0.0F);
-                        chat_showpopup(p->message, 5.0F, rgb(255, 255, 0));
+                        chat_showpopup(popup, 5.0F, rgb(255, 255, 0));
                         return;
                 case CHAT_SYSTEM:
                         // try to determine gamemode
@@ -206,8 +217,7 @@ void read_PacketChatMessage(void* data, int len) {
                                    stage to carry a human-readable disconnect reason.
                                    Keep up to the max chat payload (252 bytes), not
                                    the old 16-byte name-sized buffer. */
-                                int msg_len = len - 2;
-                                if(msg_len < 0) msg_len = 0;
+                                int msg_len = (int)body_len;
                                 if(msg_len > NETWORK_CUSTOM_REASON_MAX) msg_len = NETWORK_CUSTOM_REASON_MAX;
                                 memcpy(network_custom_reason, p->message, msg_len);
                                 network_custom_reason[msg_len] = 0;
@@ -232,13 +242,13 @@ void read_PacketChatMessage(void* data, int len) {
                                 m[0] = 0;
                         }
                         break;
+                default: return;
         }
 
         /* UTF-8 Chat (aosprotocol extensions/utf-8-chat.md): a body that starts
            with 0xff is UTF-8, everything else is Code Page 437 and is decoded
            so the font, which takes UTF-8, draws it. Bytes below 0x80 are kept
            as they are either way, so the inline colour codes survive. */
-        size_t body_len = len - offsetof(struct PacketChatMessage, message);
         const unsigned char* body = (const unsigned char*)p->message;
         if(body_len && body[0] == CHARSET_UTF8_PREFIX) {
                 body++;
@@ -302,6 +312,9 @@ void read_PacketBlockAction(void* data, int len) {
                 return;
         }
         struct PacketBlockAction* p = (struct PacketBlockAction*)data;
+        /* Bound coordinates before neighbor arithmetic and map access. */
+        if(p->x < 0 || p->x >= map_size_x || p->y < 0 || p->y >= map_size_z ||
+           p->z < 0 || p->z >= map_size_y) return;
         switch(p->action_type) {
                 case ACTION_DESTROY:
                         if((63 - p->z) > 0) {
@@ -368,6 +381,9 @@ void read_PacketBlockLine(void* data, int len) {
                 return;
         }
         struct PacketBlockLine* p = (struct PacketBlockLine*)data;
+        if(p->sx < 0 || p->sx >= map_size_x || p->ex < 0 || p->ex >= map_size_x ||
+           p->sy < 0 || p->sy >= map_size_z || p->ey < 0 || p->ey >= map_size_z ||
+           p->sz < 0 || p->sz >= map_size_y || p->ez < 0 || p->ez >= map_size_y) return;
         if(p->player_id >= PLAYERS_MAX) {
                 return;
         }
@@ -445,6 +461,16 @@ void read_PacketStateData(void* data, int len) {
                 return;
         }
 
+        if(!demo_is_playing() && p->player_id >= PLAYER_COUNT_MAX) {
+                log_warn("PacketStateData: invalid local player id %u", p->player_id);
+                return;
+        }
+        if(p->gamemode == GAMEMODE_TC && p->gamemode_data.tc.territory_count >
+           sizeof(p->gamemode_data.tc.territory) / sizeof(p->gamemode_data.tc.territory[0])) {
+                log_warn("PacketStateData: invalid territory count %u", p->gamemode_data.tc.territory_count);
+                return;
+        }
+
         memcpy(gamestate.team_1.name, p->team_1_name, sizeof(p->team_1_name));
         gamestate.team_1.name[sizeof(p->team_1_name)] = 0;
 
@@ -516,14 +542,20 @@ void read_PacketStateData(void* data, int len) {
                 CHECK_ALLOCATION_ERROR(decompressed)
                 size_t decompressed_size;
                 struct libdeflate_decompressor* d = libdeflate_alloc_decompressor();
-                while(1) {
+                if(!d) log_error("Unable to allocate map decompressor");
+                while(d) {
                         int r = libdeflate_zlib_decompress(d, compressed_chunk_data, compressed_chunk_data_offset, decompressed,
                                                                                            avail_size, &decompressed_size);
                         // switch not fancy enough here, breaking out of the loop is not aesthetic
                         if(r == LIBDEFLATE_INSUFFICIENT_SPACE) {
+                                if(avail_size > INT_MAX - 1024 * 1024) {
+                                        log_error("Decompressed map exceeds supported size");
+                                        break;
+                                }
                                 avail_size += 1024 * 1024;
                                 decompressed = realloc(decompressed, avail_size);
                                 CHECK_ALLOCATION_ERROR(decompressed)
+                                continue;
                         }
                         if(r == LIBDEFLATE_SUCCESS) {
                                 log_debug("Map decompressed: %zu bytes", decompressed_size);
@@ -541,12 +573,10 @@ void read_PacketStateData(void* data, int len) {
                                 chunk_rebuild_all();
                                 break;
                         }
-                        if(r == LIBDEFLATE_BAD_DATA || r == LIBDEFLATE_SHORT_OUTPUT) {
-                                log_debug("Map decompression failed: r=%i", r);
-                                break;
-                        }
+                        log_warn("Map decompression failed: r=%i", r);
+                        break;
                 }
-free(decompressed);
+                free(decompressed);
                 libdeflate_free_decompressor(d);
         }
         compressed_chunk_data_offset = 0;
@@ -581,6 +611,7 @@ void read_PacketExistingPlayer(void* data, int len) {
                 return;
         }
         struct PacketExistingPlayer* p = (struct PacketExistingPlayer*)data;
+        if(p->weapon > WEAPON_SHOTGUN || p->held_item > TOOL_GRENADE) return;
         /* Cap the name at the bytes actually received and force null-term
            so the strcpy below cannot read past the packet buffer. */
         size_t name_bytes = (size_t)len - header_size;
@@ -619,6 +650,7 @@ void read_PacketCreatePlayer(void* data, int len) {
                 return;
         }
         struct PacketCreatePlayer* p = (struct PacketCreatePlayer*)data;
+        if(p->weapon > WEAPON_SHOTGUN) return;
         size_t name_bytes = (size_t)len - header_size;
         if(name_bytes > sizeof(p->name)) name_bytes = sizeof(p->name);
         ((char*)p->name)[name_bytes - 1] = 0;
@@ -709,6 +741,11 @@ void read_PacketPlayerLeft(void* data, int len) {
 }
 
 void read_PacketMapStart(void* data, int len) {
+        if(!data || (len != (int)sizeof(struct PacketMapStart075) &&
+                     len < (int)sizeof(struct PacketMapStart076))) {
+                log_warn("Invalid PacketMapStart length: %d", len);
+                return;
+        }
         /* Seeking skips map decompression, not the extension's state reset. */
         flashlight_ext_reset_map();
         player_outfit_ext_reset_map();
@@ -737,20 +774,28 @@ void read_PacketMapStart(void* data, int len) {
         } else {
                 struct PacketMapStart076* p = (struct PacketMapStart076*)data;
                 compressed_chunk_data_estimate = p->map_size;
-                log_info("map name: %s", p->map_name);
+                char map_name[sizeof(p->map_name) + 1];
+                memcpy(map_name, p->map_name, sizeof(p->map_name));
+                map_name[sizeof(p->map_name)] = 0;
+                log_info("map name: %s", map_name);
                 log_info("map crc32: 0x%08X", p->crc32);
-                log_debug("Map transfer started: name=%s, crc=0x%08X, size=%i", p->map_name, p->crc32, p->map_size);
+                log_debug("Map transfer started: name=%s, crc=0x%08X, size=%i", map_name, p->crc32, p->map_size);
                 char filename[128];
                 snprintf(filename, sizeof(filename), "cache/%02X%02X%02X%02X.vxl", red(p->crc32), green(p->crc32), blue(p->crc32),
                                 alpha(p->crc32));
                 log_info("%s", filename);
                 if(file_exists(filename)) {
-                        network_map_cached = 1;
-                        log_debug("Map cache hit: loading from %s", filename);
-                        void* mapd = file_load(filename);
-                        map_vxl_load(mapd, file_size(filename));
+                        size_t map_size = 0;
+                        void* mapd = file_load_sized(filename, &map_size);
+                        if(mapd && map_size) {
+                                network_map_cached = 1;
+                                log_debug("Map cache hit: loading from %s", filename);
+                                map_vxl_load(mapd, map_size);
+                                chunk_rebuild_all();
+                        } else {
+                                log_warn("Could not read map cache: %s", filename);
+                        }
                         free(mapd);
-                        chunk_rebuild_all();
                 }
 
                 struct PacketMapCached c;
@@ -758,6 +803,7 @@ void read_PacketMapStart(void* data, int len) {
                 network_send(PACKET_MAPCACHED_ID, &c, sizeof(c));
         }
 
+        /* A new map invalidates every player and interpolation snapshot. */
         player_init();
         camera_mode = CAMERAMODE_SELECTION;
 }
@@ -853,7 +899,7 @@ void read_PacketOrientationData(void* data, int len) {
            (x,y,z) maps to internal (x, -z, y). */
         float ox = p->x, oy = -p->z, oz = p->y;
         float lenv = sqrtf(ox * ox + oy * oy + oz * oz);
-        if(lenv < 0.5F || lenv > 2.0F)
+        if(!isfinite(lenv) || lenv < 0.5F || lenv > 2.0F)
                 return; /* ignore zero/garbage packets */
         float clamped_y = oy;
         if(clamped_y > 1.0F)
@@ -978,7 +1024,9 @@ void read_PacketKillAction(void* data, int len) {
                         }
                 }
 
-                char* gun_name[3] = {"Rifle", "SMG", "Shotgun"};
+                const char* gun_name[3] = {"Rifle", "SMG", "Shotgun"};
+                unsigned int weapon = players[p->killer_id].weapon;
+                if(weapon >= 3) weapon = WEAPON_RIFLE;
                 char m[256];
 
                 char color_killer = team_color_char(players[p->killer_id].team);
@@ -995,11 +1043,11 @@ void read_PacketKillAction(void* data, int len) {
                 switch(p->kill_type) {
                         case KILLTYPE_WEAPON:
                                 snprintf(m, sizeof(m), "%c%s%c killed %c%s%c (%s)", color_killer, players[p->killer_id].name, color_kill, color_dead, players[p->player_id].name,
-                                                color_kill, gun_name[players[p->killer_id].weapon]);
+                                                color_kill, gun_name[weapon]);
                                 break;
                         case KILLTYPE_HEADSHOT:
                                 snprintf(m, sizeof(m), "%c%s%c killed %c%s%c (%s Headshot)", color_killer, players[p->killer_id].name, color_kill, color_dead, players[p->player_id].name,
-                                        color_kill, gun_name[players[p->killer_id].weapon]);
+                                        color_kill, gun_name[weapon]);
                                 break;
                         case KILLTYPE_MELEE:
                                 snprintf(m, sizeof(m), "%c%s%c killed %c%s%c (Spade)", color_killer, players[p->killer_id].name, color_kill, color_dead, players[p->player_id].name, color_kill);
@@ -1063,6 +1111,14 @@ void read_PacketGrenade(void* data, int len) {
                 return;
         }
         struct PacketGrenade* p = (struct PacketGrenade*)data;
+        /* Simulation casts positions to int and integrates velocity. Reject
+           nonfinite and wildly unreasonable values before they reach it. */
+        if(!isfinite(p->fuse_length) || p->fuse_length < 0.0F || p->fuse_length > 60.0F ||
+           !isfinite(p->x) || !isfinite(p->y) || !isfinite(p->z) ||
+           !isfinite(p->vx) || !isfinite(p->vy) || !isfinite(p->vz) ||
+           fabsf(p->x) > 1000000.0F || fabsf(p->y) > 1000000.0F || fabsf(p->z) > 1000000.0F ||
+           fabsf(p->vx) > 10000.0F || fabsf(p->vy) > 10000.0F || fabsf(p->vz) > 10000.0F)
+                return;
 
         grenade_add(&(struct Grenade) {
                 .team = players[p->player_id].team,
@@ -1120,6 +1176,7 @@ void read_PacketChangeWeapon(void* data, int len) {
                 return;
         }
         struct PacketChangeWeapon* p = (struct PacketChangeWeapon*)data;
+        if(p->weapon > WEAPON_SHOTGUN) return;
         if(p->player_id < PLAYERS_MAX) {
                 if(p->player_id == local_player_id) {
                         log_warn("Unexpected ChangeWeaponPacket");
@@ -1206,8 +1263,8 @@ void read_PacketIntelCapture(void* data, int len) {
                 }
                 if(!demo_mute_effects()) sound_create(SOUND_LOCAL, p->winning ? &sound_horn : &sound_pickup, 0.0F, 0.0F, 0.0F);
                 players[p->player_id].score += 10;
-                chat_add(0, hud_accent_color(), capture_str);
-                if(p->winning) {
+                if(capture_str[0]) chat_add(0, hud_accent_color(), capture_str);
+                if(p->winning && capture_str[0]) {
                         char* name = NULL;
 
                         switch(players[p->player_id].team) {
@@ -1248,7 +1305,7 @@ void read_PacketIntelDrop(void* data, int len) {
                                 snprintf(drop_str, sizeof(drop_str), "\2%s\6 has dropped the \1%s\6 Intel", players[p->player_id].name, gamestate.team_1.name);
                                 break;
                 }
-                chat_add(0, hud_accent_color(), drop_str);
+                if(drop_str[0]) chat_add(0, hud_accent_color(), drop_str);
         }
 }
 
@@ -1286,8 +1343,12 @@ void read_PacketTerritoryCapture(void* data, int len) {
         if(gamestate.gamemode_type == GAMEMODE_TC && p->tent < gamestate.gamemode.tc.territory_count) {
                 gamestate.gamemode.tc.territory[p->tent].team = p->team;
                 if(!demo_mute_effects()) sound_create(SOUND_LOCAL, p->winning ? &sound_horn : &sound_pickup, 0.0F, 0.0F, 0.0F);
-                char x = (int)(gamestate.gamemode.tc.territory[p->tent].x / 64.0F) + 'A';
-                char y = (int)(gamestate.gamemode.tc.territory[p->tent].y / 64.0F) + '1';
+                float tx = gamestate.gamemode.tc.territory[p->tent].x;
+                float ty = gamestate.gamemode.tc.territory[p->tent].y;
+                if(!isfinite(tx) || !isfinite(ty) || tx < 0 || ty < 0 ||
+                   tx >= map_size_x || ty >= map_size_z) return;
+                char x = (int)(tx / 64.0F) + 'A';
+                char y = (int)(ty / 64.0F) + '1';
                 char capture_str[128] = {0};
                 char* team_n = NULL;
                 switch(p->team) {
@@ -1323,6 +1384,10 @@ void read_PacketProgressBar(void* data, int len) {
 }
 
 void read_PacketHandshakeInit(void* data, int len) {
+        if(len < 0 || len > 511 || (len && !data)) {
+                log_warn("Ignoring invalid handshake length %d", len);
+                return;
+        }
         network_send(PACKET_HANDSHAKERETURN_ID, data, len);
 }
 
@@ -1459,27 +1524,23 @@ void read_PacketVersionGet(void* data, int len) {
         ver.major = KYROSPADES_MAJOR;
         ver.minor = KYROSPADES_MINOR;
         ver.revision = KYROSPADES_PATCH;
-#ifndef OPENGL_ES
-#ifdef OS_WINDOWS
-        char* os = "KyroSpades (Windows)";
-#endif
-#ifdef OS_LINUX
-        char* os = "KyroSpades (Linux)";
-#endif
-#ifdef OS_APPLE
-        char* os = "KyroSpades (Apple)";
-#endif
-#ifdef OS_HAIKU
-        char* os = "KyroSpades (Haiku)";
-#endif
-#else
+        const char* os = "KyroSpades";
+#ifdef OPENGL_ES
 #if defined(OS_IOS)
-        char* os = "KyroSpades (iOS)";
+        os = "KyroSpades (iOS)";
 #elif defined(USE_TOUCH)
-        char* os = "KyroSpades (Android)";
+        os = "KyroSpades (Android)";
 #else
-        char* os = "KyroSpades (Embedded)";
+        os = "KyroSpades (Embedded)";
 #endif
+#elif defined(OS_WINDOWS)
+        os = "KyroSpades (Windows)";
+#elif defined(OS_APPLE)
+        os = "KyroSpades (Apple)";
+#elif defined(OS_LINUX)
+        os = "KyroSpades (Linux)";
+#elif defined(OS_HAIKU)
+        os = "KyroSpades (Haiku)";
 #endif
         strcpy(ver.operatingsystem, os);
         network_send(PACKET_VERSIONSEND_ID, &ver, sizeof(ver) - sizeof(ver.operatingsystem) + strlen(os));
@@ -1660,15 +1721,29 @@ void network_updateColor() {
         network_send(PACKET_SETCOLOR_ID, &c, sizeof(c));
 }
 
+#define NETWORK_SEND_MAX_BODY 511
 static void network_send_flags(int id, void* data, int len, enet_uint32 flags) {
-        if(demo_is_playing()) return;
-        if(network_connected) {
-                network_stats[0].outgoing += len + 1;
-                unsigned char tmp[512];
-                tmp[0] = id;
-                memcpy(tmp + 1, data, len);
-                enet_peer_send(peer, 0, enet_packet_create(tmp, len + 1, flags));
+        if(len < 0 || len > NETWORK_SEND_MAX_BODY || (len && !data) || id < 0 || id > 255) {
+                log_warn("Refusing packet id %d with length %d", id, len);
+                return;
         }
+        if(demo_is_playing() || !network_connected || !peer) return;
+        unsigned char tmp[NETWORK_SEND_MAX_BODY + 1];
+        tmp[0] = (unsigned char)id;
+        if(len) memcpy(tmp + 1, data, (size_t)len);
+        ENetPacket* packet = enet_packet_create(tmp, (size_t)len + 1, flags);
+        if(!packet) {
+                log_error("Unable to allocate outgoing packet");
+                return;
+        }
+        if(enet_peer_send(peer, 0, packet) < 0) {
+                enet_packet_destroy(packet);
+                return;
+        }
+        if(network_stats[0].outgoing > INT_MAX - (len + 1))
+                network_stats[0].outgoing = INT_MAX;
+        else
+                network_stats[0].outgoing += len + 1;
 }
 
 static void network_note_glowing_build(int id, const void* data, int len) {
@@ -1698,7 +1773,7 @@ static void network_note_glowing_build(int id, const void* data, int len) {
    reliable on the same channel, so jump/tool changes cannot be overtaken by
    the immediate build flush. Do not alter position-report rate limits. */
 void network_sync_build_state(void) {
-        if(!network_connected || !network_logged_in || demo_is_playing()) return;
+        if(!network_connected || !network_logged_in || demo_is_playing() || local_player_id == PLAYER_ID_SERVER) return;
         struct Player* p = &players[local_player_id];
         if(p->input.keys.packed != network_keys_last) {
                 struct PacketInputData in = {0};
@@ -1717,6 +1792,10 @@ void network_sync_build_state(void) {
 }
 
 void network_send(int id, void* data, int len) {
+        if(len < 0 || len > NETWORK_SEND_MAX_BODY || (len && !data) || id < 0 || id > 255) {
+                log_warn("Refusing packet id %d with length %d", id, len);
+                return;
+        }
         network_note_glowing_build(id, data, len);
         network_send_flags(id, data, len, ENET_PACKET_FLAG_RELIABLE);
         /* A mouse press is dispatched after the frame's normal network_update.
@@ -1775,7 +1854,7 @@ void network_disconnect() {
         }
         player_stats_reset();
         if(network_connected) {
-                enet_peer_disconnect(peer, 0);
+                if(peer) enet_peer_disconnect(peer, 0);
                 network_connected = 0;
                 network_logged_in = 0;
                 network_map_transfer_end = 0;
@@ -1791,24 +1870,29 @@ void network_disconnect() {
                 chat_clear(1);
 
                 ENetEvent event;
-                while(enet_host_service(client, &event, 3000) > 0) {
+                while(client && peer && enet_host_service(client, &event, 3000) > 0) {
                         switch(event.type) {
                                 case ENET_EVENT_TYPE_RECEIVE: enet_packet_destroy(event.packet); break;
                                 case ENET_EVENT_TYPE_DISCONNECT:
                                         enet_host_destroy(client);
-                                return;
+                                        client = NULL;
+                                        peer = NULL;
+                                        return;
                         }
                 }
 
-                enet_peer_reset(peer);
-                enet_host_destroy(client);
         }
+        if(peer) enet_peer_reset(peer);
+        if(client) enet_host_destroy(client);
+        client = NULL;
+        peer = NULL;
 }
 
 int network_connect_sub(char* ip, int port, int version) {
         ENetAddress address;
         ENetEvent event;
         network_init_host();
+        if(!client) return 0;
         enet_address_set_host(&address, ip);
         address.port = port;
         peer = enet_host_connect(client, &address, 1, version);
@@ -1832,8 +1916,9 @@ int network_connect_sub(char* ip, int port, int version) {
 
                 float start = window_time();
                 while(window_time() - start < 1.0F) { // listen connection for 1s, check if server disconnects
-                        if(!network_update()) {
-                                enet_peer_reset(peer);
+                        if(settings.net_early_opt) network_service();
+                        if(!network_connected || !network_update()) {
+                                if(peer) enet_peer_reset(peer);
                                 return 0;
                         }
                 }
@@ -1904,7 +1989,15 @@ int network_identifier_split(char* addr, char* ip_out, int* port_out) {
                 memcpy(ip_out, ip_start, ip_len);
                 ip_out[ip_len] = 0;
         } else {
-                unsigned int ip = strtoul(ip_start, NULL, 10);
+                char number[32];
+                memcpy(number, ip_start, ip_len);
+                number[ip_len] = 0;
+                char* end;
+                errno = 0;
+                unsigned long value = strtoul(number, &end, 10);
+                if(errno == ERANGE || end == number || *end || number[0] == '-' || value > UINT32_MAX)
+                        return 0;
+                uint32_t ip = (uint32_t)value;
                 snprintf(ip_out, 32, "%u.%u.%u.%u", ip & 255, (ip >> 8) & 255, (ip >> 16) & 255, (ip >> 24) & 255);
         }
 
@@ -1931,23 +2024,21 @@ void network_service(void) {
         while(enet_host_service(client, &event, 0) > 0) {
                 switch(event.type) {
                         case ENET_EVENT_TYPE_RECEIVE: {
-                                network_stats[0].ingoing += event.packet->dataLength;
                                 /* Defensive: enet should never deliver a 0-length packet,
                                    but if it does, dataLength-1 underflows to SIZE_MAX
                                    and the handler thinks it has a huge buffer. */
-                                if(event.packet->dataLength < 1) {
+                                if(event.packet->dataLength < 1 || event.packet->dataLength - 1 > INT_MAX) {
                                         enet_packet_destroy(event.packet);
                                         break;
                                 }
+                                if(event.packet->dataLength > (size_t)(INT_MAX - network_stats[0].ingoing))
+                                        network_stats[0].ingoing = INT_MAX;
+                                else
+                                        network_stats[0].ingoing += (int)event.packet->dataLength;
                                 int id = event.packet->data[0];
-                                if(id < 0 || id >= 256) {
-                                        log_error("Packet id out of range: %i", id);
-                                        enet_packet_destroy(event.packet);
-                                        break;
-                                }
-                                if(*packets[id]) {
+                                if(packets[id]) {
                                         log_debug("Packet id %i", id);
-                                        (*packets[id])(event.packet->data + 1, event.packet->dataLength - 1);
+                                        packets[id](event.packet->data + 1, (int)(event.packet->dataLength - 1));
                                 } else {
                                         log_error("Invalid packet id %i, length: %i", id, (int)event.packet->dataLength - 1);
                                 }
@@ -2015,7 +2106,7 @@ int network_update() {
                 if(!network_connected)
                         return 0;
 
-                if(network_logged_in && players[local_player_id].team != TEAM_SPECTATOR && players[local_player_id].alive) {
+                if(network_logged_in && local_player_id != PLAYER_ID_SERVER && players[local_player_id].team != TEAM_SPECTATOR && players[local_player_id].alive) {
                         if(players[local_player_id].input.keys.packed != network_keys_last) {
                                 struct PacketInputData in;
                                 in.player_id = local_player_id;
@@ -2130,8 +2221,7 @@ void network_init() {
         player_outfit_ext_set_negotiated(false);
         player_outfit_ext_reset_map();
         enet_initialize();
-        client = enet_host_create(NULL, 1, 1, 0, 0); // limit bandwidth here if you want to
-        enet_host_compress_with_range_coder(client);
+        network_init_host();
 
         packets[PACKET_POSITIONDATA_ID] = read_PacketPositionData;
         packets[PACKET_ORIENTATIONDATA_ID] = read_PacketOrientationData;

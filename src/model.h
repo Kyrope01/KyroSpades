@@ -45,6 +45,7 @@ struct kv6_t {
 	uint16_t xsiz, ysiz, zsiz;
 	float xpiv, ypiv, zpiv;
 	bool has_display_list, colorize, flip_yaw;
+	bool display_list_point, display_list_greedy;
 	struct glx_displaylist display_list[2];
 	struct kv6_voxel* voxels;
 	int voxel_count;
@@ -94,6 +95,8 @@ void kv6_calclight_viewmodel(void);
 void kv6_rebuild_complete(void);
 void kv6_rebuild(struct kv6_t* kv6);
 void kv6_render(struct kv6_t* kv6, unsigned char team);
+/* Internal decoder: bytes must be validated and kv6 must have no owned resources.
+   External callers should use kv6_reload, which preserves the old model on failure. */
 void kv6_load(struct kv6_t* kv6, void* bytes, float scale);
 int kv6_reload(struct kv6_t* kv6, const char* path, float orig_scale);
 void kv6_init(void);

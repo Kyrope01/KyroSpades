@@ -16,10 +16,13 @@ stub = r'''
 #include <stdarg.h>
 #include <assert.h>
 #include <math.h>
+#include <errno.h>
+#include <limits.h>
+#include <ctype.h>
 #define SKIN_NAME_MAX 48
 #define SKIN_CATEGORIES 8
 enum skin_category_type {SKIN_SPADE,SKIN_GRENADE,SKIN_RIFLE,SKIN_SMG,SKIN_SHOTGUN,SKIN_PLAYER,SKIN_INTEL,SKIN_TENT};
-struct kv6_t {bool flip_yaw; int xsiz,ysiz; float xpiv,ypiv,scale;};
+struct kv6_t {bool flip_yaw; int xsiz,ysiz; float xpiv,ypiv,scale; void* voxels; int voxel_count;};
 struct skin_entry {char suffix[48]; struct kv6_t* previews;};
 struct skin_model_def {struct kv6_t* ptr; const char* basename;};
 struct skin_category {struct skin_model_def models[1]; struct skin_entry* entries; int count;};
@@ -36,7 +39,7 @@ char last[256]; int fail_custom;
 int kv6_reload(struct kv6_t* t, const char*p,float s) {(void)t;assert(s==0.05f);strcpy(last,p);return fail_custom && strchr(p,'(') ? -1:0;}
 '''
 checks = r'''
-void load_tracer(enum skin_category_type category, struct skin_category* cat, struct skin_entry* e, int models) {
+void load_tracer(enum skin_category_type category, struct skin_category* cat, struct skin_entry* e, int reload_models) {
 ''' + tracer + r'''
 }
 static float tx,tz,angle,savedx,savedz,saveda; static int pushes,pops,uploads,renders;
@@ -68,7 +71,7 @@ int main(void) {
  load_tracer(SKIN_RIFLE,r,&rifle[1],1);assert(!strcmp(last,"kv6/semitracer.kv6"));
  load_tracer(SKIN_SMG,s,&smg[0],1);assert(!strcmp(last,"kv6/smgtracer.kv6"));
  strcpy(last,"untouched");load_tracer(SKIN_RIFLE,r,&rifle[0],0);assert(!strcmp(last,"untouched"));
- struct kv6_t k={true,10,20,2,2,0.1f};kv6_render(&k,0);assert(pushes==1 && pops==1 && uploads==2 && renders==1 && tx==0 && tz==0 && angle==0);
+ struct kv6_t k={true,10,20,2,2,0.1f,&active,1};kv6_render(&k,0);assert(pushes==1 && pops==1 && uploads==2 && renders==1 && tx==0 && tz==0 && angle==0);
  k.flip_yaw=false;kv6_render(&k,0);assert(pushes==1 && renders==2);kv6_render(NULL,0);
  puts("weapon flip and tracer checks passed");
 }

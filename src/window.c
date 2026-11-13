@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <limits.h>
 
 #include "common.h"
 #include "main.h"
@@ -151,7 +152,6 @@ static const char* window_internal_keyname(int internal) {
 }
 
 static int window_pending_apply = 0;
-static int pending_multisamples;
 static int pending_vsync;
 static int pending_fullscreen;
 static int pending_width;
@@ -161,6 +161,18 @@ static int pending_height;
    settings.window_width/height with the fullscreen drawable size. */
 static int windowed_width = 0;
 static int windowed_height = 0;
+/* Ignore callbacks emitted synchronously by our own fullscreen/size changes. */
+static int window_applying = 0;
+
+static void window_note_windowed_resize(int width, int height) {
+        if(window_applying || settings.fullscreen || width <= 0 || height <= 0) return;
+        int old_width = windowed_width, old_height = windowed_height;
+        windowed_width = width;
+        windowed_height = height;
+        /* Preserve a pending edit while updating an untouched control. */
+        if(settings_windowed_width == old_width) settings_windowed_width = width;
+        if(settings_windowed_height == old_height) settings_windowed_height = height;
+}
 
 void window_windowed_size(int* width, int* height) {
 	/* No captured windowed size yet (first launch, or a backend that never
@@ -193,10 +205,12 @@ static void window_impl_joystick(int jid, int event) {
 	if(event == GLFW_CONNECTED) {
 		joystick_available = true;
 		joystick_id = jid;
-		log_info("Joystick detected: %s", glfwGetJoystickName(joystick_id));
+		const char* name = glfwGetJoystickName(joystick_id);
+		log_info("Joystick detected: %s", name ? name : "(unknown)");
 	} else if(event == GLFW_DISCONNECTED) {
-		joystick_available = false;
-		log_info("Joystick removed: %s", glfwGetJoystickName(joystick_id));
+		if(jid == joystick_id) joystick_available = false;
+		const char* name = glfwGetJoystickName(jid);
+		log_info("Joystick removed: %s", name ? name : "(unknown)");
 	}
 }
 
@@ -210,6 +224,7 @@ static void window_impl_mouseclick(GLFWwindow* window, int button, int action, i
 		case GLFW_MOUSE_BUTTON_LEFT: b = WINDOW_MOUSE_LMB; break;
 		case GLFW_MOUSE_BUTTON_RIGHT: b = WINDOW_MOUSE_RMB; break;
 		case GLFW_MOUSE_BUTTON_MIDDLE: b = WINDOW_MOUSE_MMB; break;
+		default: return;
 	}
 
 	int a = -1;
@@ -229,6 +244,7 @@ static void window_impl_mousescroll(GLFWwindow* window, double xoffset, double y
 	mouse_scroll(hud_window, xoffset, yoffset);
 }
 static int window_creating_context = 0;
+/* Wayland key-name queries must wait until the first keyboard keymap. */
 static int window_keyboard_ready = 0;
 
 /* GLFW 3.3 has one Linux backend per build; 3.4 can select at runtime.  Do not
@@ -267,6 +283,10 @@ static void window_impl_error(int i, const char* s) {
 static void window_impl_reshape(GLFWwindow* window, int width, int height) {
 	reshape(hud_window, width, height);
 }
+static void window_impl_window_size(GLFWwindow* window, int width, int height) {
+        if(!glfwGetWindowMonitor(window)) window_note_windowed_resize(width, height);
+}
+
 /* On Windows, GLFW's own re-capture on focus gain can leave the cursor
    visible (e.g. when alt-tabbing back while the pointer is outside the
    window, or refocusing via the title bar). The requested mode still reads
@@ -383,6 +403,8 @@ static void window_impl_keys(GLFWwindow* window, int key, int scancode, int acti
 }
 
 void window_keyname(int keycode, char* output, size_t length) {
+        if(!output || length == 0) return;
+        output[0] = 0;
 #ifdef OS_WINDOWS
 	if(glfwGetKeyScancode(keycode) > 0) {
 		GetKeyNameTextA(glfwGetKeyScancode(keycode) << 16, output, length);
@@ -470,7 +492,7 @@ void window_swapping(int value) {
 void window_title(char* suffix) {
 	if(suffix) {
 		char title[128];
-		snprintf(title, sizeof(title) - 1, "KyroSpades %s - %s", GIT_COMMIT_HASH, suffix);
+		snprintf(title, sizeof(title), "KyroSpades %s - %s", GIT_COMMIT_HASH, suffix);
 		glfwSetWindowTitle(hud_window->impl, title);
 	} else {
 		glfwSetWindowTitle(hud_window->impl, "KyroSpades " GIT_COMMIT_HASH);
@@ -480,6 +502,7 @@ void window_title(char* suffix) {
 void window_init() {
 	static struct window_instance i;
 	hud_window = &i;
+	window_set_windowed_size(settings.window_width, settings.window_height);
 
 	glfwSetErrorCallback(window_impl_error);
 
@@ -601,6 +624,7 @@ void window_init() {
 	glfwMakeContextCurrent(hud_window->impl);
 
 	glfwSetFramebufferSizeCallback(hud_window->impl, window_impl_reshape);
+	glfwSetWindowSizeCallback(hud_window->impl, window_impl_window_size);
 	glfwSetCursorPosCallback(hud_window->impl, window_impl_mouse);
 	glfwSetKeyCallback(hud_window->impl, window_impl_keys);
 	glfwSetMouseButtonCallback(hud_window->impl, window_impl_mouseclick);
@@ -614,19 +638,15 @@ void window_init() {
 }
 
 void window_fromsettings() {
-	pending_multisamples = settings.multisamples;
 	pending_vsync = settings.vsync;
 	pending_fullscreen = settings.fullscreen;
-	pending_width = settings.window_width;
-	pending_height = settings.window_height;
+	window_windowed_size(&pending_width, &pending_height);
 	window_pending_apply = 1;
 }
 
 void window_apply() {
 	if(!window_pending_apply) return;
 	window_pending_apply = 0;
-
-	glfwWindowHint(GLFW_SAMPLES, pending_multisamples);
 
 	if(pending_vsync < 2)
 		window_swapping(pending_vsync);
@@ -640,12 +660,7 @@ void window_apply() {
 
 	int wayland = window_on_wayland();
 	int fullscreen_failed = 0;
-	if(pending_fullscreen && monitor && (mode || wayland)) {
-		/* Remember the windowed size first: reshape() overwrites
-		   settings.window_width/height (and thus pending_*) with the
-		   fullscreen size, so it can't be recovered on exit otherwise. */
-		if(!glfwGetWindowMonitor(hud_window->impl))
-			glfwGetWindowSize(hud_window->impl, &windowed_width, &windowed_height);
+	if(pending_fullscreen && monitor && (mode || wayland) && !glfwGetWindowMonitor(hud_window->impl)) {
 
 		/* Request the monitor's current mode, not the saved windowed size.
 		   X11/XWayland must also use the current refresh rate to avoid a mode
@@ -657,7 +672,9 @@ void window_apply() {
 		int refresh = mode ? mode->refreshRate : GLFW_DONT_CARE;
 		glfwGetError(NULL); /* Discard errors from earlier GLFW operations. */
 		window_creating_context = 1;
+                window_applying = 1;
 		glfwSetWindowMonitor(hud_window->impl, monitor, 0, 0, width, height, refresh);
+                window_applying = 0;
 		int transition_error = glfwGetError(NULL);
 		window_creating_context = 0;
 		fullscreen_failed = transition_error != GLFW_NO_ERROR
@@ -677,23 +694,23 @@ void window_apply() {
 			log_warn("Fullscreen requested but no monitor/video mode is available, staying windowed at %ix%i", w, h);
 
 		window_creating_context = 1;
-		if(wayland) {
-			/* Wayland has no client-side window placement. Unset the fullscreen
-			   monitor and restore the requested windowed size (including on GLFW
-			   versions that do not resize when leaving fullscreen). */
-			if(glfwGetWindowMonitor(hud_window->impl))
-				glfwSetWindowMonitor(hud_window->impl, NULL, 0, 0, w, h, 0);
-			glfwSetWindowSize(hud_window->impl, w, h);
-		} else if(mode) {
-			glfwSetWindowMonitor(hud_window->impl, NULL, (mode->width - w) / 2,
-								 (mode->height - h) / 2, w, h, 0);
-		} else if(glfwGetWindowMonitor(hud_window->impl)) {
-			/* Leaving fullscreen with no mode to centre against: still get out of
-			   fullscreen and set the size, let the WM place the window. */
-			glfwSetWindowMonitor(hud_window->impl, NULL, 0, 0, w, h, 0);
-		} else {
-			glfwSetWindowSize(hud_window->impl, w, h);
-		}
+                window_applying = 1;
+                int was_fullscreen = glfwGetWindowMonitor(hud_window->impl) != NULL;
+                if(was_fullscreen) {
+                        int x = (!wayland && mode) ? (mode->width - w) / 2 : 0;
+                        int y = (!wayland && mode) ? (mode->height - h) / 2 : 0;
+                        glfwSetWindowMonitor(hud_window->impl, NULL, x, y, w, h, 0);
+                        if(glfwGetWindowMonitor(hud_window->impl)) {
+                                log_warn("Could not leave fullscreen");
+                                settings.fullscreen = settings_tmp.fullscreen = 1;
+                        }
+                } else {
+                        int current_width = 0, current_height = 0;
+                        glfwGetWindowSize(hud_window->impl, &current_width, &current_height);
+                        if(current_width != w || current_height != h)
+                                glfwSetWindowSize(hud_window->impl, w, h);
+                }
+                window_applying = 0;
 		window_creating_context = 0;
 		if(pending_fullscreen) {
 			if(!glfwGetWindowMonitor(hud_window->impl)) {
@@ -787,9 +804,8 @@ void window_poll() {
 
 			gamepad_translate_button(&state, &joystick_state, GLFW_GAMEPAD_BUTTON_A, WINDOW_MOUSE_LMB);
 			gamepad_translate_button(&state, &joystick_state, GLFW_GAMEPAD_BUTTON_B, WINDOW_MOUSE_RMB);
+                        joystick_state = state;
 		}
-
-		joystick_state = state;
 	}
 }
 
@@ -820,11 +836,9 @@ int window_textinput_active(void) {
 }
 
 void window_fromsettings() {
-	pending_multisamples = settings.multisamples;
 	pending_vsync = settings.vsync;
 	pending_fullscreen = settings.fullscreen;
-	pending_width = settings.window_width;
-	pending_height = settings.window_height;
+	window_windowed_size(&pending_width, &pending_height);
 	window_pending_apply = 1;
 }
 
@@ -879,30 +893,40 @@ void window_apply() {
 	if(pending_vsync > 1)
 		window_swapping(0);
 
-	if(pending_fullscreen) {
 #ifdef __ANDROID__
-		android_set_status_bar_hidden(1);
+        android_set_status_bar_hidden(pending_fullscreen != 0);
 #else
-		/* Capture the current windowed size before switching, so we can
-		   restore it on exit. */
-		if(!(SDL_GetWindowFlags(hud_window->impl) & SDL_WINDOW_FULLSCREEN_DESKTOP))
-			SDL_GetWindowSize(hud_window->impl, &windowed_width, &windowed_height);
-		SDL_SetWindowFullscreen(hud_window->impl, SDL_WINDOW_FULLSCREEN_DESKTOP);
+        int was_fullscreen = (SDL_GetWindowFlags(hud_window->impl) & SDL_WINDOW_FULLSCREEN) != 0;
+        window_applying = 1;
+        if(pending_fullscreen && !was_fullscreen) {
+                if(SDL_SetWindowFullscreen(hud_window->impl, SDL_WINDOW_FULLSCREEN_DESKTOP) != 0) {
+                        log_warn("Fullscreen transition failed: %s", SDL_GetError());
+                        settings.fullscreen = settings_tmp.fullscreen = 0;
+                        int width = 0, height = 0, target_width, target_height;
+                        window_windowed_size(&target_width, &target_height);
+                        SDL_GetWindowSize(hud_window->impl, &width, &height);
+                        if(width != target_width || height != target_height)
+                                SDL_SetWindowSize(hud_window->impl, target_width, target_height);
+                }
+        } else if(!pending_fullscreen) {
+                if(was_fullscreen && SDL_SetWindowFullscreen(hud_window->impl, 0) != 0) {
+                        log_warn("Could not leave fullscreen: %s", SDL_GetError());
+                        settings.fullscreen = settings_tmp.fullscreen = 1;
+                } else {
+                        int width = 0, height = 0, target_width, target_height;
+                        window_windowed_size(&target_width, &target_height);
+                        SDL_GetWindowSize(hud_window->impl, &width, &height);
+                        if(width != target_width || height != target_height)
+                                SDL_SetWindowSize(hud_window->impl, target_width, target_height);
+                }
+        }
+        window_applying = 0;
 #endif
-	} else {
-#ifdef __ANDROID__
-		android_set_status_bar_hidden(0);
-#else
-		SDL_SetWindowFullscreen(hud_window->impl, 0);
-		if(windowed_width > 0 && windowed_height > 0)
-			SDL_SetWindowSize(hud_window->impl, windowed_width, windowed_height);
-		else
-			SDL_SetWindowSize(hud_window->impl, pending_width, pending_height);
-#endif
-	}
 }
 
 void window_keyname(int keycode, char* output, size_t length) {
+        if(!output || length == 0) return;
+        output[0] = 0;
 	/* Ask SDL first — it knows the human name for every printable key, plus
 	   named non-printables ("Left", "Right", "Escape", etc.).  Only fall back
 	   to our internal labels when SDL genuinely can't help. */
@@ -930,8 +954,11 @@ float window_time() {
 
 int window_pressed_keys[WINDOW_KEY_COUNT] = {0};
 
+static char* window_clipboard_cache = NULL;
 const char* window_clipboard() {
-	return SDL_HasClipboardText() ? SDL_GetClipboardText() : NULL;
+        if(window_clipboard_cache) SDL_free(window_clipboard_cache);
+        window_clipboard_cache = SDL_HasClipboardText() ? SDL_GetClipboardText() : NULL;
+        return window_clipboard_cache;
 }
 
 void window_setclipboard(const char* text) {
@@ -1015,6 +1042,7 @@ static void window_dispatch_key(int sym, int action, int mod) {
 void window_init() {
 	static struct window_instance i;
 	hud_window = &i;
+	window_set_windowed_size(settings.window_width, settings.window_height);
 
 #ifdef USE_TOUCH
 	SDL_SetHintWithPriority(SDL_HINT_MOUSE_TOUCH_EVENTS, "1", SDL_HINT_OVERRIDE);
@@ -1241,6 +1269,8 @@ static int window_aim_zone(float x, float y) {
 }
 
 void window_deinit() {
+        if(window_clipboard_cache) SDL_free(window_clipboard_cache);
+        window_clipboard_cache = NULL;
 	SDL_DestroyWindow(hud_window->impl);
 	SDL_Quit();
 }
@@ -1310,7 +1340,9 @@ void window_poll() {
 					case SDL_BUTTON_LEFT: a = WINDOW_MOUSE_LMB; break;
 					case SDL_BUTTON_RIGHT: a = WINDOW_MOUSE_RMB; break;
 					case SDL_BUTTON_MIDDLE: a = WINDOW_MOUSE_MMB; break;
+					default: a = -1; break;
 				}
+                                if(a < 0) break;
 				mouse_click(hud_window, a, WINDOW_PRESS, 0);
 				break;
 			}
@@ -1321,7 +1353,9 @@ void window_poll() {
 					case SDL_BUTTON_LEFT: a = WINDOW_MOUSE_LMB; break;
 					case SDL_BUTTON_RIGHT: a = WINDOW_MOUSE_RMB; break;
 					case SDL_BUTTON_MIDDLE: a = WINDOW_MOUSE_MMB; break;
+					default: a = -1; break;
 				}
+                                if(a < 0) break;
 				mouse_click(hud_window, a, WINDOW_RELEASE, 0);
 				break;
 			}
@@ -1331,6 +1365,13 @@ void window_poll() {
 					/* data1/data2 are window coordinates; reshape from the
 					   drawable pixels, which differ on HighDPI / Android. */
 					int dw = 0, dh = 0;
+#ifndef __ANDROID__
+                                if(!(SDL_GetWindowFlags(hud_window->impl) & SDL_WINDOW_FULLSCREEN)) {
+                                        int ww = 0, wh = 0;
+                                        SDL_GetWindowSize(hud_window->impl, &ww, &wh);
+                                        window_note_windowed_resize(ww, wh);
+                                }
+#endif
 				SDL_GL_GetDrawableSize(hud_window->impl, &dw, &dh);
 				if(dw <= 0 || dh <= 0) { dw = event.window.data1; dh = event.window.data2; }
 				if(event.window.data1 > 0 && event.window.data2 > 0) {
@@ -1564,7 +1605,7 @@ int window_closed() {
 void window_title(char* suffix) {
 	if(suffix) {
 		char title[128];
-		snprintf(title, sizeof(title) - 1, "KyroSpades %s - %s", GIT_COMMIT_HASH, suffix);
+		snprintf(title, sizeof(title), "KyroSpades %s - %s", GIT_COMMIT_HASH, suffix);
 		SDL_SetWindowTitle(hud_window->impl, title);
 	} else {
 		SDL_SetWindowTitle(hud_window->impl, "KyroSpades " GIT_COMMIT_HASH);
@@ -1626,7 +1667,8 @@ void window_open_url(const char* url) {
 int window_cpucores() {
 #ifdef OS_LINUX
 #ifdef USE_TOUCH
-	return sysconf(_SC_NPROCESSORS_CONF);
+	long count = sysconf(_SC_NPROCESSORS_ONLN);
+        return count > 0 && count <= INT_MAX ? (int)count : 1;
 #else
 	return get_nprocs();
 #endif

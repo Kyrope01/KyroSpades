@@ -42,8 +42,9 @@ int glx_version = 0;
 struct glx_frame_stats glx_stats;
 
 void glx_frame_stats_reset(void) {
-	glx_batch2d_flush();
 	memset(&glx_stats, 0, sizeof(glx_stats));
+	/* A boundary flush belongs to the new frame, not neither frame. */
+	glx_batch2d_flush();
 }
 
 void glx_frame_stats_get(struct glx_frame_stats* out) {
@@ -106,9 +107,6 @@ int glx_uniform_location(unsigned int program, const char* name) {
         GLuint object = (GLuint)program;
         size_t name_length;
         uint32_t hash;
-        uint32_t first;
-        size_t empty = GLX_UNIFORM_CACHE_CAPACITY;
-
         if(!object || !name)
                 return -1;
 
@@ -116,24 +114,16 @@ int glx_uniform_location(unsigned int program, const char* name) {
         if(name_length >= GLX_UNIFORM_NAME_CAPACITY)
                 return glGetUniformLocation(object, name);
 
-        first = hash % GLX_UNIFORM_CACHE_CAPACITY;
-        for(size_t probe = 0; probe < GLX_UNIFORM_CACHE_CAPACITY; probe++) {
-                size_t index = (first + probe) % GLX_UNIFORM_CACHE_CAPACITY;
-                struct glx_uniform_cache_entry* entry = &glx_uniform_cache[index];
-                if(entry->program == object && entry->hash == hash && strcmp(entry->name, name) == 0)
-                        return entry->location;
-                if(!entry->program && empty == GLX_UNIFORM_CACHE_CAPACITY)
-                        empty = index;
-        }
-
+        /* Bounded direct-mapped cache: deleted entries cannot break probes,
+           and a full table replaces collisions instead of scanning forever. */
+        struct glx_uniform_cache_entry* entry = &glx_uniform_cache[hash % GLX_UNIFORM_CACHE_CAPACITY];
+        if(entry->program == object && entry->hash == hash && strcmp(entry->name, name) == 0)
+                return entry->location;
         GLint location = glGetUniformLocation(object, name);
-        if(empty < GLX_UNIFORM_CACHE_CAPACITY) {
-                struct glx_uniform_cache_entry* entry = &glx_uniform_cache[empty];
-                entry->program = object;
-                entry->hash = hash;
-                entry->location = location;
-                memcpy(entry->name, name, name_length + 1U);
-        }
+        entry->program = object;
+        entry->hash = hash;
+        entry->location = location;
+        memcpy(entry->name, name, name_length + 1U);
         return location;
 }
 
@@ -158,6 +148,7 @@ void glx_delete_program(unsigned int program) {
 
 #ifdef GLX_PROGRAMMABLE
 static GLuint default_shader = 0;
+static float default_team_color[3] = {1.0F, 1.0F, 1.0F};
 static GLint loc_u_MVP = -1;
 static GLint loc_u_Color = -1;
 static GLint loc_u_HasVertexColor = -1;
@@ -237,8 +228,9 @@ static const char* default_fs =
         "varying vec3 v_WorldNormal;\n"
         "varying float v_FogDistance;\n"
         "void main() {\n"
-        "    vec4 tex = texture2D(u_Texture, v_TexCoord);\n"
-        "    vec4 c = mix(vec4(1.0), tex, u_TextureEnabled) * v_Color;\n"
+        "    vec4 tex = vec4(1.0);\n"
+        "    if(u_TextureEnabled > 0.5) tex = texture2D(u_Texture, v_TexCoord);\n"
+        "    vec4 c = tex * v_Color;\n"
         "    if(c.a < u_AlphaCutoff) discard;\n"
         "    if(u_LightingEnabled > 0.5) {\n"
         "        vec3 normal = normalize(v_WorldNormal);\n"
@@ -313,6 +305,9 @@ void glx_set_color4f(float r, float g, float b, float a) {
                 if(real_glColor4f)
                         real_glColor4f(r, g, b, a);
         }
+#elif !defined(OPENGL_CORE)
+        /* Parenthesized function name avoids the common.h function macro. */
+        (glColor4f)(r, g, b, a);
 #endif
 }
 
@@ -342,8 +337,14 @@ void glx_set_team_color(float r, float g, float b) {
                 prog = (GLint)glx_current_program();
                 if(prog) {
                         GLint loc = glx_uniform_location(prog, "u_TeamColor");
-                        if(loc >= 0)
+                        if(loc >= 0) {
+                                if(prog == (GLint)default_shader) {
+                                        default_team_color[0] = r;
+                                        default_team_color[1] = g;
+                                        default_team_color[2] = b;
+                                }
                                 glUniform4f(loc, r, g, b, 1.0F);
+                        }
                 }
         }
 #endif
@@ -429,6 +430,7 @@ void glx_init() {
                         glUniform1f(loc_u_AlphaCutoff, 0.0F);
                         glUniform1f(loc_u_LightScale, 1.0F);
                         glUniform1f(loc_u_TexCoordScale, 1.0F);
+                        default_team_color[0] = default_team_color[1] = default_team_color[2] = 1.0F;
                         glUniform4f(loc_u_TeamColor, 1.0F, 1.0F, 1.0F, 1.0F);
                         glUniformMatrix4fv(loc_u_Model, 1, GL_FALSE,
                                 (float[]) {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1});
@@ -462,7 +464,25 @@ void glx_init() {
 #endif
 }
 
+#define GLX_BATCH2D_MAX_VERTS 8192
+
+static bool batch2d_enabled = false;
+static bool batch2d_flushing = false; /* guards re-entry from glx_use_program */
+static int batch2d_verts = 0;
+static GLuint batch2d_vbo = 0;
+static float batch2d_pos[GLX_BATCH2D_MAX_VERTS * 3];
+static unsigned char batch2d_col[GLX_BATCH2D_MAX_VERTS * 4];
+
 void glx_deinit(void) {
+        /* Discard queued vertices before any program switch can flush them. */
+        batch2d_verts = 0;
+        batch2d_enabled = false;
+        batch2d_flushing = false;
+#ifdef GLX_PROGRAMMABLE
+        if(batch2d_vbo)
+                glDeleteBuffers(1, &batch2d_vbo);
+#endif
+        batch2d_vbo = 0;
 #ifdef GLX_PROGRAMMABLE
         if(line_quad_vbo)
                 glDeleteBuffers(1, &line_quad_vbo);
@@ -486,6 +506,9 @@ void glx_deinit(void) {
         quad_vao = 0;
         default_vao = 0;
 #endif
+        glx_set_explicit_attributes(false);
+        glx_client_state_invalidate();
+        requested_line_width = 1.0F;
         glx_program_state_reset();
 }
 
@@ -601,16 +624,19 @@ int glx_shader(const char* vertex, const char* fragment) {
         const char* fragment_source = fragment;
 #endif
         int v = 0, f = 0;
+        bool compile_failed = false;
         if(vertex_source) {
                 v = glCreateShader(GL_VERTEX_SHADER);
                 glShaderSource(v, 1, (const GLchar* const*)&vertex_source, NULL);
                 glCompileShader(v);
-                GLint ok;
-                glGetShaderiv(v, GL_COMPILE_STATUS, &ok);
+                GLint ok = 0;
+                if(v) glGetShaderiv(v, GL_COMPILE_STATUS, &ok);
                 if(!ok) {
                         char log[1024];
-                        glGetShaderInfoLog(v, sizeof(log), NULL, log);
+                        log[0] = 0;
+                        if(v) glGetShaderInfoLog(v, sizeof(log), NULL, log);
                         log_error("Vertex shader compile error: %s", log);
+                        compile_failed = true;
                 }
         }
 
@@ -618,12 +644,14 @@ int glx_shader(const char* vertex, const char* fragment) {
                 f = glCreateShader(GL_FRAGMENT_SHADER);
                 glShaderSource(f, 1, (const GLchar* const*)&fragment_source, NULL);
                 glCompileShader(f);
-                GLint ok;
-                glGetShaderiv(f, GL_COMPILE_STATUS, &ok);
+                GLint ok = 0;
+                if(f) glGetShaderiv(f, GL_COMPILE_STATUS, &ok);
                 if(!ok) {
                         char log[1024];
-                        glGetShaderInfoLog(f, sizeof(log), NULL, log);
+                        log[0] = 0;
+                        if(f) glGetShaderInfoLog(f, sizeof(log), NULL, log);
                         log_error("Fragment shader compile error: %s", log);
+                        compile_failed = true;
                 }
         }
 
@@ -632,7 +660,17 @@ int glx_shader(const char* vertex, const char* fragment) {
         free(prepared_fragment);
 #endif
 
+        if(compile_failed) {
+                if(v) glDeleteShader(v);
+                if(f) glDeleteShader(f);
+                return 0;
+        }
         int program = glCreateProgram();
+        if(!program) {
+                if(v) glDeleteShader(v);
+                if(f) glDeleteShader(f);
+                return 0;
+        }
         if(v)
                 glAttachShader(program, v);
         if(f)
@@ -643,7 +681,7 @@ int glx_shader(const char* vertex, const char* fragment) {
         glBindAttribLocation(program, 3, "a_Normal");
         glLinkProgram(program);
 
-        GLint linked;
+        GLint linked = 0;
         glGetProgramiv(program, GL_LINK_STATUS, &linked);
         if(!linked) {
                 char log[1024];
@@ -680,12 +718,14 @@ bool glx_uses_explicit_attributes(void) {
 }
 
 void glx_displaylist_create(struct glx_displaylist* x, bool has_color, bool has_normal) {
+        memset(x, 0, sizeof(*x));
         x->has_color = has_color;
         x->has_normal = has_normal;
         x->has_texcoord = false;
 
 #ifndef GLX_PROGRAMMABLE
-        if(!glx_version || settings.force_displaylist) {
+        x->use_legacy = !glx_version || settings.force_displaylist;
+        if(x->use_legacy) {
                 x->legacy = glGenLists(1);
         } else {
                 glGenBuffers(1, &x->modern);
@@ -699,7 +739,7 @@ void glx_displaylist_create(struct glx_displaylist* x, bool has_color, bool has_
 
 void glx_displaylist_destroy(struct glx_displaylist* x) {
 #ifndef GLX_PROGRAMMABLE
-        if(!glx_version || settings.force_displaylist) {
+        if(x->use_legacy) {
                 glDeleteLists(x->legacy, 1);
         } else {
                 glDeleteBuffers(1, &x->modern);
@@ -712,6 +752,7 @@ void glx_displaylist_destroy(struct glx_displaylist* x) {
 void glx_displaylist_update(struct glx_displaylist* x, size_t size, int type, void* color, void* vertex, void* normal,
                                                         void* texcoord) {
         x->has_texcoord = (texcoord != NULL);
+        x->type = type;
         x->size = size;
         /* A freshly generated VBO has no data store. Calling glBufferSubData on
            it, even for a zero-byte model/team section, is an invalid operation
@@ -720,7 +761,7 @@ void glx_displaylist_update(struct glx_displaylist* x, size_t size, int type, vo
                 return;
 
 #ifndef GLX_PROGRAMMABLE
-        if(!glx_version || settings.force_displaylist) {
+        if(x->use_legacy) {
                 glEnableClientState(GL_VERTEX_ARRAY);
                 if(x->has_color)
                         glEnableClientState(GL_COLOR_ARRAY);
@@ -729,6 +770,9 @@ void glx_displaylist_update(struct glx_displaylist* x, size_t size, int type, vo
                 if(x->has_texcoord)
                         glEnableClientState(GL_TEXTURE_COORD_ARRAY);
 
+                /* The pointers below refer to client memory, not VBO offsets. */
+                if(glx_version)
+                        glBindBuffer(GL_ARRAY_BUFFER, 0);
                 glNewList(x->legacy, GL_COMPILE);
                 if(size > 0) {
                         if(x->has_color)
@@ -917,8 +961,12 @@ void glx_displaylist_draw(struct glx_displaylist* x, int type) {
         glx_batch2d_flush();
         if(x->size == 0)
                 return;
+        if(type != x->type) {
+                log_warn("Display list vertex type mismatch: uploaded %d, requested %d", x->type, type);
+                return;
+        }
 #ifndef GLX_PROGRAMMABLE
-        if(!glx_version || settings.force_displaylist) {
+        if(x->use_legacy) {
                 /* A compiled list re-issues its own client-state commands, so
                    the shadow cannot be trusted across it. */
                 glx_client_state_invalidate();
@@ -939,12 +987,10 @@ void glx_displaylist_draw(struct glx_displaylist* x, int type) {
 
 #if defined(GLX_PROGRAMMABLE)
                 bool use_explicit_attributes = glx_programmable_active() && default_shader;
-#ifdef OPENGL_CORE
-                GLint active_program = 0;
-                active_program = (GLint)glx_current_program();
-                if(use_explicit_attributes && !active_program)
+                if(use_explicit_attributes && !glx_current_program()) {
                         glx_use_default_shader();
-#endif
+                        matrix_upload();
+                }
 #else
                 bool use_explicit_attributes = explicit_vertex_attributes;
 #endif
@@ -964,8 +1010,10 @@ void glx_displaylist_draw(struct glx_displaylist* x, int type) {
                                 glVertexAttribPointer(1, 4, GL_UNSIGNED_BYTE, GL_TRUE, 0,
                                         (void*)(x->size * len_vertex));
                                 glEnableVertexAttribArray(1);
+                                glx_stats.attrib_calls += 2;
                         } else {
                                 glDisableVertexAttribArray(1);
+                                glx_stats_attrib();
                                 glVertexAttrib4f(1, 1.0F, 1.0F, 1.0F, 1.0F);
                         }
 #ifdef GLX_PROGRAMMABLE
@@ -981,8 +1029,10 @@ void glx_displaylist_draw(struct glx_displaylist* x, int type) {
                                 glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 0,
                                         (void*)(x->size * (len_vertex + len_color + len_normal)));
                                 glEnableVertexAttribArray(2);
+                                glx_stats.attrib_calls += 2;
                         } else {
                                 glDisableVertexAttribArray(2);
+                                glx_stats_attrib();
                                 glVertexAttrib2f(2, 0.0F, 0.0F);
                         }
 #ifdef GLX_PROGRAMMABLE
@@ -998,8 +1048,10 @@ void glx_displaylist_draw(struct glx_displaylist* x, int type) {
                                 glVertexAttribPointer(3, 3, GL_BYTE, GL_TRUE, 0,
                                         (void*)(x->size * (len_vertex + len_color)));
                                 glEnableVertexAttribArray(3);
+                                glx_stats.attrib_calls += 2;
                         } else {
                                 glDisableVertexAttribArray(3);
+                                glx_stats_attrib();
                                 glVertexAttrib3f(3, 0.0F, 1.0F, 0.0F);
                         }
 #ifdef GLX_PROGRAMMABLE
@@ -1018,8 +1070,10 @@ void glx_displaylist_draw(struct glx_displaylist* x, int type) {
 #else
                         GLenum draw_mode = (type == GLX_DISPLAYLIST_POINTS) ? GL_POINTS : GL_QUADS;
 #endif
+                        glx_stats_draw();
                         glDrawArrays(draw_mode, 0, x->size);
 
+                        glx_stats.attrib_calls += 1 + (unsigned)x->has_color + (unsigned)x->has_texcoord + (unsigned)x->has_normal;
                         glDisableVertexAttribArray(0);
                         if(x->has_color) glDisableVertexAttribArray(1);
                         if(x->has_texcoord) glDisableVertexAttribArray(2);
@@ -1067,6 +1121,7 @@ int glx_default_shader_program(void) {
 
 void glx_default_shader_set_draw_state(int with_vertex_color, int texture_enabled, int lighting_enabled) {
         if(glx_programmable_active() && default_shader) {
+                glx_use_default_shader();
                 glUniform4fv(loc_u_Color, 1, gles_current_color);
                 glUniform1f(loc_u_HasVertexColor, with_vertex_color ? 1.0F : 0.0F);
                 glUniform1f(loc_u_TextureEnabled, texture_enabled ? 1.0F : 0.0F);
@@ -1077,8 +1132,10 @@ void glx_default_shader_set_draw_state(int with_vertex_color, int texture_enable
 }
 
 void glx_default_shader_set_texcoord_scale(float scale) {
-        if(glx_programmable_active() && default_shader)
+        if(glx_programmable_active() && default_shader) {
+                glx_use_default_shader();
                 glUniform1f(loc_u_TexCoordScale, scale);
+        }
 }
 
 void glx_default_shader_set_alpha_cutoff(float threshold) {
@@ -1129,13 +1186,15 @@ static void glx_ensure_quad_vbo(void) {
         glBindVertexArray(quad_vao);
 #endif
         glGenBuffers(1, &quad_vbo);
-#ifdef OPENGL_CORE
         if(!quad_vbo) {
+#ifdef OPENGL_CORE
                 glBindVertexArray((GLuint)previous_vao);
                 glBindBuffer(GL_ARRAY_BUFFER, (GLuint)previous_array_buffer);
+                glDeleteVertexArrays(1, &quad_vao);
+                quad_vao = 0;
+#endif
                 return;
         }
-#endif
         glBindBuffer(GL_ARRAY_BUFFER, quad_vbo);
         glBufferData(GL_ARRAY_BUFFER, sizeof(quad_verts), quad_verts, GL_STATIC_DRAW);
 #ifdef OPENGL_CORE
@@ -1157,19 +1216,21 @@ static void glx_ensure_line_quad_vbo(void) {
 }
 
 void glx_draw_screen_quad(void) {
-	glx_stats_draw();
 	glx_client_state_invalidate();
 	glx_batch2d_flush();
 #if defined(GLX_PROGRAMMABLE)
-        if(!default_shader)
+        if(!glx_current_program())
                 return;
         glx_ensure_quad_vbo();
+        if(!quad_vbo)
+                return;
 #ifdef OPENGL_CORE
         if(!quad_vbo || !quad_vao)
                 return;
         GLint previous_vao = 0;
         glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &previous_vao);
         glBindVertexArray(quad_vao);
+        glx_stats_draw();
         glDrawArrays(GL_TRIANGLES, 0, 6);
         glBindVertexArray((GLuint)previous_vao);
 #else
@@ -1178,6 +1239,7 @@ void glx_draw_screen_quad(void) {
         glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
         glEnableVertexAttribArray(0);
         glEnableVertexAttribArray(2);
+        glx_stats_draw();
         glDrawArrays(GL_TRIANGLES, 0, 6);
         glDisableVertexAttribArray(0);
         glDisableVertexAttribArray(2);
@@ -1209,7 +1271,6 @@ void glx_set_alpha_test(bool enabled, float threshold) {
 }
 
 void glx_draw_vertices_3d(const float* vertices, size_t count, unsigned int mode) {
-	glx_stats_draw();
 	glx_client_state_invalidate();
 	glx_batch2d_flush();
         if(!vertices || count == 0)
@@ -1219,10 +1280,13 @@ void glx_draw_vertices_3d(const float* vertices, size_t count, unsigned int mode
                 glx_use_default_shader();
                 glx_default_shader_set_draw_state(0, 0, 0);
                 glx_ensure_line_quad_vbo();
+                if(!line_quad_vbo)
+                        return;
                 glBindBuffer(GL_ARRAY_BUFFER, line_quad_vbo);
                 glBufferData(GL_ARRAY_BUFFER, count * 3 * sizeof(float), vertices, GL_STREAM_DRAW);
                 glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, (void*)0);
                 glEnableVertexAttribArray(0);
+                glx_stats_draw();
                 glDrawArrays((GLenum)mode, 0, (GLsizei)count);
                 glDisableVertexAttribArray(0);
                 glBindBuffer(GL_ARRAY_BUFFER, 0);
@@ -1231,7 +1295,9 @@ void glx_draw_vertices_3d(const float* vertices, size_t count, unsigned int mode
 #endif
 #ifndef OPENGL_CORE
         glEnableClientState(GL_VERTEX_ARRAY);
+        if(glx_version) glBindBuffer(GL_ARRAY_BUFFER, 0);
         glVertexPointer(3, GL_FLOAT, 0, vertices);
+        glx_stats_draw();
         glDrawArrays((GLenum)mode, 0, (GLsizei)count);
         glDisableClientState(GL_VERTEX_ARRAY);
 #else
@@ -1242,7 +1308,6 @@ void glx_draw_vertices_3d(const float* vertices, size_t count, unsigned int mode
 }
 
 void glx_draw_line_2d(float x1, float y1, float x2, float y2) {
-	glx_stats_draw();
 	glx_client_state_invalidate();
 	glx_batch2d_flush();
 #if defined(GLX_PROGRAMMABLE)
@@ -1271,6 +1336,8 @@ void glx_draw_line_2d(float x1, float y1, float x2, float y2) {
 #endif
                 glx_use_default_shader();
                 glx_ensure_line_quad_vbo();
+                if(!line_quad_vbo)
+                        return;
                 glBindBuffer(GL_ARRAY_BUFFER, line_quad_vbo);
                 glBufferData(GL_ARRAY_BUFFER, vertex_count * 3 * sizeof(float), vertices, GL_STREAM_DRAW);
                 GLint cur_prog;
@@ -1284,6 +1351,7 @@ void glx_draw_line_2d(float x1, float y1, float x2, float y2) {
                 }
                 glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, (void*)0);
                 glEnableVertexAttribArray(0);
+                glx_stats_draw();
                 glDrawArrays(draw_mode, 0, (GLsizei)vertex_count);
                 glDisableVertexAttribArray(0);
                 glBindBuffer(GL_ARRAY_BUFFER, 0);
@@ -1299,12 +1367,14 @@ void glx_draw_line_2d(float x1, float y1, float x2, float y2) {
                 glDisableClientState(GL_NORMAL_ARRAY);
                 glEnableClientState(GL_VERTEX_ARRAY);
                 glVertexPointer(2, GL_FLOAT, 0, verts);
+                glx_stats_draw();
                 glDrawArrays(GL_LINES, 0, 2);
                 glDisableClientState(GL_VERTEX_ARRAY);
                 glEnable(GL_TEXTURE_2D);
         }
 #endif
 #else
+        glx_stats_draw();
         glBegin(GL_LINES);
         glVertex2f(x1, y1);
         glVertex2f(x2, y2);
@@ -1317,6 +1387,8 @@ void glx_draw_ring_segment_2d(float cx, float cy, float inner_radius, float oute
         if(steps < 1 || end_angle <= start_angle || outer_radius <= inner_radius)
                 return;
 
+        /* A bounded fixed-size buffer is portable and cannot exhaust the stack. */
+        if(steps > 1024) steps = 1024;
         glx_client_state_invalidate();
         glx_batch2d_flush();
         glx_stats_draw();
@@ -1326,7 +1398,7 @@ void glx_draw_ring_segment_2d(float cx, float cy, float inner_radius, float oute
            strip produces a solid annular sector with identical geometry at
            every rotation, unlike thick GL lines whose rasterized width varied
            visibly by screen angle. */
-        float verts[(steps + 1) * 6];
+        float verts[(1024 + 1) * 6];
         for(int i = 0; i <= steps; i++) {
                 float a = start_angle + (end_angle - start_angle) * i / steps;
                 int o = i * 6;
@@ -1340,8 +1412,10 @@ void glx_draw_ring_segment_2d(float cx, float cy, float inner_radius, float oute
         if(default_shader) {
                 glx_use_default_shader();
                 glx_ensure_line_quad_vbo();
+                if(!line_quad_vbo)
+                        return;
                 glBindBuffer(GL_ARRAY_BUFFER, line_quad_vbo);
-                glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STREAM_DRAW);
+                glBufferData(GL_ARRAY_BUFFER, (size_t)(steps + 1) * 6 * sizeof(float), verts, GL_STREAM_DRAW);
                 GLint cur_prog;
                 cur_prog = (GLint)glx_current_program();
                 if(cur_prog == (GLint)default_shader) {
@@ -1383,14 +1457,7 @@ void glx_draw_ring_segment_2d(float cx, float cy, float inner_radius, float oute
 
 /* ── Batched solid 2D quads (see glx.h) ───────────────────────────────────── */
 
-#define GLX_BATCH2D_MAX_VERTS 8192
 
-static bool batch2d_enabled = false;
-static bool batch2d_flushing = false; /* guards re-entry from glx_use_program */
-static int batch2d_verts = 0;
-static GLuint batch2d_vbo = 0;
-static float batch2d_pos[GLX_BATCH2D_MAX_VERTS * 3];
-static unsigned char batch2d_col[GLX_BATCH2D_MAX_VERTS * 4];
 
 bool glx_batch2d_enabled(void) {
         return batch2d_enabled;
@@ -1406,20 +1473,32 @@ void glx_batch2d_flush(void) {
 
 #if defined(GLX_PROGRAMMABLE)
         if(glx_programmable_active() && default_shader) {
+                GLuint previous_program = (GLuint)glx_current_program();
+                if(!batch2d_vbo)
+                        glGenBuffers(1, &batch2d_vbo);
+                if(!batch2d_vbo) {
+                        /* Cannot draw the queued batch; do not issue invalid GL calls. */
+                        batch2d_flushing = false;
+                        return;
+                }
                 glx_use_default_shader();
                 /* Per-vertex colour, no texture, no lighting: exactly what a
                    solid quad needs, so the whole run shares one uniform set. */
                 glx_default_shader_set_draw_state(1, 0, 0);
+                /* HUD colours must not inherit a model's team tint. Restore
+                   the default shader's previous tint after the batched draw. */
+                glUniform4f(loc_u_TeamColor, 1.0F, 1.0F, 1.0F, 1.0F);
 
                 size_t pos_bytes = (size_t)n * 3 * sizeof(float);
                 size_t col_bytes = (size_t)n * 4;
 
-                if(!batch2d_vbo)
-                        glGenBuffers(1, &batch2d_vbo);
                 glBindBuffer(GL_ARRAY_BUFFER, batch2d_vbo);
                 glBufferData(GL_ARRAY_BUFFER, pos_bytes + col_bytes, NULL, GL_STREAM_DRAW);
                 glBufferSubData(GL_ARRAY_BUFFER, 0, pos_bytes, batch2d_pos);
                 glBufferSubData(GL_ARRAY_BUFFER, pos_bytes, col_bytes, batch2d_col);
+                glx_stats.buffer_uploads += 3;
+                glx_stats.buffer_bytes += (unsigned long)(pos_bytes + col_bytes);
+                glx_stats.attrib_calls += 6; /* two pointers, two enables, two disables */
 
                 glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, (void*)0);
                 glEnableVertexAttribArray(0);
@@ -1428,10 +1507,14 @@ void glx_batch2d_flush(void) {
 
                 glx_stats_draw();
                 glDrawArrays(GL_TRIANGLES, 0, n);
+                glUniform4f(loc_u_TeamColor, default_team_color[0], default_team_color[1], default_team_color[2], 1.0F);
 
                 glDisableVertexAttribArray(0);
                 glDisableVertexAttribArray(1);
                 glBindBuffer(GL_ARRAY_BUFFER, 0);
+                /* Keep the re-entry guard set while restoring: the caller may
+                   already be in glx_use_program() or a custom shader pass. */
+                glx_use_program(previous_program);
                 batch2d_flushing = false;
                 return;
         }
@@ -1446,6 +1529,11 @@ void glx_batch2d_flush(void) {
                 /* Restore texturing afterwards: callers that draw solid quads
                    between textured ones expect the previous enable state. */
                 GLboolean texture_was_enabled = glIsEnabled(GL_TEXTURE_2D);
+#ifndef OPENGL_ES
+                /* Preserve enables, pointers and their buffer bindings, not
+                   just the texture-coordinate enable bit. */
+                glPushClientAttrib(GL_CLIENT_VERTEX_ARRAY_BIT);
+#endif
                 if(texture_was_enabled)
                         glDisable(GL_TEXTURE_2D);
                 glDisableClientState(GL_TEXTURE_COORD_ARRAY);
@@ -1455,13 +1543,21 @@ void glx_batch2d_flush(void) {
                 /* The pointers below are client memory, so no buffer may be
                    bound: a display list can leave its own VBO bound when this
                    flush happens inside a chunk draw scope. */
-                glBindBuffer(GL_ARRAY_BUFFER, 0);
+#ifdef OPENGL_ES
+                glBindBuffer(GL_ARRAY_BUFFER, 0); /* VBOs are core in ES 1.1. */
+#else
+                if(glx_version)
+                        glBindBuffer(GL_ARRAY_BUFFER, 0);
+#endif
                 glVertexPointer(3, GL_FLOAT, 0, batch2d_pos);
                 glColorPointer(4, GL_UNSIGNED_BYTE, 0, batch2d_col);
                 glx_stats_draw();
                 glDrawArrays(GL_TRIANGLES, 0, n);
                 glDisableClientState(GL_COLOR_ARRAY);
                 glDisableClientState(GL_VERTEX_ARRAY);
+#ifndef OPENGL_ES
+                glPopClientAttrib();
+#endif
                 if(texture_was_enabled)
                         glEnable(GL_TEXTURE_2D);
 #endif
@@ -1479,15 +1575,20 @@ void glx_batch2d_enable(bool on) {
         batch2d_enabled = on;
 }
 
+static unsigned char glx_color_byte(float value) {
+        /* fmaxf also maps NaN to zero. Match GL's clamped colour semantics. */
+        return (unsigned char)(fminf(fmaxf(value, 0.0F), 1.0F) * 255.0F + 0.5F);
+}
+
 /* Appends one axis-aligned quad in the current colour. */
 static void batch2d_add_quad(float x, float y, float w, float h) {
         if(batch2d_verts + 6 > GLX_BATCH2D_MAX_VERTS)
                 glx_batch2d_flush();
 
-        unsigned char r = (unsigned char)(gles_current_color[0] * 255.0F);
-        unsigned char g = (unsigned char)(gles_current_color[1] * 255.0F);
-        unsigned char b = (unsigned char)(gles_current_color[2] * 255.0F);
-        unsigned char a = (unsigned char)(gles_current_color[3] * 255.0F);
+        unsigned char r = glx_color_byte(gles_current_color[0]);
+        unsigned char g = glx_color_byte(gles_current_color[1]);
+        unsigned char b = glx_color_byte(gles_current_color[2]);
+        unsigned char a = glx_color_byte(gles_current_color[3]);
 
         const float xs[2] = {x, x + w};
         const float ys[2] = {y, y - h};
@@ -1522,6 +1623,8 @@ void glx_draw_quad_2d(float x, float y, float w, float h) {
                 };
                 glx_use_default_shader();
                 glx_ensure_line_quad_vbo();
+                if(!line_quad_vbo)
+                        return;
                 glBindBuffer(GL_ARRAY_BUFFER, line_quad_vbo);
                 glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STREAM_DRAW);
                 GLint cur_prog;
@@ -1586,10 +1689,10 @@ void glx_draw_gradient_quad_2d(float x, float y, float w, float h, float r1, flo
                 x + w, y - h, 0.0f,
         };
         unsigned char col[] = {
-                (unsigned char)(r1 * 255.0f), (unsigned char)(g1 * 255.0f), (unsigned char)(b1 * 255.0f), 255,
-                (unsigned char)(r2 * 255.0f), (unsigned char)(g2 * 255.0f), (unsigned char)(b2 * 255.0f), 255,
-                (unsigned char)(r1 * 255.0f), (unsigned char)(g1 * 255.0f), (unsigned char)(b1 * 255.0f), 255,
-                (unsigned char)(r2 * 255.0f), (unsigned char)(g2 * 255.0f), (unsigned char)(b2 * 255.0f), 255,
+                glx_color_byte(r1), glx_color_byte(g1), glx_color_byte(b1), 255,
+                glx_color_byte(r2), glx_color_byte(g2), glx_color_byte(b2), 255,
+                glx_color_byte(r1), glx_color_byte(g1), glx_color_byte(b1), 255,
+                glx_color_byte(r2), glx_color_byte(g2), glx_color_byte(b2), 255,
         };
 
         if(glx_programmable_active() && default_shader) {
@@ -1600,6 +1703,8 @@ void glx_draw_gradient_quad_2d(float x, float y, float w, float h, float r1, flo
                 memcpy(buf + voff, col, sizeof(col));
 
                 glx_ensure_line_quad_vbo();
+                if(!line_quad_vbo)
+                        return;
                 glBindBuffer(GL_ARRAY_BUFFER, line_quad_vbo);
                 glBufferData(GL_ARRAY_BUFFER, sizeof(buf), buf, GL_STREAM_DRAW);
 
@@ -1669,6 +1774,14 @@ void glx_enable_sphericalfog() {
                 glUniform3f(loc_u_Camera, camera_x, camera_y, camera_z);
         }
 #elif !defined(OPENGL_ES)
+#ifdef GLX_PROGRAMMABLE
+        if(glx_programmable_active() && default_shader) {
+                glx_use_default_shader();
+                glUniform1f(loc_u_FogDist, 1.0F / settings.render_distance);
+                glUniform3f(loc_u_FogColor, fc[0], fc[1], fc[2]);
+                glUniform3f(loc_u_Camera, camera_x, camera_y, camera_z);
+        } else
+#endif
         if(!settings.smooth_fog) {
                 /* Fixed-function GL has its own global model ambient, in
                    addition to GL_LIGHT0's ambient contribution. */
@@ -1764,6 +1877,12 @@ void glx_disable_sphericalfog() {
                 glUniform1f(loc_u_FogDist, 0.0F);
         }
 #elif !defined(OPENGL_ES)
+#ifdef GLX_PROGRAMMABLE
+        if(glx_programmable_active() && default_shader) {
+                glx_use_default_shader();
+                glUniform1f(loc_u_FogDist, 0.0F);
+        } else
+#endif
         if(!settings.smooth_fog) {
                 glLightModelfv(GL_LIGHT_MODEL_AMBIENT,
                                (float[]) {0.2F, 0.2F, 0.2F, 1.0F});

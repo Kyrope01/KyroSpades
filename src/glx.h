@@ -90,6 +90,8 @@ struct glx_displaylist {
 	bool has_normal;
 	bool has_color;
 	bool has_texcoord;
+	bool use_legacy;    /* backend chosen when the object is created */
+	int type;           /* format/primitive of the most recent upload */
 };
 
 enum {

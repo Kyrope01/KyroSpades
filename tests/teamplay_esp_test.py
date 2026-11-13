@@ -76,7 +76,7 @@ with tempfile.TemporaryDirectory() as d:
     c = Path(d) / 'esp.c'
     exe = Path(d) / 'esp'
     c.write_text(stub)
-    subprocess.run(['cc','-std=c99','-Wall','-Wextra','-Werror',str(c),'-o',str(exe)],check=True)
+    subprocess.run(['cc','-std=c99','-Wall','-Wextra','-Werror',str(c),'-lm','-o',str(exe)],check=True)
     subprocess.run([str(exe)],check=True)
 
 # The obscuration ray originates inside the local first-person hitbox. Use
@@ -85,24 +85,28 @@ with tempfile.TemporaryDirectory() as d:
 ray_stub = r'''
 #include <assert.h>
 #include <stdio.h>
+#include <math.h>
 #define CAMERA_HITTYPE_BLOCK 1
 #define CAMERA_HITTYPE_PLAYER 2
 struct Player {struct {struct {float x,y,z;} eye;} physics;};
 struct Camera_HitType {int type;};
 static struct Player players[3];
 static int local_player_id=1, wall_present=1;
+static float wall_distance=5;
 static float camera_x=0, camera_y=1, camera_z=0;
 static float player_height(struct Player* p) {(void)p;return 1.5f;}
 static void camera_hit_mask(struct Camera_HitType* hit,int exclude,float x,float y,float z,
                             float dx,float dy,float dz,float range) {
-    (void)x;(void)y;(void)z;(void)dx;(void)dy;(void)dz;(void)range;
-    hit->type = exclude==local_player_id && wall_present
+    (void)x;(void)y;(void)z;(void)dx;(void)dy;(void)dz;
+    hit->type = exclude==local_player_id && wall_present && wall_distance <= range
               ? CAMERA_HITTYPE_BLOCK : CAMERA_HITTYPE_PLAYER;
 }
 ''' + obscured + r'''
 int main(void) {
     players[2].physics.eye.z=10;
     assert(player_is_obscured(&players[2]));
+    wall_distance=20; /* A wall behind the target is not an occluder. */
+    assert(!player_is_obscured(&players[2]));
     wall_present=0;
     assert(!player_is_obscured(&players[2]));
     puts("Teamplay self-hit occlusion regression passed");
@@ -112,5 +116,5 @@ with tempfile.TemporaryDirectory() as d:
     c = Path(d) / 'occlusion.c'
     exe = Path(d) / 'occlusion'
     c.write_text(ray_stub)
-    subprocess.run(['cc','-std=c99','-Wall','-Wextra','-Werror',str(c),'-o',str(exe)],check=True)
+    subprocess.run(['cc','-std=c99','-Wall','-Wextra','-Werror',str(c),'-lm','-o',str(exe)],check=True)
     subprocess.run([str(exe)],check=True)

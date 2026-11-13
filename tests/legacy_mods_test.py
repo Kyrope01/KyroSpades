@@ -74,7 +74,7 @@ with tempfile.TemporaryDirectory() as d:
  subprocess.run([str(exe)],check=True)
 skins=(root/'src/skins.c').read_text()
 assert 'legacy_mod_model_path(path)' not in skins and 'target->scale *= 0.25F' not in skins
-assert 'legacy_mod_reload_suffix(e->suffix)' in skins and '&sound_rifle_reload, "semireload"' in skins
+assert 'legacy_mod_reload_suffix(suffix)' in skins and 'sound_uses_skin_suffix(category, s, e->suffix)' in skins and '&sound_rifle_reload, "semireload"' in skins
 hud=(root/'src/hud.c').read_text()
 assert '(gun->xpiv - gun->xsiz / 2) * gun->scale' in hud
 assert '(model_grenade.xpiv - model_grenade.xsiz / 2) * model_grenade.scale' in hud

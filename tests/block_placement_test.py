@@ -113,6 +113,7 @@ struct {int player_stats;} settings;
 struct {struct {int red,green,blue;} block;} players[32];
 unsigned char local_player_id=0,local_player_blocks=5;
 int player_stats_blocks_placed=0, sound_build=0, is_demo=0;
+int map_size_x=32, map_size_y=64, map_size_z=32;
 bool world[32][32][64];
 bool demo_is_playing(void){return is_demo;} bool demo_mute_effects(void){return true;}
 bool map_isair(int x,int y,int z){return !world[x][z][y];}
@@ -126,6 +127,10 @@ int map_cube_line(int x,int y,int z,int x2,int y2,int z2,struct Point* out){(voi
 '''
 packet_checks=r'''
 int main(void){
+ struct PacketBlockAction invalid={0,ACTION_GRENADE,2147483647,2,50};
+ read_PacketBlockAction(&invalid,sizeof(invalid));
+ struct PacketBlockLine bad={0,-2147483647-1,2,50,4,2,50};
+ read_PacketBlockLine(&bad,sizeof(bad));
  struct PacketBlockAction a={0,ACTION_BUILD,2,2,50};
  read_PacketBlockAction(&a,sizeof(a)); assert(local_player_blocks==4 && world[2][2][13]);
  read_PacketBlockAction(&a,sizeof(a)); assert(local_player_blocks==4);

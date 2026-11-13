@@ -49,11 +49,13 @@
 #  define chunk_lock_init(l)    pthread_spin_init(l, PTHREAD_PROCESS_PRIVATE)
 #  define chunk_lock_lock(l)    pthread_spin_lock(l)
 #  define chunk_lock_unlock(l)  pthread_spin_unlock(l)
+#  define chunk_lock_destroy(l) pthread_spin_destroy(l)
 #else
 #  define CHUNK_LOCK_T          pthread_mutex_t
 #  define chunk_lock_init(l)    pthread_mutex_init(l, NULL)
 #  define chunk_lock_lock(l)    pthread_mutex_lock(l)
 #  define chunk_lock_unlock(l)  pthread_mutex_unlock(l)
+#  define chunk_lock_destroy(l) pthread_mutex_destroy(l)
 #endif
 
 
@@ -64,13 +66,17 @@ struct channel chunk_work_queue;
 struct channel chunk_result_queue;
 CHUNK_LOCK_T chunk_block_queue_lock;
 
-int chunk_gen = 0;
+static uint64_t chunk_gen = 0;
 static int chunk_bulk_pending = 0;
+static pthread_t chunk_threads[CHUNK_WORKERS_MAX];
+static int chunk_thread_count = 0;
 
 struct chunk_work_packet {
         size_t chunk_x;
         size_t chunk_y;
         struct chunk* chunk;
+        uint64_t gen;
+        bool bulk;
 };
 
 struct chunk_result_packet {
@@ -78,7 +84,8 @@ struct chunk_result_packet {
         int max_height;
         struct tesselator tesselator;
         uint32_t* minimap_data;
-        int gen;
+        uint64_t gen;
+        bool bulk;
 };
 
 struct chunk_render_call {
@@ -100,8 +107,11 @@ void chunk_init() {
                 }
         }
 
-        channel_create(&chunk_work_queue, sizeof(struct chunk_work_packet), CHUNKS_PER_DIM * CHUNKS_PER_DIM);
-        channel_create(&chunk_result_queue, sizeof(struct chunk_result_packet), CHUNKS_PER_DIM * CHUNKS_PER_DIM);
+        if(!channel_create(&chunk_work_queue, sizeof(struct chunk_work_packet), CHUNKS_PER_DIM * CHUNKS_PER_DIM) ||
+           !channel_create(&chunk_result_queue, sizeof(struct chunk_result_packet), CHUNKS_PER_DIM * CHUNKS_PER_DIM)) {
+                log_fatal("Could not allocate chunk queues");
+                exit(1);
+        }
         ht_setup(&chunk_block_queue, sizeof(struct chunk*), sizeof(struct chunk_work_packet), 64);
 
         chunk_lock_init(&chunk_block_queue_lock);
@@ -109,10 +119,16 @@ void chunk_init() {
         int chunk_enabled_cores = min(max(window_cpucores() - 1, 1), CHUNK_WORKERS_MAX);
         log_info("%i cores enabled for chunk generation", chunk_enabled_cores);
 
-        pthread_t threads[chunk_enabled_cores];
-
-        for(size_t k = 0; k < chunk_enabled_cores; k++)
-                pthread_create(threads + k, NULL, chunk_generate, NULL);
+        chunk_thread_count = 0;
+        for(int k = 0; k < chunk_enabled_cores; k++) {
+                int err = pthread_create(&chunk_threads[chunk_thread_count], NULL, chunk_generate, NULL);
+                if(err) log_warn("Could not start chunk worker (%d)", err);
+                else chunk_thread_count++;
+        }
+        if(!chunk_thread_count) {
+                log_fatal("Could not start any chunk workers");
+                exit(1);
+        }
 }
 
 static int chunk_sort(const void* a, const void* b) {
@@ -164,6 +180,36 @@ static void chunk_render(const struct chunk_render_call* call) {
    It only grows and both consumers run serially on the main thread. */
 static struct chunk_render_call* chunk_draw_buf = NULL;
 static int chunk_draw_buf_cap = 0;
+
+void chunk_deinit(void) {
+        channel_clear(&chunk_work_queue);
+        for(int k = 0; k < chunk_thread_count; k++) {
+                struct chunk_work_packet stop = {0};
+                channel_put(&chunk_work_queue, &stop);
+        }
+        for(int k = 0; k < chunk_thread_count; k++)
+                pthread_join(chunk_threads[k], NULL);
+        chunk_thread_count = 0;
+        struct chunk_result_packet result;
+        while(channel_try_await(&chunk_result_queue, &result)) {
+                tesselator_free(&result.tesselator);
+                free(result.minimap_data);
+        }
+        for(int k = 0; k < CHUNKS_PER_DIM * CHUNKS_PER_DIM; k++) {
+                if(chunks[k].created) {
+                        glx_displaylist_destroy(&chunks[k].display_list);
+                        chunks[k].created = false;
+                }
+        }
+        free(chunk_draw_buf);
+        chunk_draw_buf = NULL;
+        chunk_draw_buf_cap = 0;
+        ht_destroy(&chunk_block_queue);
+        chunk_lock_destroy(&chunk_block_queue_lock);
+        channel_destroy(&chunk_result_queue);
+        channel_destroy(&chunk_work_queue);
+        chunk_bulk_pending = 0;
+}
 
 /* Keep the camera's chunk and two neighboring columns in every direction.
    This covers ground underfoot and behind a sprinting/turning player,
@@ -333,8 +379,6 @@ static __attribute__((always_inline)) inline float solid_sunblock(struct libvxl_
 }
 
 void* chunk_generate(void* data) {
-        pthread_detach(pthread_self());
-
         while(1) {
                 struct chunk_work_packet work;
                 channel_await(&chunk_work_queue, &work);
@@ -344,8 +388,10 @@ void* chunk_generate(void* data) {
 
                 struct chunk_result_packet result;
                 result.chunk = work.chunk;
-                result.gen = work.chunk->gen;
-                result.minimap_data = malloc(CHUNK_SIZE * CHUNK_SIZE * sizeof(uint32_t));
+                result.gen = work.gen;
+                result.bulk = work.bulk;
+                result.minimap_data = calloc(CHUNK_SIZE * CHUNK_SIZE, sizeof(uint32_t));
+                CHECK_ALLOCATION_ERROR(result.minimap_data)
                 /* Keep flat face normals in terrain VBOs while the terrain shader
                    is active. They are generated automatically by the tesselator
                    and dropped again when the runtime setting is disabled. */
@@ -673,8 +719,8 @@ void chunk_generate_greedy(struct libvxl_chunk_copy* blocks, size_t start_x, siz
                                                                         break;
                                                         }
 
-                                                        for(unsigned char b = 0; b < len_z; b++)
-                                                                for(unsigned char a = 0; a < len_y; a++)
+                                                        for(int b = 0; b < len_z; b++)
+                                                                for(int a = 0; a < len_y; a++)
                                                                         checked_voxels2[1][y + a + (z + b - start_z) * map_size_y] = 1;
 
                                                         tesselator_set_color(tess, glow ? chunk_glow_vertex_color(glow, false) : rgba(r * 0.75F, g * 0.75F, b * 0.75F, 255));
@@ -1250,10 +1296,8 @@ void chunk_update_all() {
            bind/unbind pair per uploaded chunk (two driver round-trips each). */
         bool minimap_bound = false;
 
-        while(channel_size(&chunk_result_queue) > 0) {
-                channel_await(&chunk_result_queue, &result);
-
-                if(chunk_bulk_pending > 0)
+        while(channel_try_await(&chunk_result_queue, &result)) {
+                if(result.bulk && result.gen == chunk_gen && chunk_bulk_pending > 0)
                         chunk_bulk_pending--;
 
                 if(result.gen == result.chunk->gen) {
@@ -1297,28 +1341,25 @@ void chunk_rebuild_all() {
                 for(int i = 0; i < CHUNKS_PER_DIM; i++)
                         chunks[i + k * CHUNKS_PER_DIM].gen = chunk_gen;
 
-        for(int k = CHUNKS_PER_DIM / 2; k >= 0; k--) {
-                for(int i = k; i < CHUNKS_PER_DIM - k; i++) {
-                        struct chunk* build[] = {
-                                chunks + i + k * CHUNKS_PER_DIM,
-                                chunks + i + (CHUNKS_PER_DIM - k - 1) * CHUNKS_PER_DIM,
-                                chunks + k + i * CHUNKS_PER_DIM,
-                                chunks + (CHUNKS_PER_DIM - k - 1) + i * CHUNKS_PER_DIM,
-                        };
-
-                        for(size_t j = 0; j < sizeof(build) / sizeof(*build); j++) {
-                                channel_put(&chunk_work_queue,
-                                                        &(struct chunk_work_packet) {
-                                                                .chunk = build[j],
-                                                                .chunk_x = build[j]->x,
-                                                                .chunk_y = build[j]->y,
-                                                        });
+        /* Walk each concentric perimeter once; corners belong to the rows. */
+        for(int k = (CHUNKS_PER_DIM - 1) / 2; k >= 0; k--) {
+                int last = CHUNKS_PER_DIM - k - 1;
+                for(int y = k; y <= last; y++) {
+                        for(int x = k; x <= last; x++) {
+                                if(x != k && x != last && y != k && y != last) continue;
+                                struct chunk* c = chunks + x + y * CHUNKS_PER_DIM;
+                                struct chunk_work_packet work = {.chunk = c, .chunk_x = c->x, .chunk_y = c->y,
+                                                                 .gen = chunk_gen, .bulk = true};
+                                channel_put(&chunk_work_queue, &work);
                         }
                 }
         }
 }
 
 void chunk_block_update(int x, int y, int z) {
+        if(x < 0 || x >= map_size_x || x >= CHUNKS_PER_DIM * CHUNK_SIZE ||
+           y < 0 || y >= map_size_y || z < 0 || z >= map_size_z || z >= CHUNKS_PER_DIM * CHUNK_SIZE)
+                return;
         struct chunk* c = chunks + (x / CHUNK_SIZE) + (z / CHUNK_SIZE) * CHUNKS_PER_DIM;
 
         chunk_lock_lock(&chunk_block_queue_lock);
@@ -1332,7 +1373,12 @@ void chunk_block_update(int x, int y, int z) {
 }
 
 static bool iterate_chunk_updates(void* key, void* value, void* user) {
-        channel_put(&chunk_work_queue, value);
+        /* Assign the current generation on the main thread when enqueuing;
+           pending block edits may have been collected before a rebuild. */
+        struct chunk_work_packet work = *(struct chunk_work_packet*)value;
+        work.gen = chunk_gen;
+        work.bulk = false;
+        channel_put(&chunk_work_queue, &work);
 
         return true;
 }

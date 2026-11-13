@@ -48,6 +48,8 @@ static void channel_sanity_checks(struct channel* ch) {
 bool channel_create(struct channel* ch, size_t object_size, size_t length) {
 	assert(ch != NULL && object_size > 0 && length > 0);
 
+	if(length > SIZE_MAX / object_size)
+		return false;
 	ch->object_size = object_size;
 	ch->initial_length = length;
 	ch->length = ch->initial_length;
@@ -76,7 +78,10 @@ bool channel_create(struct channel* ch, size_t object_size, size_t length) {
 size_t channel_size(struct channel* ch) {
 	assert(ch != NULL);
 
-	return __atomic_load_n(&ch->count, __ATOMIC_RELAXED);
+	pthread_mutex_lock(&ch->lock);
+	size_t count = ch->count;
+	pthread_mutex_unlock(&ch->lock);
+	return count;
 }
 
 void channel_destroy(struct channel* ch) {
@@ -88,14 +93,16 @@ void channel_destroy(struct channel* ch) {
 }
 
 // call once buffer is full
-static void channel_grow(struct channel* ch) {
+static bool channel_grow(struct channel* ch) {
 	assert(ch != NULL);
 
+	if(ch->length > SIZE_MAX / 2 || ch->length * 2 > SIZE_MAX / ch->object_size)
+		return false;
 	size_t length = ch->length * 2;
 
 	void* new_queue = realloc(ch->queue, ch->object_size * length);
 	if(!new_queue)
-		return;
+		return false;
 
 	ch->queue = new_queue;
 
@@ -112,6 +119,7 @@ static void channel_grow(struct channel* ch) {
 	ch->length = length;
 
 	channel_sanity_checks(ch);
+	return true;
 }
 
 // call once only 25% of elements left, we will halve the buffer, so its filled exactly by 50%
@@ -155,8 +163,11 @@ void channel_put(struct channel* ch, void* object) {
 	pthread_mutex_lock(&ch->lock);
 	channel_sanity_checks(ch);
 
-	if(ch->count >= ch->length)
-		channel_grow(ch);
+	if(ch->count >= ch->length) {
+		/* Dropping an item silently corrupts work/results and shutdown. */
+		bool grown = channel_grow(ch);
+		CHECK_ALLOCATION_ERROR(grown)
+	}
 
 	memcpy((uint8_t*)ch->queue + ch->loc_insert * ch->object_size, object, ch->object_size);
 	ch->loc_insert = (ch->loc_insert + 1) % ch->length;
@@ -168,26 +179,35 @@ void channel_put(struct channel* ch, void* object) {
 	pthread_mutex_unlock(&ch->lock);
 }
 
-void channel_await(struct channel* ch, void* object) {
-	assert(ch != NULL && object != NULL);
-
-	pthread_mutex_lock(&ch->lock);
-	channel_sanity_checks(ch);
-
-	while(!ch->count)
-		pthread_cond_wait(&ch->signal, &ch->lock);
-
+/* Caller holds the channel lock and has established count > 0. */
+static void channel_remove_locked(struct channel* ch, void* object) {
 	memcpy(object, (uint8_t*)ch->queue + ch->loc_remove * ch->object_size, ch->object_size);
 	ch->loc_remove = (ch->loc_remove + 1) % ch->length;
 	ch->count--;
-
 	if(ch->length / 2 >= ch->initial_length && ch->count <= ch->length / 4)
 		channel_shrink(ch);
-
 	channel_sanity_checks(ch);
+}
 
-	pthread_cond_signal(&ch->signal);
+void channel_await(struct channel* ch, void* object) {
+	assert(ch != NULL && object != NULL);
+	pthread_mutex_lock(&ch->lock);
+	channel_sanity_checks(ch);
+	while(!ch->count)
+		pthread_cond_wait(&ch->signal, &ch->lock);
+	channel_remove_locked(ch, object);
 	pthread_mutex_unlock(&ch->lock);
+}
+
+bool channel_try_await(struct channel* ch, void* object) {
+	assert(ch != NULL && object != NULL);
+	pthread_mutex_lock(&ch->lock);
+	channel_sanity_checks(ch);
+	bool available = ch->count != 0;
+	if(available)
+		channel_remove_locked(ch, object);
+	pthread_mutex_unlock(&ch->lock);
+	return available;
 }
 
 void channel_clear(struct channel* ch) {

@@ -42,6 +42,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <limits.h>
+#include <stdint.h>
 
 #include "common.h"
 #include "sound.h"
@@ -90,6 +92,7 @@ typedef void (*LPALDELETEEFFECTS)(int, const unsigned int*);
 typedef void (*LPALEFFECTI)(unsigned int, int, int);
 typedef void (*LPALEFFECTF)(unsigned int, int, float);
 typedef void (*LPALGENAUXSLOTS)(int, unsigned int*);
+typedef void (*LPALDELETEAUXSLOTS)(int, const unsigned int*);
 typedef void (*LPALAUXSLOTI)(unsigned int, int, int);
 typedef void (*LPALGENFILTERS)(int, unsigned int*);
 typedef void (*LPALDELETEFILTERS)(int, const unsigned int*);
@@ -101,6 +104,7 @@ static LPALDELETEEFFECTS p_alDeleteEffects;
 static LPALEFFECTI p_alEffecti;
 static LPALEFFECTF p_alEffectf;
 static LPALGENAUXSLOTS p_alGenAuxiliaryEffectSlots;
+static LPALDELETEAUXSLOTS p_alDeleteAuxiliaryEffectSlots;
 static LPALAUXSLOTI p_alAuxiliaryEffectSloti;
 static LPALGENFILTERS p_alGenFilters;
 static LPALDELETEFILTERS p_alDeleteFilters;
@@ -109,6 +113,8 @@ static LPALFILTERF p_alFilterf;
 
 static int efx_ok = 0;               /* EFX present + wired */
 static unsigned int fx_reverb = 0;   /* EAXReverb effect */
+static ALCdevice* sound_device = NULL;
+static ALCcontext* sound_context = NULL;
 static unsigned int fx_slot = 0;     /* aux slot world sources feed */
 
 /* ---- YSR room probe state ------------------------------------------ */
@@ -136,7 +142,7 @@ static float room_update_timer = 0.0F;
 #endif /* USE_SOUND */
 
 struct Sound_source {
-        int openal_handle;
+        unsigned int openal_handle;
         char local;
         int stick_to_player;
         float base_gain;       /* gain before occlusion duck */
@@ -245,13 +251,26 @@ void sound_rain_start(void) {
         }
         if(rain_playing)
                 return;
+        alGetError();
         alGenSources(1, &rain_source);
+        if(alGetError() != AL_NO_ERROR || !rain_source) {
+                if(rain_source) alDeleteSources(1, &rain_source);
+                rain_source = 0;
+                log_warn("Unable to allocate rain source");
+                return;
+        }
         alSourcei(rain_source, AL_LOOPING, AL_TRUE);
         alSourcef(rain_source, AL_GAIN, RAIN_TARGET_GAIN);
         alSource3f(rain_source, AL_POSITION, 0.0F, 0.0F, 0.0F);
         alSourcei(rain_source, AL_SOURCE_RELATIVE, AL_TRUE);
         alSourcei(rain_source, AL_BUFFER, sound_rain.openal_buffer);
         alSourcePlay(rain_source);
+        if(alGetError() != AL_NO_ERROR) {
+                alDeleteSources(1, &rain_source);
+                rain_source = 0;
+                log_warn("Unable to start rain source");
+                return;
+        }
         rain_playing = 1;
         rain_fade_state = 1;
         rain_gain = RAIN_TARGET_GAIN;
@@ -313,9 +332,11 @@ static bool sound_steal_visit(void* obj, void* user) {
 }
 
 static void sound_source_free(struct Sound_source* s) {
-        alDeleteSources(1, (ALuint*)&s->openal_handle);
-        if(s->filter && efx_ok)
+        if(s->openal_handle) alDeleteSources(1, &s->openal_handle);
+        s->openal_handle = 0;
+        if(s->filter && p_alDeleteFilters)
                 p_alDeleteFilters(1, &s->filter);
+        s->filter = 0;
 }
 
 /* ---- occlusion ------------------------------------------------------ */
@@ -323,16 +344,16 @@ static void sound_source_free(struct Sound_source* s) {
 /* 3x3x3 grid (+-0.2u) around the source, ray each point -> listener.
  * Returns blocked fraction [0..1]. Continuous, unlike YSR's 1.0/0.4 step.
  *
- * Uses the block-only camera_block_hit(): audio only cares about
+ * Uses block-only camera_hit_terrain(): audio only cares about
  * blocks, and the mask variant ran the full player hitbox test for every
  * player in range on all 27 rays of every playing source, every 4th frame -
  * the cost that made occlusion spike the moment a fight started. The range
- * here is the source's own distance to the listener, so a quiet sound three
- * blocks away walks three blocks, not 128. */
+ * here is each sample's distance to the listener, so a quiet sound three
+ * blocks away walks approximately three blocks, not 128. */
 static float sound_occlusion_probe(float sx, float sy, float sz) {
         float dx = camera_x - sx, dy = camera_y - sy, dz = camera_z - sz;
         float dist = sqrtf(dx * dx + dy * dy + dz * dz);
-        if(dist < 1.0F)
+        if(!isfinite(dist) || dist < 1.0F)
                 return 0.0F;
 
         int blocked = 0;
@@ -342,8 +363,9 @@ static float sound_occlusion_probe(float sx, float sy, float sz) {
                         for(int iz = -1; iz <= 1; iz++) {
                                 float ox = sx + ix * 0.2F, oy = sy + iy * 0.2F, oz = sz + iz * 0.2F;
                                 float rx = camera_x - ox, ry = camera_y - oy, rz = camera_z - oz;
-                                camera_block_hit(&hit, ox, oy, oz, rx, ry, rz, dist);
-                                if(hit.type == CAMERA_HITTYPE_BLOCK && hit.distance < dist - 0.5F)
+                                float sample_dist = sqrtf(rx * rx + ry * ry + rz * rz);
+                                camera_hit_terrain(&hit, ox, oy, oz, rx, ry, rz, sample_dist);
+                                if(hit.type == CAMERA_HITTYPE_BLOCK && hit.distance < sample_dist - 0.5F)
                                         blocked++;
                         }
                 }
@@ -380,12 +402,10 @@ static void sound_room_probe(void) {
 
                 float d = -1.0F;
                 unsigned char fb = 0;
-                /* Block-only, range-limited: same reason as the occlusion
-                   probe above. A room is made of walls, not players. */
-                camera_block_hit(&hit, camera_x, camera_y, camera_z, rx, ry, rz, ROOM_RAY_RANGE);
+                camera_hit_terrain(&hit, camera_x, camera_y, camera_z, rx, ry, rz, ROOM_RAY_RANGE);
                 if(hit.type == CAMERA_HITTYPE_BLOCK) {
                         d = hit.distance;
-                        camera_block_hit(&hit, camera_x, camera_y, camera_z, -rx, -ry, -rz, ROOM_RAY_RANGE);
+                        camera_hit_terrain(&hit, camera_x, camera_y, camera_z, -rx, -ry, -rz, ROOM_RAY_RANGE);
                         fb = (hit.type == CAMERA_HITTYPE_BLOCK);
                 }
 
@@ -426,6 +446,9 @@ static void sound_room_apply(void) {
                 roomArea = 24.0F;
         }
 
+        /* A listener inside solid terrain can yield all zero-distance hits. */
+        if(roomArea <= 0.0F) { roomVolume = 8.0F; roomArea = 24.0F; }
+
         /* Sabine (zerospades mapping) */
         float decay = 0.161F * roomVolume / roomArea / 0.4F;
         float decay_min = SOUND_REVERB_DECAY_MIN;
@@ -436,7 +459,7 @@ static void sound_room_apply(void) {
 
         float late = powf(reflections, 4.0F) * powf(feedbackness, 3.0F) * 0.34F;
         float refl = reflections * reflections * 0.16F;
-        float sz = size / (hits ? hits : 1);
+        float sz = hits > 0 ? size / hits : 0.0F;
 
         p_alEffectf(fx_reverb, AL_EAXREVERB_DECAY_TIME, decay);
         p_alEffectf(fx_reverb, AL_EAXREVERB_LATE_REVERB_GAIN, fminf(late, 10.0F));
@@ -456,7 +479,7 @@ static void sound_room_apply(void) {
 static void sound_createEx(enum sound_space option, struct Sound_wav* w, float x, float y, float z, float vx, float vy,
                                                    float vz, int player) {
 #ifdef USE_SOUND
-        if(!sound_enabled)
+        if(!sound_enabled || !w || !w->openal_buffer)
                 return;
 
         struct Sound_source s = (struct Sound_source) {
@@ -469,9 +492,11 @@ static void sound_createEx(enum sound_space option, struct Sound_wav* w, float x
         };
 
         alGetError();
-        alGenSources(1, (ALuint*)&s.openal_handle);
+        alGenSources(1, &s.openal_handle);
 
-        if(alGetError() != AL_NO_ERROR) {
+        if(alGetError() != AL_NO_ERROR || !s.openal_handle) {
+                if(s.openal_handle) alDeleteSources(1, &s.openal_handle);
+                s.openal_handle = 0;
                 /* out of voices: steal the farthest world source and retry */
                 struct steal_ctx c = {NULL, -1.0F};
                 entitysys_iterate(&sound_sources, &c, sound_steal_visit);
@@ -482,9 +507,11 @@ static void sound_createEx(enum sound_space option, struct Sound_wav* w, float x
                 c.victim->openal_handle = 0;
                 c.victim->stick_to_player = -1;
                 alGetError();
-                alGenSources(1, (ALuint*)&s.openal_handle);
-                if(alGetError() != AL_NO_ERROR)
+                alGenSources(1, &s.openal_handle);
+                if(alGetError() != AL_NO_ERROR || !s.openal_handle) {
+                        if(s.openal_handle) alDeleteSources(1, &s.openal_handle);
                         return;
+                }
         }
 
         float pitch = 1.0F;
@@ -499,7 +526,7 @@ static void sound_createEx(enum sound_space option, struct Sound_wav* w, float x
 
         alSourcef(s.openal_handle, AL_PITCH, pitch);
         alSourcef(s.openal_handle, AL_GAIN, gain);
-        alSourcef(s.openal_handle, AL_REFERENCE_DISTANCE, s.local ? 0.0F : 15.0F);
+        alSourcef(s.openal_handle, AL_REFERENCE_DISTANCE, s.local ? 1.0F : 15.0F);
         alSourcef(s.openal_handle, AL_MAX_DISTANCE, s.local ? 2048.0F : 1e10F);
         alSourcef(s.openal_handle, AL_ROLLOFF_FACTOR, s.local ? 0.0F : 1.0F);
         alSource3f(s.openal_handle, AL_POSITION, s.local ? 0.0F : x * SOUND_SCALE, s.local ? 0.0F : y * SOUND_SCALE,
@@ -509,13 +536,27 @@ static void sound_createEx(enum sound_space option, struct Sound_wav* w, float x
         alSourcei(s.openal_handle, AL_SOURCE_RELATIVE, s.local);
         alSourcei(s.openal_handle, AL_LOOPING, AL_FALSE);
         alSourcei(s.openal_handle, AL_BUFFER, w->openal_buffer);
+        if(alGetError() != AL_NO_ERROR) {
+                sound_source_free(&s);
+                return;
+        }
 
         if(efx_ok && !s.local) {
                 /* world sources feed the room reverb + get an occlusion filter */
                 alSource3i(s.openal_handle, AL_AUXILIARY_SEND_FILTER, fx_slot, 0, 0);
                 alSourcef(s.openal_handle, AL_AIR_ABSORPTION_FACTOR, 1.0F);
+                alGetError();
                 p_alGenFilters(1, &s.filter);
-                p_alFilteri(s.filter, AL_FILTER_TYPE, AL_FILTER_LOWPASS);
+                if(alGetError() == AL_NO_ERROR && s.filter) {
+                        p_alFilteri(s.filter, AL_FILTER_TYPE, AL_FILTER_LOWPASS);
+                        if(alGetError() != AL_NO_ERROR) {
+                                p_alDeleteFilters(1, &s.filter);
+                                s.filter = 0;
+                        }
+                } else {
+                        if(s.filter) p_alDeleteFilters(1, &s.filter);
+                        s.filter = 0;
+                }
                 /* first occlusion answer immediately, so shots behind walls
                  * never pop at full brightness for a frame */
                 s.occl = sound_occlusion_probe(x, y, z);
@@ -534,6 +575,7 @@ static void sound_createEx(enum sound_space option, struct Sound_wav* w, float x
 }
 
 void sound_create_sticky(struct Sound_wav* w, struct Player* player, int player_id) {
+        if(!player || player_id < 0 || player_id >= PLAYERS_MAX) return;
         sound_createEx(SOUND_WORLD, w, player->pos.x, player->pos.y, player->pos.z, 0.0F, 0.0F, 0.0F, player_id);
 }
 
@@ -569,6 +611,7 @@ static bool sound_update_single(void* obj, void* user) {
 
         if(!s->openal_handle) /* stolen voice */
                 return true;
+        if(s->stick_to_player >= PLAYERS_MAX) s->stick_to_player = -1;
 
         int source_state;
         alGetSourcei(s->openal_handle, AL_SOURCE_STATE, &source_state);
@@ -585,8 +628,8 @@ static bool sound_update_single(void* obj, void* user) {
                                            players[s->stick_to_player].physics.velocity.z);
         }
 
-        /* amortised occlusion: each source re-probes every 8th frame,
-         * phase-staggered so probes spread evenly across frames */
+        /* Probe after updating sticky positions. Stagger re-probes across
+         * SOUND_OCCL_INTERVAL frames so they do not all run together. */
         int interval = SOUND_OCCL_INTERVAL < 1 ? 1 : SOUND_OCCL_INTERVAL;
         if(efx_ok && !s->local && ((sound_frame % interval) == (s->probe_phase % interval))) {
                 float target = sound_occlusion_probe(s->x, s->y, s->z);
@@ -608,9 +651,25 @@ void sound_deinit(void) {
 		}
 		for(size_t k = 0; k < sound_sources.count; k++) {
 			struct Sound_source* source = (struct Sound_source*)sound_sources.buffer + k;
-			if(source->openal_handle) sound_source_free(source);
+			if(source->openal_handle || source->filter) sound_source_free(source);
 		}
+                if(fx_slot && p_alDeleteAuxiliaryEffectSlots) p_alDeleteAuxiliaryEffectSlots(1, &fx_slot);
+                if(fx_reverb && p_alDeleteEffects) p_alDeleteEffects(1, &fx_reverb);
 	}
+        fx_slot = fx_reverb = 0;
+        efx_ok = 0;
+        rain_playing = rain_fade_state = 0;
+        rain_gain = 0.0F;
+        room_head = room_filled = 0;
+        if(sound_context) {
+                alcMakeContextCurrent(NULL);
+                alcDestroyContext(sound_context);
+                sound_context = NULL;
+        }
+        if(sound_device) {
+                alcCloseDevice(sound_device);
+                sound_device = NULL;
+        }
 	entitysys_destroy(&sound_sources);
 #endif
 }
@@ -655,9 +714,9 @@ void sound_update() {
 }
 
 extern short* drwav_open_and_read_file_s16(const char* filename, unsigned int* channels, unsigned int* sampleRate,
-                                                                                   uint64_t* totalFrameCount);
+                                                                                   uint64_t* totalSampleCount);
 extern short* drwav_open_and_read_memory_s16(const void* data, size_t dataSize, unsigned int* channels,
-                                                                                          unsigned int* sampleRate, uint64_t* totalFrameCount);
+                                                                                          unsigned int* sampleRate, uint64_t* totalSampleCount);
 
 /* Read + decode a wav file, transparently handling APK assets on Android
  * (dr_wav's fopen() based loader can't see inside the APK). */
@@ -665,8 +724,8 @@ static short* sound_read_samples(const char* name, unsigned int* channels, unsig
                                                                  uint64_t* samplecount) {
 #ifdef USE_ANDROID_FILE
         short* samples = NULL;
-        int file_len = file_size(name);
-        unsigned char* file_data = (file_len > 0) ? file_load(name) : NULL;
+        size_t file_len = 0;
+        unsigned char* file_data = file_load_sized(name, &file_len);
         if(file_data) {
                 samples = drwav_open_and_read_memory_s16(file_data, file_len, channels, samplerate, samplecount);
                 free(file_data);
@@ -677,36 +736,63 @@ static short* sound_read_samples(const char* name, unsigned int* channels, unsig
 #endif
 }
 
-int sound_reload(struct Sound_wav* wav, const char* name, float min, float max) {
 #ifdef USE_SOUND
-        if(!sound_enabled)
-                return 0;
-        if(!file_exists(name))
-                return -1;
-        if(wav->openal_buffer)
-                alDeleteBuffers(1, (ALuint*)&wav->openal_buffer);
-        unsigned int channels, samplerate;
-        uint64_t samplecount;
+/* This bundled dr_wav reports interleaved samples, not frames. Convert all
+   channels to mono; retain the old buffer when decoding/uploading fails. */
+static int sound_upload(struct Sound_wav* wav, const char* name, float min, float max) {
+        unsigned int channels = 0, samplerate = 0;
+        uint64_t samplecount = 0;
         short* samples = sound_read_samples(name, &channels, &samplerate, &samplecount);
-        if(samples == NULL) {
-                wav->openal_buffer = 0;
+        if(!samples) return -1;
+        if(!channels || !samplerate || samplerate > INT_MAX || !samplecount ||
+           samplecount % channels || samplecount > SIZE_MAX / sizeof(short) ||
+           samplecount / channels > INT_MAX / sizeof(short)) {
+                free(samples);
                 return -1;
         }
-        short* audio;
+        size_t frames = (size_t)(samplecount / channels);
+        short* audio = samples;
         if(channels > 1) {
-                audio = malloc(samplecount * sizeof(short) / 2);
+                audio = malloc(frames * sizeof(*audio));
                 if(!audio) { free(samples); return -1; }
-                for(uint64_t k = 0; k < samplecount / 2; k++)
-                        audio[k] = ((int)samples[k * 2] + (int)samples[k * 2 + 1]) / 2;
-                free(samples);
+                for(size_t k = 0; k < frames; k++) {
+                        int64_t sum = 0;
+                        for(unsigned int c = 0; c < channels; c++)
+                                sum += samples[k * (size_t)channels + c];
+                        audio[k] = (short)(sum / (int64_t)channels);
+                }
         }
-        alGenBuffers(1, (ALuint*)&wav->openal_buffer);
-        alBufferData(wav->openal_buffer, AL_FORMAT_MONO16, (channels > 1) ? audio : samples,
-                                 samplecount * sizeof(short) / channels, samplerate);
-        if(channels > 1) free(audio);
+        ALuint buffer = 0;
+        alGetError();
+        alGenBuffers(1, &buffer);
+        if(alGetError() != AL_NO_ERROR || !buffer) {
+                if(buffer) alDeleteBuffers(1, &buffer);
+                if(audio != samples) free(audio);
+                free(samples);
+                return -1;
+        }
+        alBufferData(buffer, AL_FORMAT_MONO16, audio, (int)(frames * sizeof(*audio)), (int)samplerate);
+        int err = alGetError();
+        if(audio != samples) free(audio);
+        free(samples);
+        if(err != AL_NO_ERROR) {
+                alDeleteBuffers(1, &buffer);
+                return -1;
+        }
+        if(wav->openal_buffer)
+                alDeleteBuffers(1, &wav->openal_buffer);
+        wav->openal_buffer = buffer;
         wav->min = min;
         wav->max = max;
         return 0;
+}
+#endif
+
+int sound_reload(struct Sound_wav* wav, const char* name, float min, float max) {
+#ifdef USE_SOUND
+        if(!sound_enabled) return 0;
+        if(!wav || !name || !file_exists(name)) return -1;
+        return sound_upload(wav, name, min, max);
 #else
         return -1;
 #endif
@@ -714,32 +800,12 @@ int sound_reload(struct Sound_wav* wav, const char* name, float min, float max) 
 
 void sound_load(struct Sound_wav* wav, char* name, float min, float max) {
 #ifdef USE_SOUND
-        if(!sound_enabled)
-                return;
-        unsigned int channels, samplerate;
-        uint64_t samplecount;
-        short* samples = sound_read_samples(name, &channels, &samplerate, &samplecount);
-        if(samples == NULL) {
-                log_fatal("Could not load sound %s", name);
-                exit(1);
-        }
-        log_debug("Loaded sound: %s (%ich, %iHz, %lu samples)", name, channels, samplerate, (unsigned long)samplecount);
-
-        short* audio;
-        if(channels > 1) { // convert stereo to mono
-                audio = malloc(samplecount * sizeof(short) / 2);
-                CHECK_ALLOCATION_ERROR(audio)
-                for(int k = 0; k < samplecount / 2; k++)
-                        audio[k] = ((int)samples[k * 2] + (int)samples[k * 2 + 1]) / 2; // prevent overflow
-        free(samples);
-        }
-
-        alGenBuffers(1, (ALuint*)&wav->openal_buffer);
-        alBufferData(wav->openal_buffer, AL_FORMAT_MONO16, (channels > 1) ? audio : samples,
-                                 samplecount * sizeof(short) / channels, samplerate);
-
+        if(!sound_enabled || !wav) return;
+        wav->openal_buffer = 0;
         wav->min = min;
         wav->max = max;
+        if(!name || sound_upload(wav, name, min, max) != 0)
+                log_warn("Could not load sound %s; continuing without it", name ? name : "(null)");
 #endif
 }
 
@@ -755,32 +821,41 @@ static void sound_efx_init(ALCdevice* device) {
         p_alEffecti = (LPALEFFECTI)alGetProcAddress("alEffecti");
         p_alEffectf = (LPALEFFECTF)alGetProcAddress("alEffectf");
         p_alGenAuxiliaryEffectSlots = (LPALGENAUXSLOTS)alGetProcAddress("alGenAuxiliaryEffectSlots");
+        p_alDeleteAuxiliaryEffectSlots = (LPALDELETEAUXSLOTS)alGetProcAddress("alDeleteAuxiliaryEffectSlots");
         p_alAuxiliaryEffectSloti = (LPALAUXSLOTI)alGetProcAddress("alAuxiliaryEffectSloti");
         p_alGenFilters = (LPALGENFILTERS)alGetProcAddress("alGenFilters");
         p_alDeleteFilters = (LPALDELETEFILTERS)alGetProcAddress("alDeleteFilters");
         p_alFilteri = (LPALFILTERI)alGetProcAddress("alFilteri");
         p_alFilterf = (LPALFILTERF)alGetProcAddress("alFilterf");
 
-        if(!p_alGenEffects || !p_alGenAuxiliaryEffectSlots || !p_alGenFilters)
+        if(!p_alGenEffects || !p_alDeleteEffects || !p_alEffecti || !p_alEffectf ||
+           !p_alGenAuxiliaryEffectSlots || !p_alDeleteAuxiliaryEffectSlots || !p_alAuxiliaryEffectSloti ||
+           !p_alGenFilters || !p_alDeleteFilters || !p_alFilteri || !p_alFilterf) {
+                log_warn("Incomplete EFX implementation; effects disabled");
                 return;
+        }
 
         alGetError();
         p_alGenEffects(1, &fx_reverb);
+        if(alGetError() != AL_NO_ERROR || !fx_reverb) goto fail;
         p_alEffecti(fx_reverb, AL_EFFECT_TYPE, AL_EFFECT_EAXREVERB);
-        if(alGetError() != AL_NO_ERROR) {
-                log_warn("EAXReverb unsupported, reverb disabled");
-                return;
-        }
+        if(alGetError() != AL_NO_ERROR) goto fail;
         p_alGenAuxiliaryEffectSlots(1, &fx_slot);
+        if(alGetError() != AL_NO_ERROR || !fx_slot) goto fail;
         p_alAuxiliaryEffectSloti(fx_slot, AL_EFFECTSLOT_EFFECT, fx_reverb);
-        if(alGetError() != AL_NO_ERROR)
-                return;
+        if(alGetError() != AL_NO_ERROR) goto fail;
 
         for(int i = 0; i < ROOM_RING; i++)
                 room_dist[i] = -1.0F;
 
         efx_ok = 1;
         log_info("EFX reverb + occlusion enabled");
+        return;
+fail:
+        log_warn("Could not initialize EFX reverb; effects disabled");
+        if(fx_slot) p_alDeleteAuxiliaryEffectSlots(1, &fx_slot);
+        if(fx_reverb) p_alDeleteEffects(1, &fx_reverb);
+        fx_slot = fx_reverb = 0;
 }
 #endif
 
@@ -803,11 +878,16 @@ void sound_init() {
         ALCcontext* context = alcCreateContext(device, attrs);
         if(!context)
                 context = alcCreateContext(device, NULL); /* picky driver fallback */
-        if(!alcMakeContextCurrent(context)) {
+        if(!context || !alcMakeContextCurrent(context)) {
                 sound_enabled = 0;
                 log_warn("Could not enter sound device context!");
+                if(context) alcDestroyContext(context);
+                alcCloseDevice(device);
                 return;
         }
+        sound_device = device;
+        sound_context = context;
+        sound_kill.openal_buffer = 0;
 
         {
                 int hrtf = 0;

@@ -31,6 +31,9 @@ struct config_file_entry {
         char value[32];
 };
 
+/* Window-size menu values are logical window points, not framebuffer pixels. */
+extern int settings_windowed_width, settings_windowed_height;
+
 extern struct RENDER_OPTIONS {
         char name[16];
         char last_address[128];

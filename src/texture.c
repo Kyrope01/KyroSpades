@@ -160,8 +160,8 @@ void texture_filter(struct texture* t, int filter) {
 }
 
 int texture_create(struct texture* t, char* filename) {
-        int sz = file_size(filename);
-        void* data = sz > 0 ? file_load(filename) : NULL;
+        size_t sz = 0;
+        void* data = file_load_sized(filename, &sz);
         if(!data) {
                 log_warn("Could not read texture %s", filename);
                 return 0;
@@ -678,7 +678,8 @@ void texture_load_custom_blocks(void) {
                 char path[1024];
                 snprintf(path, sizeof(path), "png/textures/%s", names.names[k]);
 
-                unsigned char* data = file_load(path);
+                size_t sz = 0;
+                unsigned char* data = file_load_sized(path, &sz);
                 if(!data) {
                         log_warn("Custom block texture: could not read %s", path);
                         free(names.names[k]);
@@ -686,7 +687,6 @@ void texture_load_custom_blocks(void) {
                 }
                 unsigned char* px;
                 unsigned int w, h;
-                unsigned int sz = file_size(path);
                 unsigned int err = lodepng_decode32(&px, &w, &h, data, sz);
                 free(data);
                 if(err) {

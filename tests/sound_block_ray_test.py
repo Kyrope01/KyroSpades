@@ -11,10 +11,10 @@ camera_hit_mask() - the gun's hit test. That meant:
     for a sound three blocks away.
 
 That is the ~35% of main-thread time reported during fights, and it scales with
-sounds x players. The fix routes both probes through camera_block_hit(): no
+sounds x players. The fix routes both probes through camera_hit_terrain(): no
 player test, and the walk stops at the sound's own distance.
 
-This test compiles the real camera_terrain_traverse()/camera_block_hit() against
+This test compiles the real camera_terrain_pick_range()/camera_hit_terrain()/camera_block_hit() against
 a fake map and checks:
 
   * a hit within range reports exactly the voxel a full-length walk finds, at
@@ -49,17 +49,20 @@ def check(what, ok, detail=''):
 
 
 # ── extraction: the shipped code, verbatim ──────────────────────────────────
-start = camera_src.index('static int* camera_terrain_traverse(')
+start = camera_src.index('static int* camera_terrain_pick_range(unsigned char mode, float gx0')
 end = camera_src.index('int* camera_terrain_pickEx(unsigned char mode', start)
 traverse = camera_src[start:end]
 assert 'tmaxx' in traverse and 'maxdist' in traverse, \
-    'camera_terrain_traverse is no longer the tMax traversal; update this test'
+    'camera_terrain_pick_range is no longer the tMax traversal; update this test'
 
 start = camera_src.index('int camera_block_hit(')
 end = camera_src.index('\n}\n', start) + 3
 block_hit = camera_src[start:end]
-assert 'camera_terrain_traverse(1,' in block_hit, \
-    'camera_block_hit no longer uses the ranged traversal'
+assert 'camera_hit_terrain(' in block_hit
+terrain_start = camera_src.index('void camera_hit_terrain(')
+terrain_end = camera_src.index('\n}', terrain_start) + 2
+terrain_hit = camera_src[terrain_start:terrain_end]
+assert 'camera_terrain_pick_range(1,' in terrain_hit
 
 harness = r'''
 #include <float.h>
@@ -151,6 +154,7 @@ static uint32_t rng(void) {
 /* --- shipped code --- */
 #define CAMERA_PICK_MAXDIST 128.0F
 Traverse_here
+Terrain_hit_here
 Block_hit_here
 
 /* Brute force: first solid voxel along the ray, and the AABB entry distance.
@@ -212,7 +216,7 @@ int main(void) {
     check("open air within range: no hit", close_hit == 0 && hit.type == CAMERA_HITTYPE_NONE);
 
     isair_calls = 0;
-    int* full = camera_terrain_traverse(1, 2.5F, 5.5F, 5.5F, 3.0F, 0.0F, 0.0F, CAMERA_PICK_MAXDIST);
+    int* full = camera_terrain_pick_range(1, 2.5F, 5.5F, 5.5F, 3.0F, 0.0F, 0.0F, CAMERA_PICK_MAXDIST);
     long full_calls = isair_calls;
     check("full-length walk does find that wall", full != NULL && full[0] == 30);
     printf("  3-unit sound vs 27.5 units of air: %ld map_isair() calls ranged, %ld full-length\n",
@@ -315,7 +319,7 @@ int main(void) {
         range_agrees++;
 
         /* And it has to agree with what the uncut walk sees for this ray. */
-        int* reference = camera_terrain_traverse(1, px, py, pz, rx, ry, rz, CAMERA_PICK_MAXDIST);
+        int* reference = camera_terrain_pick_range(1, px, py, pz, rx, ry, rz, CAMERA_PICK_MAXDIST);
         if(reference && reference[0] == cell[0] && reference[1] == cell[1] && reference[2] == cell[2])
             full_agree++;
         else if(mismatches++ < 5)
@@ -339,7 +343,7 @@ int main(void) {
 }
 '''
 
-harness = harness.replace('Traverse_here', traverse).replace('Block_hit_here', block_hit)
+harness = harness.replace('Traverse_here', traverse).replace('Terrain_hit_here', terrain_hit).replace('Block_hit_here', block_hit)
 
 with tempfile.TemporaryDirectory() as d:
     c = Path(d) / 'sound_ray.c'
@@ -365,11 +369,11 @@ with tempfile.TemporaryDirectory() as d:
 print()
 check('sound.c no longer runs the gun hit test', 'camera_hit_mask(' not in sound_src)
 check('occlusion probe uses the block-only ray',
-      'camera_block_hit(&hit, ox, oy, oz, rx, ry, rz, dist);' in sound_src)
+      'camera_hit_terrain(&hit, ox, oy, oz, rx, ry, rz, sample_dist);' in sound_src)
 check('room probe uses the block-only ray',
-      sound_src.count('camera_block_hit(&hit, camera_x, camera_y, camera_z,') == 2)
+      sound_src.count('camera_hit_terrain(&hit, camera_x, camera_y, camera_z,') == 2)
 check('occlusion still asks only about blocks',
-      'hit.type == CAMERA_HITTYPE_BLOCK && hit.distance < dist - 0.5F' in sound_src)
+      'hit.type == CAMERA_HITTYPE_BLOCK && hit.distance < sample_dist - 0.5F' in sound_src)
 
 print()
 if failures:

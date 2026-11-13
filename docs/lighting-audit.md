@@ -1,0 +1,18 @@
+# Lighting review
+
+## Changes
+
+- The GLSL 120 / ES terrain shader now adds point lights and flashlights independently of the sun-facing factor, matching the 330 shader's non-shadowed contribution. The 330 sun term still uses its shadow visibility. This slightly brightens dynamic light on surfaces not facing the sun; actual appearance needs device testing.
+- Uniform arrays, flashlight fade and local flicker are built once per prepared frame and reused by terrain/model/water uploads. Flashlight state/update and lighting enable/reset/deinit invalidate the cache; the next preparation invalidates it too. A cached normalized sun direction is keyed to its actual components, so a change between passes is not hidden. This removes repeated CPU work but has not been benchmarked.
+- Documented the frame order: flashlight update, submissions, preparation, then lighting draws. The actual render loop already follows it. Remote flicker now uses the timestamp already passed to preparation. Added a finite-input check for flashlight position/direction, clarified UV-tangent approximation and vertex-alpha emission, and renamed the internal `daylight_occlusion` parameter to `sun_visibility`.
+
+## Qualifications and follow-up
+
+- The local player ID is an unsigned byte and flashlight tables have 256 entries. `flashlight_ext_beam` checks its unsigned index and returns the default for an invalid index. The claimed negative/out-of-range read cannot occur through this ID in the current revision. Session/server-sentinel handling remains a distinct semantic concern.
+- Cache consistency assumes the documented render-thread frame lifecycle: run `lighting_prepare_frame` after processing beam/config/settings changes and submissions. Mutating extension beam data or `dynamic_light_intensity` in the middle of a rendered frame without preparing again can leave a frame snapshot stale. Calls to enable/disable/reset or flashlight update explicitly invalidate it.
+- Terrain uses only `u_SunColor.r` deliberately as a daylight scale. Converting it to a scalar would change a shared shader uniform contract; applying RGB tint would visibly change the lighting. Model/terrain ambient ratios are artistic choices and were not harmonized without visual testing.
+- Emission uses **vertex** alpha, not the texture-multiplied alpha. Texture alpha alone cannot mark or unmark an emissive vertex, contrary to the report; genuine partially transparent *vertex* colors can still collide with the marker. A dedicated emissive attribute requires a cross-renderer mesh-format change.
+- The remote loop already checks whether each negotiated flashlight is on before normalizing its direction. A 32-bit mask cannot cover the 256-player protocol; additional event-maintained indices and caching need evidence from profiling. The negative-radius spotlight tag is safe only while positive-radius validation holds and remains a protocol-internal design constraint. Texture binding queries require a `GLint*`; simply changing the destination to `GLuint` is not a correct OpenGL API call.
+- Tangents are reconstructed from normals rather than mesh UVs, so directional normal maps may rotate across faces; the real fix needs UV-aligned tangents and compatibility testing. Hardware shadow comparison/PCF, shader precision and light selection need GPU profiling and device coverage.
+
+`tests/lighting_review_test.py` runs the production uniform builder/cache and sun normalization against fakes, checks flashlight transitions and shader source; all regression tests and legacy/Core/explicit-programmable stub syntax checks passed. These are not real GLSL compiler, GPU, GLES, visual, or FPS tests.

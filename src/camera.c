@@ -86,7 +86,7 @@ void camera_ads_update(float dt) {
 	/* No gun, dead, not first person, or invalid player: drop ADS instantly
 	   (nothing to animate out of, e.g. switching to the spade). */
 	if(!render_fpv || local_id < 0 || local_id >= PLAYERS_MAX || !players[local_id].alive
-	   || players[local_id].held_item != TOOL_GUN || dt < 0.0F) {
+	   || players[local_id].held_item != TOOL_GUN || !isfinite(dt) || dt < 0.0F) {
 		cam_linear = scope_linear = 0.0F;
 		camera_ads_progress = camera_ads_scope_progress = 0.0F;
 		return;
@@ -97,7 +97,7 @@ void camera_ads_update(float dt) {
 	int cam_active = rmb && (!p->input.keys.sprint || p->input.keys.crouch);
 
 	cam_linear = camera_ads_step(cam_linear, cam_active, p->input.buttons.rmb_start, dt);
-	scope_linear = camera_ads_step(scope_linear, rmb, p->input.buttons.rmb_start, dt);
+	scope_linear = camera_ads_step(scope_linear, cam_active, p->input.buttons.rmb_start, dt);
 
 	camera_ads_progress = camera_smoothstep(cam_linear);
 	camera_ads_scope_progress = camera_smoothstep(scope_linear);
@@ -128,8 +128,8 @@ float camera_fov_scaled(float dt) {
 
 	// Smoothly interpolate current FOV offset towards target (zoom in/out effect)
 	static float current_fov_offset = 0.0F;
-	float lerp_speed = 5.0F * dt; // Adjust this value to control smoothness
-	current_fov_offset = current_fov_offset + (target_fov_offset - current_fov_offset) * fminf(lerp_speed, 1.0F);
+	float blend = isfinite(dt) && dt > 0.0F ? -expm1f(-5.0F * dt) : 0.0F;
+	current_fov_offset += (target_fov_offset - current_fov_offset) * blend;
 
 	float normal_fov = settings.camera_fov + current_fov_offset;
 	/* camera_ads_progress is > 0 while aiming AND while animating back out
@@ -144,7 +144,9 @@ float camera_fov_scaled(float dt) {
 			case WEAPON_SHOTGUN: ads_fov = settings.shotgun_ads_fov; break;
 			default: ads_fov = CAMERA_DEFAULT_FOV; break;
 		}
-		float target_ads_fov = ads_fov * atan(tan((ads_fov / 180.0F * PI) / 2) / 2.0F) * 2.0F;
+		/* Preserve the existing 2x optical-zoom intent, converting the
+		   resulting angle from radians back to degrees. */
+		float target_ads_fov = 2.0F * atanf(tanf(ads_fov * PI / 360.0F) / 2.0F) * (180.0F / PI);
 
 		/* Same 150 ms smoothstep as the scope PNG (see camera_ads_update), in
 		   both directions.  Progress is 1 when the animation setting is off. */
@@ -206,7 +208,9 @@ void camera_look_delta(float yaw_delta, float pitch_delta) {
 
 		if(fabsf(camera_angle_delta(camera_crosshair_rot_x, camera_rot_x)) >= h)
 			camera_rot_x -= yaw_delta;
-		if(fabsf(camera_crosshair_rot_y - camera_rot_y) >= v)
+		if(fabsf(camera_crosshair_rot_y - camera_rot_y) >= v
+		   || (pitch_delta > 0.0F && camera_crosshair_rot_y >= PI - EPSILON)
+		   || (pitch_delta < 0.0F && camera_crosshair_rot_y <= EPSILON))
 			camera_rot_y += pitch_delta;
 
 		camera_overflow_adjust();
@@ -233,7 +237,8 @@ void camera_look_delta(float yaw_delta, float pitch_delta) {
 }
 
 void camera_overflow_adjust() {
-	/* Pitch is clamped to just under +-90 degrees in EVERY mode now.
+	/* Pitch is measured from up: 0 looks up, PI looks down. Clamp just
+	   inside both poles in every mode.
 	   Spectator used to allow pitch past the pole ("FPV-style free
 	   rotation"): the auto-upright view flip at the pole made screen up
 	   and screen right swap sides, so mouse-Y and A/D inverted while the
@@ -241,11 +246,11 @@ void camera_overflow_adjust() {
 	   instead reached with camera roll (drone-style flip), which keeps
 	   the input mapping consistent in every orientation. */
 	if(camera_rot_y < EPSILON) camera_rot_y = EPSILON;
-	if(camera_rot_y > 3.14F) camera_rot_y = 3.14F;
+	if(camera_rot_y > PI - EPSILON) camera_rot_y = PI - EPSILON;
 	if(camera_crosshair_rot_y < EPSILON) camera_crosshair_rot_y = EPSILON;
-	if(camera_crosshair_rot_y > 3.14F) camera_crosshair_rot_y = 3.14F;
+	if(camera_crosshair_rot_y > PI - EPSILON) camera_crosshair_rot_y = PI - EPSILON;
 	if(camera_muzzle_rot_y < EPSILON) camera_muzzle_rot_y = EPSILON;
-	if(camera_muzzle_rot_y > 3.14F) camera_muzzle_rot_y = 3.14F;
+	if(camera_muzzle_rot_y > PI - EPSILON) camera_muzzle_rot_y = PI - EPSILON;
 
 	while(camera_rot_x > DOUBLEPI) camera_rot_x -= DOUBLEPI;
 	while(camera_rot_x < 0.0F) camera_rot_x += DOUBLEPI;
@@ -282,6 +287,11 @@ void cameracontroller_reset_spectator_velocity() {
 }
 
 void camera_hit_fromplayer(struct Camera_HitType* hit, int player_id, float range) {
+	if(player_id < 0 || player_id >= PLAYERS_MAX) {
+		memset(hit, 0, sizeof(*hit));
+		hit->distance = FLT_MAX;
+		return;
+	}
 	if(player_id != local_player_id) {
 		camera_hit(hit, player_id, players[player_id].physics.eye.x,
 				   players[player_id].physics.eye.y + player_height(&players[player_id]),
@@ -304,25 +314,30 @@ void camera_hit(struct Camera_HitType* hit, int exclude_player, float x, float y
 	camera_hit_mask(hit, exclude_player, x, y, z, ray_x, ray_y, ray_z, range);
 }
 
-void camera_hit_mask(struct Camera_HitType* hit, int exclude_player, float x, float y, float z, float ray_x,
+static int* camera_terrain_pick_range(unsigned char mode, float x, float y, float z,
+                                      float ray_x, float ray_y, float ray_z, float maxdist);
+
+void camera_hit_terrain(struct Camera_HitType* hit, float x, float y, float z, float ray_x,
 					 float ray_y, float ray_z, float range) {
 	Ray dir = (Ray) {
 		.origin.coords = {x, y, z},
 		.direction.coords = {ray_x, ray_y, ray_z},
 	};
 
-	hit->type = CAMERA_HITTYPE_NONE;
+	memset(hit, 0, sizeof(*hit));
 	hit->distance = FLT_MAX;
+	if(!isfinite(range) || range < 0.0F)
+		return;
 
-	int* pos = camera_terrain_pickEx(1, x, y, z, ray_x, ray_y, ray_z);
-	if(pos != NULL && distance3D(x, y, z, pos[0], pos[1], pos[2]) <= range * range) {
+	int* pos = camera_terrain_pick_range(1, x, y, z, ray_x, ray_y, ray_z, range);
+	if(pos != NULL) {
 		AABB block = (AABB) {
 			.min = {pos[0], pos[1], pos[2]},
 			.max = {pos[0] + 1, pos[1] + 1, pos[2] + 1},
 		};
 
 		float d;
-		if(aabb_intersection_ray(&block, &dir, &d)) {
+		if(aabb_intersection_ray(&block, &dir, &d) && d <= range) {
 			hit->type = CAMERA_HITTYPE_BLOCK;
 			hit->distance = d;
 			hit->x = pos[0];
@@ -334,16 +349,39 @@ void camera_hit_mask(struct Camera_HitType* hit, int exclude_player, float x, fl
 		}
 	}
 
+}
+
+/* Compatibility entry point for range-limited block-only probes. */
+int camera_block_hit(struct Camera_HitType* hit, float x, float y, float z, float ray_x, float ray_y, float ray_z,
+                     float range) {
+	if(!isfinite(range) || range <= 0.0F) {
+		memset(hit, 0, sizeof(*hit));
+		hit->distance = FLT_MAX;
+		return 0;
+	}
+	camera_hit_terrain(hit, x, y, z, ray_x, ray_y, ray_z, range);
+	return hit->type == CAMERA_HITTYPE_BLOCK;
+}
+
+void camera_hit_mask(struct Camera_HitType* hit, int exclude_player, float x, float y, float z, float ray_x,
+                     float ray_y, float ray_z, float range) {
+	camera_hit_terrain(hit, x, y, z, ray_x, ray_y, ray_z, range);
+	if(!isfinite(range) || range < 0.0F) return;
+	Ray dir = (Ray) {
+		.origin.coords = {x, y, z},
+		.direction.coords = {ray_x, ray_y, ray_z},
+	};
+
 	for(int i = 0; i < PLAYERS_MAX; i++) {
-		float l = distance2D(x, z, players[i].pos.x, players[i].pos.z);
-		if(players[i].connected && players[i].alive && l < range * range
-		   && (exclude_player < 0 || (exclude_player >= 0 && exclude_player != i))) {
+		/* The player's origin can lie outside range while a hitbox is inside.
+		   Don't reject based on origin distance. */
+		if(players[i].connected && players[i].alive && exclude_player != i) {
 			struct player_intersection intersects = {0};
 			player_collision(players + i, &dir, &intersects);
 
 			float d;
 			int type = player_intersection_choose(&intersects, &d);
-			if(player_intersection_exists(&intersects) && d < hit->distance) {
+			if(player_intersection_exists(&intersects) && d <= range && d < hit->distance) {
 				hit->type = CAMERA_HITTYPE_PLAYER;
 				hit->distance = d;
 				hit->x = players[i].pos.x;
@@ -377,17 +415,13 @@ int* camera_terrain_pick(unsigned char mode) {
    mode 1: returns the first solid cell (ret[0..2]) plus the air cell before
            it (ret[3..5]).  NULL when the ray leaves the map.
 */
-/* Longest walk any pick may make. The traversal used to hardcode this, which
-   meant every caller - including the audio probes, which only ever care about
-   a few blocks - paid for a walk that continued to the map edge. */
-#define CAMERA_PICK_MAXDIST 128.0F
-
-static int* camera_terrain_traverse(unsigned char mode, float gx0, float gy0, float gz0, float ray_x, float ray_y,
-                                    float ray_z, float maxdist) {
+static int* camera_terrain_pick_range(unsigned char mode, float gx0, float gy0, float gz0,
+                                      float ray_x, float ray_y, float ray_z, float maxdist) {
 	static int ret[6];
 
 	float len = sqrtf(ray_x * ray_x + ray_y * ray_y + ray_z * ray_z);
-	if(len < 1e-6F)
+	if(!isfinite(gx0) || !isfinite(gy0) || !isfinite(gz0) || !isfinite(len)
+	   || !isfinite(maxdist) || maxdist < 0.0F || len < 1e-6F)
 		return NULL;
 
 	/* Normalize the direction; the old code travelled 128 * |dir| units,
@@ -395,6 +429,11 @@ static int* camera_terrain_traverse(unsigned char mode, float gx0, float gy0, fl
 	float dx = ray_x / len;
 	float dy = ray_y / len;
 	float dz = ray_z / len;
+
+	/* Reject out-of-map starts before converting floats to integer voxels. */
+	if(gx0 < 0.0F || gx0 >= map_size_x || gy0 < 0.0F || gy0 >= map_size_y
+	   || gz0 < 0.0F || gz0 >= map_size_z)
+		return NULL;
 
 	int gx = (int)floorf(gx0);
 	int gy = (int)floorf(gy0);
@@ -464,56 +503,8 @@ static int* camera_terrain_traverse(unsigned char mode, float gx0, float gy0, fl
 	return NULL;
 }
 
-int* camera_terrain_pickEx(unsigned char mode, float gx0, float gy0, float gz0, float ray_x, float ray_y, float ray_z) {
-	return camera_terrain_traverse(mode, gx0, gy0, gz0, ray_x, ray_y, ray_z, CAMERA_PICK_MAXDIST);
-}
-
-/* Block-only hit, limited to `range` world units. The sound code only cares
-   whether a wall stands between a source and the listener, and it asks this
-   dozens of times per frame: 27 occlusion rays per playing source plus the
-   room probe. Going through camera_hit_mask() made each of those rays run the
-   full hitbox test (player_collision: glm_rotate_make + glmc_mat4_inv +
-   sincosf) against every player in range, on top of a block walk that kept
-   going to the map edge even when the sound was three blocks away. That is why
-   sound occlusion cost ~35% of the main thread and spiked exactly when a fight
-   started. Blocks are all audio needs, so skip the players entirely and stop
-   the walk at the sound's own distance.
-
-   Returns 1 and fills `hit` (CAMERA_HITTYPE_BLOCK + the AABB entry distance)
-   when a solid voxel is hit within `range`, 0 otherwise. */
-int camera_block_hit(struct Camera_HitType* hit, float x, float y, float z, float ray_x, float ray_y, float ray_z,
-                     float range) {
-	hit->type = CAMERA_HITTYPE_NONE;
-	hit->distance = FLT_MAX;
-	if(range <= 0.0F)
-		return 0;
-
-	int* pos = camera_terrain_traverse(1, x, y, z, ray_x, ray_y, ray_z, range);
-	if(pos == NULL)
-		return 0;
-
-	AABB block = (AABB) {
-		.min = {pos[0], pos[1], pos[2]},
-		.max = {pos[0] + 1, pos[1] + 1, pos[2] + 1},
-	};
-	Ray dir = (Ray) {
-		.origin.coords = {x, y, z},
-		.direction.coords = {ray_x, ray_y, ray_z},
-	};
-
-	float d;
-	if(!aabb_intersection_ray(&block, &dir, &d) || d > range)
-		return 0;
-
-	hit->type = CAMERA_HITTYPE_BLOCK;
-	hit->distance = d;
-	hit->x = pos[0];
-	hit->y = pos[1];
-	hit->z = pos[2];
-	hit->xb = pos[3];
-	hit->yb = pos[4];
-	hit->zb = pos[5];
-	return 1;
+int* camera_terrain_pickEx(unsigned char mode, float x, float y, float z, float ray_x, float ray_y, float ray_z) {
+	return camera_terrain_pick_range(mode, x, y, z, ray_x, ray_y, ray_z, 128.0F);
 }
 
 void camera_local_eye(float* x, float* y, float* z) {
@@ -587,26 +578,57 @@ void camera_inside_block_render(void) {
 	if(!any)
 		return;
 
+	GLboolean cull_was_on = glIsEnabled(GL_CULL_FACE);
+	GLboolean blend_was_on = glIsEnabled(GL_BLEND);
+	GLboolean depth_write_was_on;
+	GLint depth_func;
+	glGetBooleanv(GL_DEPTH_WRITEMASK, &depth_write_was_on);
+	glGetIntegerv(GL_DEPTH_FUNC, &depth_func);
+#ifndef OPENGL_CORE
+	GLboolean texture_was_on = GL_FALSE;
+#ifdef OPENGL_ES
+	if(gles_version < 2)
+#endif
+		texture_was_on = glIsEnabled(GL_TEXTURE_2D);
+#endif
+#ifdef GLX_PROGRAMMABLE
+	unsigned int previous_program = glx_current_program();
+	if(glx_version)
+		glx_use_default_shader();
+#endif
+	matrix_push(matrix_model);
 	matrix_identity(matrix_model);
 	matrix_upload();
 
-	GLboolean cull_was_on = glIsEnabled(GL_CULL_FACE);
-	GLboolean blend_was_on = glIsEnabled(GL_BLEND);
 	glDisable(GL_CULL_FACE);
 	glDisable(GL_BLEND);
 #ifndef OPENGL_CORE
-	glDisable(GL_TEXTURE_2D);
+#ifdef OPENGL_ES
+	if(gles_version < 2)
+#endif
+		glDisable(GL_TEXTURE_2D);
 #endif
 	glDepthFunc(GL_LEQUAL);
 	glDepthMask(GL_TRUE);
 
 	tesselator_draw(&camera_inside_tess, 1);
 
-	glDepthFunc(GL_LEQUAL);
+	glDepthFunc((GLenum)depth_func);
+	glDepthMask(depth_write_was_on);
 	if(cull_was_on)
 		glEnable(GL_CULL_FACE);
 	if(blend_was_on)
 		glEnable(GL_BLEND);
+#ifndef OPENGL_CORE
+	if(texture_was_on)
+		glEnable(GL_TEXTURE_2D);
+#endif
+	matrix_pop(matrix_model);
+	matrix_upload();
+#ifdef GLX_PROGRAMMABLE
+	if(glx_version)
+		glx_use_program(previous_program);
+#endif
 }
 
 void camera_ExtractFrustum() {

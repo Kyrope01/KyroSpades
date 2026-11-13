@@ -10,6 +10,8 @@
 #include <math.h>
 #include <pthread.h>
 #include <errno.h>
+#include <limits.h>
+#include <stdint.h>
 
 #ifdef NO_FFMPEG
 #include "common.h"
@@ -91,7 +93,7 @@ static int rec_raw_head = 0, rec_raw_tail = 0, rec_raw_count = 0;
 static pthread_mutex_t rec_raw_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t rec_raw_cond = PTHREAD_COND_INITIALIZER;
 static pthread_t rec_encode_thread;
-static volatile int rec_encode_thread_running = 0;
+static int rec_encode_thread_running = 0;
 
 /* Growing video packet buffer for recording */
 static AVPacket** rec_vbuf = NULL;
@@ -103,6 +105,9 @@ static pthread_mutex_t rec_vmutex = PTHREAD_MUTEX_INITIALIZER;
 static int16_t* rec_pcm_buf = NULL;
 static int rec_pcm_frames = 0;
 static int rec_pcm_capacity = 0;
+static int rec_pcm_truncated = 0;
+/* Estimated wall-clock time of the first complete captured PCM block. */
+static int64_t rec_audio_start_us = 0;
 static pthread_mutex_t rec_pcm_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* ── Replay buffer state — fully independent pipeline ───────────────── */
@@ -119,7 +124,7 @@ static int raw_head = 0, raw_tail = 0, raw_count = 0;
 static pthread_mutex_t raw_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t raw_cond = PTHREAD_COND_INITIALIZER;
 static pthread_t encode_thread;
-static volatile int encode_thread_running = 0;
+static int encode_thread_running = 0;
 
 /* Circular video packet buffer for replay */
 #define MAX_PACKETS 65536
@@ -140,9 +145,69 @@ static int64_t buffer_start_time = 0;
 
 /* ── Shared state ──────────────────────────────────────────────────── */
 static pthread_t audio_thread;
-static volatile int audio_thread_running = 0;
+static int audio_thread_running = 0;
 static pthread_mutex_t vbuf_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t pcm_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t audio_state_mutex = PTHREAD_MUTEX_INITIALIZER;
+enum { AUDIO_EVENT_CAPTURE_LOST = 1, AUDIO_EVENT_PCM_FULL = 2 };
+static unsigned audio_events;
+/* running tracks the joinable thread; dead separately tracks unexpected exit. */
+static int audio_capture_dead;
+static void audio_report_event(unsigned event) {
+    pthread_mutex_lock(&audio_state_mutex);
+    audio_events |= event;
+    if(event & AUDIO_EVENT_CAPTURE_LOST) audio_capture_dead = 1;
+    pthread_mutex_unlock(&audio_state_mutex);
+}
+static int audio_has_failed(void) {
+    pthread_mutex_lock(&audio_state_mutex);
+    int dead = audio_capture_dead;
+    pthread_mutex_unlock(&audio_state_mutex);
+    return dead;
+}
+static void audio_prepare_start(void) {
+    pthread_mutex_lock(&audio_state_mutex);
+    audio_capture_dead = 0;
+    pthread_mutex_unlock(&audio_state_mutex);
+}
+/* Deliver background errors only on the game thread: chat is not thread-safe. */
+static void audio_notify_events(void) {
+    pthread_mutex_lock(&audio_state_mutex);
+    unsigned events = audio_events;
+    audio_events = 0;
+    pthread_mutex_unlock(&audio_state_mutex);
+    if(events & AUDIO_EVENT_CAPTURE_LOST)
+        chat_add(0, 0xFFFF44, "Recorder: audio capture lost; video continues without audio");
+    if(events & AUDIO_EVENT_PCM_FULL)
+        chat_add(0, 0xFFFF44, "Recorder: audio memory exhausted; remaining audio is missing");
+}
+static AVCodecParameters* buf_codecpar = NULL;
+static AVRational buf_time_base;
+static double buf_replay_duration;
+
+static void audio_set_running(int running) {
+    pthread_mutex_lock(&audio_state_mutex);
+    audio_thread_running = running;
+    pthread_mutex_unlock(&audio_state_mutex);
+}
+static int audio_is_running(void) {
+    pthread_mutex_lock(&audio_state_mutex);
+    int running = audio_thread_running;
+    pthread_mutex_unlock(&audio_state_mutex);
+    return running;
+}
+/* Running flags are also read by audio under their corresponding PCM mutex. */
+static void rec_set_running(int running) {
+    pthread_mutex_lock(&rec_pcm_mutex);
+    rec_running = running;
+    if(running) { rec_audio_start_us = 0; rec_pcm_truncated = 0; }
+    pthread_mutex_unlock(&rec_pcm_mutex);
+}
+static void buf_set_running(int running) {
+    pthread_mutex_lock(&pcm_mutex);
+    buf_running = running;
+    pthread_mutex_unlock(&pcm_mutex);
+}
 
 static double last_capture_time = 0;
 static int target_fps = 60;
@@ -231,7 +296,10 @@ static double packet_duration_sec(AVPacket* pkt, AVRational tb) {
 static void vbuf_push(AVPacket* pkt) {
     pthread_mutex_lock(&vbuf_mutex);
     int idx = vbuf_write_idx;
-    if(vbuf[idx]) av_packet_free(&vbuf[idx]);
+    if(vbuf[idx]) {
+        vbuf_duration -= packet_duration_sec(vbuf[idx], venc_ctx->time_base);
+        av_packet_free(&vbuf[idx]);
+    }
     vbuf[idx] = pkt;
     vbuf_duration += packet_duration_sec(pkt, venc_ctx->time_base);
     vbuf_write_idx = (idx + 1) % MAX_PACKETS;
@@ -314,6 +382,83 @@ static int ensure_rec_encoder(int width, int height) {
     return 1;
 }
 
+/* Save-time AAC output is bounded; failures produce a partial or silent
+   recording, not an out-of-bounds write or a NULL packet dereference. */
+static void recorder_encode_audio(AVCodecContext* enc, AVFrame* frame, SwrContext* swr,
+                                  const int16_t* pcm, int frames,
+                                  AVPacket*** packets_out, int64_t** pts_out, int* count_out) {
+    if(frames <= 0 || frames > INT_MAX / 2) return;
+    int capacity = frames * 2;
+    AVPacket** packets = calloc((size_t)capacity, sizeof(*packets));
+    int64_t* pts = calloc((size_t)capacity, sizeof(*pts));
+    if(!packets || !pts) {
+        free(packets); free(pts);
+        log_warn("Recorder: unable to allocate audio packet arrays");
+        return;
+    }
+    int count = 0, failed = 0;
+    for(int i = 0; i <= frames && !failed; i++) {
+        if(i < frames) {
+            const uint8_t* input[] = {(const uint8_t*)(pcm + (size_t)i * 2048)};
+            if(av_frame_make_writable(frame) < 0 ||
+               swr_convert(swr, frame->data, frame->nb_samples, input, 1024) != 1024) {
+                log_warn("Recorder: audio conversion failed");
+                break;
+            }
+            frame->pts = (int64_t)i * 1024;
+        }
+        if(avcodec_send_frame(enc, i == frames ? NULL : frame) < 0) {
+            log_warn("Recorder: audio encoder rejected frame");
+            break;
+        }
+        AVPacket* pkt = av_packet_alloc();
+        if(!pkt) { log_warn("Recorder: audio packet allocation failed"); break; }
+        while(avcodec_receive_packet(enc, pkt) == 0) {
+            if(count == capacity) {
+                log_warn("Recorder: audio packet limit reached");
+                failed = 1;
+                break;
+            }
+            if(pkt->duration == 0) pkt->duration = 1024;
+            packets[count] = pkt;
+            pts[count++] = pkt->pts;
+            pkt = av_packet_alloc();
+            if(!pkt) { log_warn("Recorder: audio packet allocation failed"); failed = 1; break; }
+        }
+        av_packet_free(&pkt);
+    }
+    *packets_out = packets;
+    *pts_out = pts;
+    *count_out = count;
+}
+
+/* Timestamps are measured on the same clock as captured video. Negative
+   offsets are clamped because this mux path starts video at zero. */
+static int64_t recorder_audio_lead_us(int64_t first_audio_us, int64_t first_video_us) {
+    return first_audio_us > first_video_us ? first_audio_us - first_video_us : 0;
+}
+
+static void recorder_free_recording_resources(void) {
+    free(rec_vbuf); rec_vbuf = NULL; rec_vcount = rec_vcapacity = 0;
+    pthread_mutex_lock(&rec_pcm_mutex);
+    free(rec_pcm_buf); rec_pcm_buf = NULL; rec_pcm_frames = rec_pcm_capacity = 0;
+    pthread_mutex_unlock(&rec_pcm_mutex);
+    if(rec_vsws) { sws_freeContext(rec_vsws); rec_vsws = NULL; }
+    if(rec_vframe) av_frame_free(&rec_vframe);
+    if(rec_venc_ctx) avcodec_free_context(&rec_venc_ctx);
+}
+
+static void recorder_free_buffer_resources(void) {
+    free(vbuf); vbuf = NULL;
+    pthread_mutex_lock(&pcm_mutex);
+    free(pcm_buf); pcm_buf = NULL; pcm_bytes = pcm_write_byte = pcm_max_bytes = 0;
+    pthread_mutex_unlock(&pcm_mutex);
+    if(vsws) { sws_freeContext(vsws); vsws = NULL; }
+    if(vframe) av_frame_free(&vframe);
+    if(venc_ctx) avcodec_free_context(&venc_ctx);
+    avcodec_parameters_free(&buf_codecpar);
+}
+
 static void recorder_start_recording(void) {
     log_info("Recorder: starting recording...");
     w = settings.window_width;
@@ -350,6 +495,7 @@ static void recorder_start_recording(void) {
     if(!rec_vbuf) {
         log_error("Recorder: failed to allocate video packet buffer");
         chat_add(0, 0xFF4444, "Recording failed: out of memory");
+        recorder_free_recording_resources();
         return;
     }
     rec_vcount = 0;
@@ -361,12 +507,13 @@ static void recorder_start_recording(void) {
         log_error("Recorder: failed to allocate PCM buffer");
         free(rec_vbuf); rec_vbuf = NULL;
         chat_add(0, 0xFF4444, "Recording failed: out of memory");
+        recorder_free_recording_resources();
         return;
     }
     rec_pcm_frames = 0;
 
     rec_start_time = av_gettime();
-    rec_running = 1;
+    rec_set_running(1);
     rec_frames = 0;
     last_capture_time = 0;
 
@@ -376,21 +523,25 @@ static void recorder_start_recording(void) {
     if(pthread_create(&rec_encode_thread, NULL, rec_encode_worker_thread, NULL) != 0) {
         log_error("Recorder: failed to start recording encode thread");
         rec_encode_thread_running = 0;
-        rec_running = 0;
+        rec_set_running(0);
         chat_add(0, 0xFF4444, "Recording failed: could not start encode thread");
+        recorder_free_recording_resources();
         return;
     }
 
     /* Start audio capture thread if not already running */
     if(!audio_thread_running) {
-        audio_thread_running = 1;
+        audio_prepare_start();
+        audio_set_running(1);
         if(pthread_create(&audio_thread, NULL, audio_capture_thread, NULL) != 0) {
             log_warn("Recorder: failed to start audio capture thread for recording");
-            audio_thread_running = 0;
+            audio_set_running(0);
             chat_add(0, 0xFFFF44, "Audio capture unavailable");
         }
     }
 
+    if(audio_thread_running && audio_has_failed())
+        chat_add(0, 0xFFFF44, "Audio capture unavailable; stop both recorder modes to retry");
     log_info("Recorder: started recording to %s", current_filename);
     chat_add(0, 0x44FF44, "Recording started");
 }
@@ -399,8 +550,9 @@ static void recorder_stop_recording(void) {
     if(!rec_running)
         return;
 
+    audio_notify_events();
     log_info("Recorder: stopping recording, %d frames captured", rec_frames);
-    rec_running = 0;
+    rec_set_running(0);
 
     /* Always stop recording's own encode thread */
     if(rec_encode_thread_running) {
@@ -415,7 +567,7 @@ static void recorder_stop_recording(void) {
     if(rec_venc_ctx) {
         avcodec_send_frame(rec_venc_ctx, NULL);
         AVPacket* pkt = av_packet_alloc();
-        while(avcodec_receive_packet(rec_venc_ctx, pkt) == 0) {
+        while(pkt && avcodec_receive_packet(rec_venc_ctx, pkt) == 0) {
             pkt->duration = 1;
             pthread_mutex_lock(&rec_vmutex);
             if(rec_vcount >= rec_vcapacity) {
@@ -433,8 +585,9 @@ static void recorder_stop_recording(void) {
 
     /* Stop audio thread only if buffer isn't running */
     if(audio_thread_running && !buf_running) {
-        audio_thread_running = 0;
+        audio_set_running(0);
         pthread_join(audio_thread, NULL);
+        audio_notify_events();
     }
 
     /* Snapshot video packets */
@@ -449,11 +602,21 @@ static void recorder_stop_recording(void) {
         pthread_mutex_unlock(&rec_vmutex);
         free(v_pts_arr); free(v_clones);
         log_error("Recorder: malloc failed for video clones");
+        recorder_free_recording_resources();
         return;
     }
     for(int i = 0; i < v_count; i++) {
         v_pts_arr[i] = rec_vbuf[i]->pts;
         v_clones[i] = av_packet_clone(rec_vbuf[i]);
+        if(!v_clones[i]) {
+            for(int j = 0; j < i; j++) av_packet_free(&v_clones[j]);
+            free(v_clones); free(v_pts_arr);
+            for(int j = 0; j < rec_vcount; j++) av_packet_free(&rec_vbuf[j]);
+            pthread_mutex_unlock(&rec_vmutex);
+            log_error("Recorder: could not clone recording video packet");
+            recorder_free_recording_resources();
+            return;
+        }
     }
     /* Free recording video buffer */
     for(int i = 0; i < rec_vcount; i++) av_packet_free(&rec_vbuf[i]);
@@ -465,10 +628,11 @@ static void recorder_stop_recording(void) {
     int16_t* pcm_copy = NULL;
     int pcm_num_frames = 0;
     pthread_mutex_lock(&rec_pcm_mutex);
+    int64_t pcm_start_us = rec_audio_start_us;
     if(rec_pcm_frames > 0 && rec_pcm_buf) {
-        pcm_copy = malloc(rec_pcm_frames * 2 * 2);
+        pcm_copy = malloc((size_t)rec_pcm_frames * 2 * sizeof(*rec_pcm_buf));
         if(pcm_copy) {
-            memcpy(pcm_copy, rec_pcm_buf, rec_pcm_frames * 2 * 2);
+            memcpy(pcm_copy, rec_pcm_buf, (size_t)rec_pcm_frames * 2 * sizeof(*rec_pcm_buf));
             pcm_num_frames = rec_pcm_frames / 1024;
         }
     }
@@ -497,6 +661,7 @@ static void recorder_stop_recording(void) {
             if(save_aenc) {
                 save_aenc->sample_fmt = AV_SAMPLE_FMT_FLTP;
                 save_aenc->sample_rate = 48000;
+                save_aenc->time_base = (AVRational){1, 48000};
                 save_aenc->ch_layout = (AVChannelLayout)AV_CHANNEL_LAYOUT_STEREO;
                 save_aenc->bit_rate = 192000;
                 if(avcodec_open2(save_aenc, aenc, NULL) < 0) {
@@ -519,40 +684,14 @@ static void recorder_stop_recording(void) {
                     &(AVChannelLayout)AV_CHANNEL_LAYOUT_STEREO, AV_SAMPLE_FMT_FLTP, 48000,
                     &(AVChannelLayout)AV_CHANNEL_LAYOUT_STEREO, AV_SAMPLE_FMT_S16,  48000,
                     0, NULL);
-            if(save_aswr) swr_init(save_aswr);
-        }
-        if(save_aenc && save_aframe && save_aswr) {
-            a_packets = calloc(pcm_num_frames * 2, sizeof(AVPacket*));
-            a_pts_arr = calloc(pcm_num_frames * 2, sizeof(int64_t));
-            for(int i = 0; i < pcm_num_frames; i++) {
-                int16_t* frame_data = pcm_copy + i * (1024 * 2);
-                av_frame_make_writable(save_aframe);
-                uint8_t* in_data[] = { (uint8_t*)frame_data };
-                swr_convert(save_aswr, save_aframe->data, save_aframe->nb_samples,
-                           (const uint8_t**)in_data, 1024);
-                save_aframe->pts = i * 1024;
-                avcodec_send_frame(save_aenc, save_aframe);
-                AVPacket* pkt = av_packet_alloc();
-                while(avcodec_receive_packet(save_aenc, pkt) == 0) {
-                    if(pkt->duration == 0) pkt->duration = 1024;
-                    a_packets[a_count] = pkt;
-                    a_pts_arr[a_count] = pkt->pts;
-                    a_count++;
-                    pkt = av_packet_alloc();
-                }
-                av_packet_free(&pkt);
+            if(save_aswr && swr_init(save_aswr) < 0) {
+                log_warn("Recorder: audio resampler initialization failed");
+                swr_free(&save_aswr);
             }
-            avcodec_send_frame(save_aenc, NULL);
-            AVPacket* pkt2 = av_packet_alloc();
-            while(avcodec_receive_packet(save_aenc, pkt2) == 0) {
-                if(pkt2->duration == 0) pkt2->duration = 1024;
-                a_packets[a_count] = pkt2;
-                a_pts_arr[a_count] = pkt2->pts;
-                a_count++;
-                pkt2 = av_packet_alloc();
-            }
-            av_packet_free(&pkt2);
         }
+        if(save_aenc && save_aframe && save_aswr)
+            recorder_encode_audio(save_aenc, save_aframe, save_aswr, pcm_copy,
+                                  pcm_num_frames, &a_packets, &a_pts_arr, &a_count);
     }
 
     /* ── Mux video + audio into final MP4 ──────────────────────────── */
@@ -569,6 +708,7 @@ static void recorder_stop_recording(void) {
         avcodec_parameters_from_context(vs->codecpar, rec_venc_ctx);
         vs->time_base = rec_venc_ctx->time_base;
 
+        int mux_a_count = a_count;
         AVStream* as = NULL;
         if(a_count > 0 && save_aenc) {
             as = avformat_new_stream(oc, NULL);
@@ -576,7 +716,8 @@ static void recorder_stop_recording(void) {
                 avcodec_parameters_from_context(as->codecpar, save_aenc);
                 as->time_base = save_aenc->time_base;
             } else {
-                a_count = 0;
+                log_warn("Recorder: could not create audio stream; saving video only");
+                mux_a_count = 0;
             }
         }
 
@@ -592,19 +733,25 @@ static void recorder_stop_recording(void) {
         /* Interleave video + audio by PTS */
         int v_written = 0, a_written = 0;
         int64_t v_pts_offset = v_clones[0]->pts;
-        int64_t a_pts_offset = a_count > 0 ? a_pts_arr[0] : 0;
+        int64_t a_pts_offset = mux_a_count > 0 ? a_pts_arr[0] : 0;
+        /* PCM starts when the first capture read completes, which may be
+           seconds after video starts if the audio device opens slowly. */
+        int64_t video_start_us = rec_start_time + av_rescale_q(v_pts_offset, rec_venc_ctx->time_base, AV_TIME_BASE_Q);
+        int64_t audio_lead_us = recorder_audio_lead_us(pcm_start_us, video_start_us);
+        int64_t audio_lead = mux_a_count ? av_rescale_q(audio_lead_us, AV_TIME_BASE_Q, save_aenc->time_base) : 0;
+        log_info("Recorder: PCM start offset %.3fs, captured audio %.3fs", audio_lead_us / 1000000.0, pcm_num_frames * (1024.0 / 48000.0));
 
-        while(v_written < v_count || a_written < a_count) {
+        while(v_written < v_count || a_written < mux_a_count) {
             int use_video = 0;
             if(v_written >= v_count) use_video = 0;
-            else if(a_written >= a_count) use_video = 1;
+            else if(a_written >= mux_a_count) use_video = 1;
             else {
                 int64_t v_abs = av_rescale_q_rnd(
                         v_pts_arr[v_written] - v_pts_offset,
                         rec_venc_ctx->time_base, AV_TIME_BASE_Q, AV_ROUND_NEAR_INF);
                 int64_t a_abs = av_rescale_q_rnd(
-                        a_pts_arr[a_written] - a_pts_offset,
-                        as->time_base, AV_TIME_BASE_Q, AV_ROUND_NEAR_INF);
+                        a_pts_arr[a_written] - a_pts_offset + audio_lead,
+                        save_aenc->time_base, AV_TIME_BASE_Q, AV_ROUND_NEAR_INF);
                 use_video = (v_abs <= a_abs);
             }
 
@@ -624,9 +771,9 @@ static void recorder_stop_recording(void) {
             } else {
                 AVPacket out = {0};
                 av_packet_ref(&out, a_packets[a_written]);
-                out.pts = a_pts_arr[a_written] - a_pts_offset;
+                out.pts = av_rescale_q(a_pts_arr[a_written] - a_pts_offset + audio_lead, save_aenc->time_base, as->time_base);
                 out.dts = out.pts;
-                out.duration = a_packets[a_written]->duration;
+                out.duration = av_rescale_q(a_packets[a_written]->duration, save_aenc->time_base, as->time_base);
                 out.stream_index = 1;
                 if(av_interleaved_write_frame(oc, &out) < 0)
                     log_error("Recorder: av_interleaved_write_frame failed for audio");
@@ -676,7 +823,7 @@ static void* rec_encode_worker_thread(void* arg) {
     (void)arg;
     log_info("Recorder: recording encode thread started");
 
-    while(rec_encode_thread_running || rec_raw_count > 0) {
+    while(1) {
         pthread_mutex_lock(&rec_raw_mutex);
         while(rec_raw_count == 0 && rec_encode_thread_running) {
             pthread_cond_wait(&rec_raw_cond, &rec_raw_mutex);
@@ -690,12 +837,10 @@ static void* rec_encode_worker_thread(void* arg) {
         rec_raw_count--;
         pthread_mutex_unlock(&rec_raw_mutex);
 
-        int cur_w = settings.window_width;
-        int cur_h = settings.window_height;
+        int cur_w = rec_buf_w, cur_h = rec_buf_h;
         unsigned char* pixels = rf.data;
 
-        if(rec_venc_ctx && rec_vframe && rec_vsws
-           && cur_w == rec_buf_w && cur_h == rec_buf_h) {
+        if(rec_venc_ctx && rec_vframe && rec_vsws) {
             uint8_t* src_data[] = { pixels + (cur_h - 1) * cur_w * 4 };
             int src_stride[] = { -cur_w * 4 };
             sws_scale(rec_vsws, (const uint8_t* const*)src_data, src_stride, 0, cur_h,
@@ -709,7 +854,7 @@ static void* rec_encode_worker_thread(void* arg) {
                 log_error("Recorder: recording video encode send failed");
             } else {
                 AVPacket* pkt = av_packet_alloc();
-                while(avcodec_receive_packet(rec_venc_ctx, pkt) == 0) {
+                while(pkt && avcodec_receive_packet(rec_venc_ctx, pkt) == 0) {
                     pkt->duration = 1;
                     pthread_mutex_lock(&rec_vmutex);
                     if(rec_vcount >= rec_vcapacity) {
@@ -756,20 +901,30 @@ static void* audio_capture_thread(void* arg) {
                                  settings.audio_monitor_source[0] ? settings.audio_monitor_source : NULL,
                                  "replay-buffer", &ss, NULL, NULL, &error);
     if(!s) {
-        log_warn("Audio capture unavailable: %s", pa_strerror(error));
+        log_warn("Recorder: audio capture unavailable: %s", pa_strerror(error));
+        audio_report_event(AUDIO_EVENT_CAPTURE_LOST);
         return NULL;
     }
 
     unsigned char read_buf[1024 * 2 * 2];
     const int frame_bytes = sizeof(read_buf);
 
-    while(audio_thread_running) {
-        if(pa_simple_read(s, read_buf, frame_bytes, NULL) < 0)
+    while(audio_is_running()) {
+        if(pa_simple_read(s, read_buf, frame_bytes, &error) < 0) {
+            if(audio_is_running()) {
+                log_warn("Recorder: audio capture read failed: %s", pa_strerror(error));
+                audio_report_event(AUDIO_EVENT_CAPTURE_LOST);
+            }
             break;
+        }
+        /* pa_simple does not supply per-sample timestamps. Approximate the
+           first sample as one block before read completion; server buffering
+           can make this later than the actual capture time. */
+        int64_t chunk_start_us = av_gettime() - (int64_t)1024 * 1000000 / 48000;
 
         /* Write to PCM ring buffer for replay (fast, never blocks) */
-        if(buf_running) {
-            pthread_mutex_lock(&pcm_mutex);
+        pthread_mutex_lock(&pcm_mutex);
+        if(buf_running && pcm_buf && pcm_max_bytes >= frame_bytes) {
             int remaining = pcm_max_bytes - pcm_write_byte;
             if(frame_bytes <= remaining) {
                 memcpy(pcm_buf + pcm_write_byte, read_buf, frame_bytes);
@@ -778,28 +933,41 @@ static void* audio_capture_thread(void* arg) {
                 memcpy(pcm_buf, read_buf + remaining, frame_bytes - remaining);
             }
             pcm_write_byte = (pcm_write_byte + frame_bytes) % pcm_max_bytes;
-            if(pcm_bytes < pcm_max_bytes)
+            if(pcm_bytes <= pcm_max_bytes - frame_bytes)
                 pcm_bytes += frame_bytes;
-            pthread_mutex_unlock(&pcm_mutex);
+            else
+                pcm_bytes = pcm_max_bytes;
         }
+        pthread_mutex_unlock(&pcm_mutex);
 
         /* Write raw PCM to growing buffer for F7 recording */
-        if(rec_running) {
-            pthread_mutex_lock(&rec_pcm_mutex);
-            int needed = (rec_pcm_frames + 1024) * 2 * 2;
-            if(needed > rec_pcm_capacity) {
-                rec_pcm_capacity = needed + 48000 * 2 * 2 * 5;
-                rec_pcm_buf = realloc(rec_pcm_buf, rec_pcm_capacity * 2);
+        pthread_mutex_lock(&rec_pcm_mutex);
+        if(rec_running && rec_pcm_buf && !rec_pcm_truncated) {
+            if(!rec_audio_start_us)
+                rec_audio_start_us = chunk_start_us < rec_start_time ? rec_start_time : chunk_start_us;
+            int needed = rec_pcm_frames <= INT_MAX - 1024 ? rec_pcm_frames + 1024 : INT_MAX;
+            if(needed > rec_pcm_capacity && needed <= INT_MAX - 5 * 48000) {
+                int capacity = needed + 5 * 48000;
+                void* next = (size_t)capacity <= SIZE_MAX / (2 * sizeof(*rec_pcm_buf))
+                    ? realloc(rec_pcm_buf, (size_t)capacity * 2 * sizeof(*rec_pcm_buf)) : NULL;
+                if(next) { rec_pcm_buf = next; rec_pcm_capacity = capacity; }
             }
-            if(rec_pcm_buf) {
-                memcpy(rec_pcm_buf + rec_pcm_frames * 2, read_buf, frame_bytes);
+            if(needed <= rec_pcm_capacity) {
+                memcpy(rec_pcm_buf + (size_t)rec_pcm_frames * 2, read_buf, frame_bytes);
                 rec_pcm_frames += 1024;
+            } else {
+                rec_pcm_truncated = 1;
+                log_warn("Recorder: PCM allocation failed at %d frames; recording audio truncated", rec_pcm_frames);
+                audio_report_event(AUDIO_EVENT_PCM_FULL);
             }
-            pthread_mutex_unlock(&rec_pcm_mutex);
         }
+        pthread_mutex_unlock(&rec_pcm_mutex);
     }
 
     pa_simple_free(s);
+#else
+    log_warn("Recorder: audio capture unavailable (PulseAudio support not built)");
+    audio_report_event(AUDIO_EVENT_CAPTURE_LOST);
 #endif
     return NULL;
 }
@@ -814,7 +982,7 @@ static void* encode_worker_thread(void* arg) {
     (void)arg;
     log_info("Recorder: buffer encode thread started");
 
-    while(encode_thread_running || raw_count > 0) {
+    while(1) {
         pthread_mutex_lock(&raw_mutex);
         while(raw_count == 0 && encode_thread_running) {
             pthread_cond_wait(&raw_cond, &raw_mutex);
@@ -828,11 +996,10 @@ static void* encode_worker_thread(void* arg) {
         raw_count--;
         pthread_mutex_unlock(&raw_mutex);
 
-        int cur_w = settings.window_width;
-        int cur_h = settings.window_height;
+        int cur_w = buf_w, cur_h = buf_h;
         unsigned char* pixels = rf.data;
 
-        if(venc_ctx && vframe && vsws && cur_w == buf_w && cur_h == buf_h) {
+        if(venc_ctx && vframe && vsws) {
             uint8_t* src_data[] = { pixels + (cur_h - 1) * cur_w * 4 };
             int src_stride[] = { -cur_w * 4 };
             sws_scale(vsws, (const uint8_t* const*)src_data, src_stride, 0, cur_h,
@@ -846,7 +1013,7 @@ static void* encode_worker_thread(void* arg) {
                 log_error("Recorder: buffer video encode send failed");
             } else {
                 AVPacket* pkt = av_packet_alloc();
-                while(avcodec_receive_packet(venc_ctx, pkt) == 0) {
+                while(pkt && avcodec_receive_packet(venc_ctx, pkt) == 0) {
                     pkt->duration = 1;
                     vbuf_push(pkt);
                     pkt = av_packet_alloc();
@@ -854,7 +1021,7 @@ static void* encode_worker_thread(void* arg) {
                 av_packet_free(&pkt);
             }
 
-            vbuf_trim((double)settings.replay_duration);
+            vbuf_trim(buf_replay_duration);
         }
 
         free(pixels);
@@ -917,8 +1084,17 @@ void recorder_buffer_start(void) {
         return;
     }
 
+    buf_codecpar = avcodec_parameters_alloc();
+    if(!buf_codecpar || avcodec_parameters_from_context(buf_codecpar, venc_ctx) < 0) {
+        log_error("Recorder: could not snapshot replay encoder parameters");
+        recorder_free_buffer_resources();
+        return;
+    }
+    buf_time_base = venc_ctx->time_base;
+    buf_replay_duration = settings.replay_duration;
+
     vframe = av_frame_alloc();
-    if(!vframe) { log_error("Recorder: failed to alloc video frame"); avcodec_free_context(&venc_ctx); venc_ctx = NULL; return; }
+    if(!vframe) { log_error("Recorder: failed to alloc video frame"); avcodec_free_context(&venc_ctx); venc_ctx = NULL; avcodec_parameters_free(&buf_codecpar); return; }
     vframe->format = AV_PIX_FMT_YUV420P;
     vframe->width = w;
     vframe->height = h;
@@ -926,6 +1102,7 @@ void recorder_buffer_start(void) {
         log_error("Recorder: failed to alloc video frame buffer");
         av_frame_free(&vframe); vframe = NULL;
         avcodec_free_context(&venc_ctx); venc_ctx = NULL;
+        avcodec_parameters_free(&buf_codecpar);
         return;
     }
 
@@ -935,6 +1112,7 @@ void recorder_buffer_start(void) {
         log_error("Recorder: failed to alloc SWScale");
         av_frame_free(&vframe); vframe = NULL;
         avcodec_free_context(&venc_ctx); venc_ctx = NULL;
+        avcodec_parameters_free(&buf_codecpar);
         return;
     }
     log_info("Recorder: video encoder ready for buffer (%dx%d)", w, h);
@@ -946,10 +1124,16 @@ void recorder_buffer_start(void) {
         sws_freeContext(vsws); vsws = NULL;
         av_frame_free(&vframe); vframe = NULL;
         avcodec_free_context(&venc_ctx); venc_ctx = NULL;
+        avcodec_parameters_free(&buf_codecpar);
         return;
     }
 
     /* Allocate PCM ring buffer (S16LE, 48kHz, stereo) */
+    if(settings.replay_duration < 0 || settings.replay_duration > INT_MAX / 192000 - 5) {
+        log_error("Recorder: invalid replay duration");
+        recorder_free_buffer_resources();
+        return;
+    }
     pcm_max_bytes = (settings.replay_duration + 5) * 48000 * 2 * 2;
     pcm_buf = calloc(pcm_max_bytes, 1);
     if(!pcm_buf) {
@@ -958,6 +1142,7 @@ void recorder_buffer_start(void) {
         sws_freeContext(vsws); vsws = NULL;
         av_frame_free(&vframe); vframe = NULL;
         avcodec_free_context(&venc_ctx); venc_ctx = NULL;
+        avcodec_parameters_free(&buf_codecpar);
         return;
     }
 
@@ -971,10 +1156,11 @@ void recorder_buffer_start(void) {
 
     /* Start audio capture thread if not already running */
     if(!audio_thread_running) {
-        audio_thread_running = 1;
+        audio_prepare_start();
+        audio_set_running(1);
         if(pthread_create(&audio_thread, NULL, audio_capture_thread, NULL) != 0) {
             log_warn("Recorder: failed to start audio capture thread — video-only buffer");
-            audio_thread_running = 0;
+            audio_set_running(0);
         }
     }
 
@@ -984,17 +1170,25 @@ void recorder_buffer_start(void) {
     if(pthread_create(&encode_thread, NULL, encode_worker_thread, NULL) != 0) {
         log_error("Recorder: failed to start buffer encode worker thread");
         encode_thread_running = 0;
+        if(audio_thread_running && !rec_running) {
+            audio_set_running(0);
+            pthread_join(audio_thread, NULL);
+        }
+        recorder_free_buffer_resources();
+        chat_add(0, 0xFF4444, "Replay buffer failed: could not start encode thread");
         return;
     }
 
-    buf_running = 1;
+    buf_set_running(1);
     last_capture_time = 0;
+    if(audio_thread_running && audio_has_failed())
+        chat_add(0, 0xFFFF44, "Audio capture unavailable; stop both recorder modes to retry");
     log_info("Recorder: replay buffer started");
 }
 
 void recorder_buffer_stop(void) {
     if(!buf_running) return;
-    buf_running = 0;
+    buf_set_running(0);
 
     log_info("Recorder: stopping replay buffer");
 
@@ -1009,15 +1203,16 @@ void recorder_buffer_stop(void) {
 
     /* Stop audio thread only if recording is not still active */
     if(audio_thread_running && !rec_running) {
-        audio_thread_running = 0;
+        audio_set_running(0);
         pthread_join(audio_thread, NULL);
+        audio_notify_events();
     }
 
     /* Drain video encoder */
     if(venc_ctx) {
         avcodec_send_frame(venc_ctx, NULL);
         AVPacket* pkt = av_packet_alloc();
-        while(avcodec_receive_packet(venc_ctx, pkt) == 0) {
+        while(pkt && avcodec_receive_packet(venc_ctx, pkt) == 0) {
             pkt->duration = 1;
             vbuf_push(pkt);
             pkt = av_packet_alloc();
@@ -1028,7 +1223,7 @@ void recorder_buffer_stop(void) {
     /* Free circular buffers */
     pthread_mutex_lock(&vbuf_mutex);
     for(int i = 0; i < vbuf_count; i++) {
-        int idx = oldest_idx(vbuf_write_idx, vbuf_count);
+        int idx = (oldest_idx(vbuf_write_idx, vbuf_count) + i) % MAX_PACKETS;
         if(vbuf[idx]) {
             av_packet_free(&vbuf[idx]);
             vbuf[idx] = NULL;
@@ -1050,6 +1245,7 @@ void recorder_buffer_stop(void) {
     if(vframe) { av_frame_free(&vframe); vframe = NULL; }
     if(venc_ctx) { avcodec_free_context(&venc_ctx); venc_ctx = NULL; }
     raw_head = raw_tail = raw_count = 0;
+    avcodec_parameters_free(&buf_codecpar);
 
     log_info("Recorder: replay buffer stopped");
 }
@@ -1064,7 +1260,7 @@ void recorder_toggle_buffer(void) {
 /* ── Replay save (F8) — mux from RAM buffers ────────────────────────── */
 
 int recorder_save_replay(void) {
-    if(!buf_running && vbuf_count == 0) {
+    if(!buf_running || !buf_codecpar) {
         log_warn("Recorder: no replay buffer data to save");
         return 0;
     }
@@ -1109,7 +1305,7 @@ int recorder_save_replay(void) {
     int pcm_num_frames = 0;
     pthread_mutex_lock(&pcm_mutex);
     if(pcm_bytes > 0) {
-        int oldest_byte = (pcm_write_byte - pcm_bytes + pcm_max_bytes) % pcm_max_bytes;
+        int oldest_byte = (int)(((int64_t)pcm_write_byte - pcm_bytes + pcm_max_bytes) % pcm_max_bytes);
         pcm_copy = malloc(pcm_bytes);
         if(pcm_copy) {
             int first_part = pcm_max_bytes - oldest_byte;
@@ -1137,6 +1333,7 @@ int recorder_save_replay(void) {
             if(save_aenc) {
                 save_aenc->sample_fmt = AV_SAMPLE_FMT_FLTP;
                 save_aenc->sample_rate = 48000;
+                save_aenc->time_base = (AVRational){1, 48000};
                 save_aenc->ch_layout = (AVChannelLayout)AV_CHANNEL_LAYOUT_STEREO;
                 save_aenc->bit_rate = 192000;
                 if(avcodec_open2(save_aenc, aenc, NULL) < 0) {
@@ -1162,46 +1359,15 @@ int recorder_save_replay(void) {
                     &(AVChannelLayout)AV_CHANNEL_LAYOUT_STEREO, AV_SAMPLE_FMT_FLTP, 48000,
                     &(AVChannelLayout)AV_CHANNEL_LAYOUT_STEREO, AV_SAMPLE_FMT_S16,  48000,
                     0, NULL);
-            if(save_aswr) swr_init(save_aswr);
+            if(save_aswr && swr_init(save_aswr) < 0) {
+                log_warn("Recorder: audio resampler initialization failed");
+                swr_free(&save_aswr);
+            }
         }
 
-        if(save_aenc && save_aframe && save_aswr) {
-            a_packets = calloc(pcm_num_frames * 2, sizeof(AVPacket*));
-            a_pts_arr = calloc(pcm_num_frames * 2, sizeof(int64_t));
-
-            for(int i = 0; i < pcm_num_frames; i++) {
-                int16_t* frame_data = pcm_copy + i * (1024 * 2);
-
-                av_frame_make_writable(save_aframe);
-                uint8_t* in_data[] = { (uint8_t*)frame_data };
-                swr_convert(save_aswr, save_aframe->data, save_aframe->nb_samples,
-                           (const uint8_t**)in_data, 1024);
-                save_aframe->pts = i * 1024;
-
-                avcodec_send_frame(save_aenc, save_aframe);
-                AVPacket* pkt = av_packet_alloc();
-                while(avcodec_receive_packet(save_aenc, pkt) == 0) {
-                    if(pkt->duration == 0) pkt->duration = 1024;
-                    a_packets[a_count] = pkt;
-                    a_pts_arr[a_count] = pkt->pts;
-                    a_count++;
-                    pkt = av_packet_alloc();
-                }
-                av_packet_free(&pkt);
-            }
-
-            /* Drain encoder */
-            avcodec_send_frame(save_aenc, NULL);
-            AVPacket* pkt2 = av_packet_alloc();
-            while(avcodec_receive_packet(save_aenc, pkt2) == 0) {
-                if(pkt2->duration == 0) pkt2->duration = 1024;
-                a_packets[a_count] = pkt2;
-                a_pts_arr[a_count] = pkt2->pts;
-                a_count++;
-                pkt2 = av_packet_alloc();
-            }
-            av_packet_free(&pkt2);
-        }
+        if(save_aenc && save_aframe && save_aswr)
+            recorder_encode_audio(save_aenc, save_aframe, save_aswr, pcm_copy,
+                                  pcm_num_frames, &a_packets, &a_pts_arr, &a_count);
     }
 
     /* Generate filename */
@@ -1233,8 +1399,8 @@ int recorder_save_replay(void) {
 
     /* Add video stream */
     AVStream* vs = avformat_new_stream(oc, NULL);
-    if(!vs) {
-        log_error("Recorder: avformat_new_stream failed for video");
+    if(!vs || avcodec_parameters_copy(vs->codecpar, buf_codecpar) < 0) {
+        log_error("Recorder: could not create replay video stream");
         avformat_free_context(oc);
         free(v_pts_arr);
         for(int i = 0; i < v_count; i++) av_packet_free(&v_clones[i]);
@@ -1248,16 +1414,19 @@ int recorder_save_replay(void) {
         if(save_aenc) avcodec_free_context(&save_aenc);
         return 0;
     }
-    avcodec_parameters_from_context(vs->codecpar, venc_ctx);
-    vs->time_base = venc_ctx->time_base;
+    vs->time_base = buf_time_base;
 
     /* Add audio stream if available */
+    int mux_a_count = a_count;
     AVStream* as = NULL;
     if(a_count > 0 && save_aenc) {
         as = avformat_new_stream(oc, NULL);
         if(as) {
             avcodec_parameters_from_context(as->codecpar, save_aenc);
             as->time_base = save_aenc->time_base;
+        } else {
+            log_warn("Recorder: could not create replay audio stream; saving video only");
+            mux_a_count = 0;
         }
     }
 
@@ -1297,19 +1466,19 @@ int recorder_save_replay(void) {
     /* Interleave video + audio by PTS */
     int v_written = 0, a_written = 0;
     int64_t v_pts_offset = v_clones[0]->pts;
-    int64_t a_pts_offset = a_count > 0 ? a_pts_arr[0] : 0;
+    int64_t a_pts_offset = mux_a_count > 0 ? a_pts_arr[0] : 0;
 
-    while(v_written < v_count || a_written < a_count) {
+    while(v_written < v_count || a_written < mux_a_count) {
         int use_video = 0;
         if(v_written >= v_count) use_video = 0;
-        else if(a_written >= a_count) use_video = 1;
+        else if(a_written >= mux_a_count) use_video = 1;
         else {
             int64_t v_abs = av_rescale_q_rnd(
                     v_pts_arr[v_written] - v_pts_offset,
-                    venc_ctx->time_base, AV_TIME_BASE_Q, AV_ROUND_NEAR_INF);
+                    buf_time_base, AV_TIME_BASE_Q, AV_ROUND_NEAR_INF);
             int64_t a_abs = av_rescale_q_rnd(
                     a_pts_arr[a_written] - a_pts_offset,
-                    as->time_base, AV_TIME_BASE_Q, AV_ROUND_NEAR_INF);
+                    save_aenc->time_base, AV_TIME_BASE_Q, AV_ROUND_NEAR_INF);
             use_video = (v_abs <= a_abs);
         }
 
@@ -1318,10 +1487,10 @@ int recorder_save_replay(void) {
             av_packet_ref(&out, v_clones[v_written]);
             out.pts = av_rescale_q_rnd(
                     v_pts_arr[v_written] - v_pts_offset,
-                    venc_ctx->time_base, vs->time_base, AV_ROUND_NEAR_INF);
+                    buf_time_base, vs->time_base, AV_ROUND_NEAR_INF);
             out.dts = out.pts;
             out.duration = av_rescale_q(
-                    v_clones[v_written]->duration, venc_ctx->time_base, vs->time_base);
+                    v_clones[v_written]->duration, buf_time_base, vs->time_base);
             out.stream_index = 0;
             int ret = av_interleaved_write_frame(oc, &out);
             if(ret < 0) {
@@ -1331,9 +1500,9 @@ int recorder_save_replay(void) {
         } else {
             AVPacket out = {0};
             av_packet_ref(&out, a_packets[a_written]);
-            out.pts = a_pts_arr[a_written] - a_pts_offset;
+            out.pts = av_rescale_q(a_pts_arr[a_written] - a_pts_offset, save_aenc->time_base, as->time_base);
             out.dts = out.pts;
-            out.duration = a_packets[a_written]->duration;
+            out.duration = av_rescale_q(a_packets[a_written]->duration, save_aenc->time_base, as->time_base);
             out.stream_index = 1;
             int ret = av_interleaved_write_frame(oc, &out);
             if(ret < 0) {
@@ -1368,83 +1537,68 @@ int recorder_save_replay(void) {
    ══════════════════════════════════════════════════════════════════════ */
 
 void recorder_capture_frame(void) {
-    if(!rec_running && !buf_running)
-        return;
-
+    audio_notify_events();
+    if(!rec_running && !buf_running) return;
+    int cur_w = settings.window_width, cur_h = settings.window_height;
+    if(cur_w <= 0 || cur_h <= 0) return; /* minimized: wait for drawable */
+    /* Encoders and queued frames have fixed dimensions. Stop on the main
+       thread before accepting a differently sized frame; do not read mutable
+       window settings from a worker. Replay stop discards its ring. */
+    if(rec_running && (cur_w != rec_buf_w || cur_h != rec_buf_h)) {
+        log_warn("Recorder: window resized; stopping recording");
+        chat_add(0, 0xFFFF44, "Recording stopped: window size changed");
+        recorder_stop_recording();
+    }
+    if(buf_running && (cur_w != buf_w || cur_h != buf_h)) {
+        log_warn("Recorder: window resized; stopping and clearing replay buffer");
+        chat_add(0, 0xFFFF44, "Replay buffer cleared: window size changed");
+        recorder_buffer_stop();
+    }
+    if(!rec_running && !buf_running) return;
     double now = window_time();
-    double frame_duration = 1.0 / target_fps;
-
-    if(now - last_capture_time < frame_duration * 0.9)
-        return;
-
+    if(target_fps <= 0 || now - last_capture_time < 0.9 / target_fps) return;
     last_capture_time = now;
-
-    int cur_w = settings.window_width;
-    int cur_h = settings.window_height;
-    if(cur_w <= 0 || cur_h <= 0)
+    if(cur_w > INT_MAX / 4 || cur_h > (INT_MAX / 4) / cur_w) {
+        log_warn("Recorder: capture dimensions too large");
         return;
-
-    /* Update shared w/h if stale */
-    if(w != cur_w || h != cur_h) {
-        if(rec_running || buf_running)
-            log_info("Recorder: capture dimensions updated %dx%d -> %dx%d", w, h, cur_w, cur_h);
-        w = cur_w;
-        h = cur_h;
     }
-
     int buf_size = cur_w * cur_h * 4;
-
-    /* Push to recording pipeline (independent) */
-    if(rec_running && rec_encode_thread_running) {
-        unsigned char* rec_pixels = malloc(buf_size);
-        if(rec_pixels) {
-            glReadBuffer(GL_BACK);
-            glReadPixels(0, 0, cur_w, cur_h, GL_RGBA, GL_UNSIGNED_BYTE, rec_pixels);
-
-            RawFrame rf;
-            rf.data = rec_pixels;
-            rf.size = buf_size;
-            rf.capture_time_us = av_gettime();
-
-            pthread_mutex_lock(&rec_raw_mutex);
-            if(rec_raw_count < MAX_RAW_FRAMES) {
-                rec_raw_frames[rec_raw_tail] = rf;
-                rec_raw_tail = (rec_raw_tail + 1) % MAX_RAW_FRAMES;
-                rec_raw_count++;
-                pthread_cond_signal(&rec_raw_cond);
-                pthread_mutex_unlock(&rec_raw_mutex);
-                rec_frames++;
-            } else {
-                pthread_mutex_unlock(&rec_raw_mutex);
-                free(rec_pixels);
-            }
-        }
+    int capture_rec = rec_running && rec_encode_thread_running;
+    int capture_buf = buf_running && encode_thread_running;
+    if(!capture_rec && !capture_buf) return;
+    unsigned char* pixels = malloc((size_t)buf_size);
+    if(!pixels) return;
+    glReadBuffer(GL_BACK);
+    glReadPixels(0, 0, cur_w, cur_h, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    int64_t captured = av_gettime();
+    unsigned char* rec_pixels = capture_rec ? pixels : NULL;
+    unsigned char* buf_pixels = capture_buf ? pixels : NULL;
+    if(capture_rec && capture_buf) {
+        buf_pixels = malloc((size_t)buf_size);
+        if(buf_pixels) memcpy(buf_pixels, pixels, (size_t)buf_size);
     }
-
-    /* Push to buffer pipeline (independent) */
-    if(buf_running && encode_thread_running) {
-        unsigned char* buf_pixels = malloc(buf_size);
-        if(buf_pixels) {
-            glReadBuffer(GL_BACK);
-            glReadPixels(0, 0, cur_w, cur_h, GL_RGBA, GL_UNSIGNED_BYTE, buf_pixels);
-
-            RawFrame rf;
-            rf.data = buf_pixels;
-            rf.size = buf_size;
-            rf.capture_time_us = av_gettime();
-
-            pthread_mutex_lock(&raw_mutex);
-            if(raw_count < MAX_RAW_FRAMES) {
-                raw_frames[raw_tail] = rf;
-                raw_tail = (raw_tail + 1) % MAX_RAW_FRAMES;
-                raw_count++;
-                pthread_cond_signal(&raw_cond);
-                pthread_mutex_unlock(&raw_mutex);
-            } else {
-                pthread_mutex_unlock(&raw_mutex);
-                free(buf_pixels);
-            }
-        }
+    if(rec_pixels) {
+        RawFrame rf = {rec_pixels, buf_size, captured};
+        pthread_mutex_lock(&rec_raw_mutex);
+        if(rec_raw_count < MAX_RAW_FRAMES) {
+            rec_raw_frames[rec_raw_tail] = rf;
+            rec_raw_tail = (rec_raw_tail + 1) % MAX_RAW_FRAMES;
+            rec_raw_count++;
+            pthread_cond_signal(&rec_raw_cond);
+            rec_frames++;
+        } else free(rec_pixels);
+        pthread_mutex_unlock(&rec_raw_mutex);
+    }
+    if(buf_pixels) {
+        RawFrame rf = {buf_pixels, buf_size, captured};
+        pthread_mutex_lock(&raw_mutex);
+        if(raw_count < MAX_RAW_FRAMES) {
+            raw_frames[raw_tail] = rf;
+            raw_tail = (raw_tail + 1) % MAX_RAW_FRAMES;
+            raw_count++;
+            pthread_cond_signal(&raw_cond);
+        } else free(buf_pixels);
+        pthread_mutex_unlock(&raw_mutex);
     }
 }
 

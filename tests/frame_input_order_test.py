@@ -49,7 +49,7 @@ def body_after(src, signature, start=0):
 
 # ── 1. the loop, in the shipped order ────────────────────────────────────────
 loop = main_src[main_src.index('        while(!window_closed()) {'):]
-loop = loop[:loop.index('fps = 1.0F / dt;')]
+loop = loop[:loop.index('fps = dt > 0.0')]
 
 order = [
     ('frame-cap wait', 'frame_pace_wait('),

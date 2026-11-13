@@ -29,14 +29,12 @@
 #include "hud.h"
 #include "config.h"
 #include "demo.h"
+#include "network.h"
 
 int cameracontroller_bodyview_mode = 0;
 int cameracontroller_bodyview_player = 0;
 float cameracontroller_bodyview_zoom = 0.0F;
 
-// Smooth crouch interpolation for local player
-static float crouch_offset = 0.0F;
-static float target_crouch_offset = 0.0F;
 /* Camera-position offset while crouching (crouch_instant mode): the
    collision state changes instantly (server parity), this eases only
    the camera toward the new height. */
@@ -90,18 +88,25 @@ void cameracontroller_land_dip(float strength) {
 static float cam_bob_phase = 0.0F;
 static float cam_bob_strength = 0.0F;
 
-/* adaptive correction-blend decay rate (network.c) */
-extern float network_correction_rate(void);
-
 
 float cameracontroller_death_velocity_x, cameracontroller_death_velocity_y, cameracontroller_death_velocity_z;
 
 void cameracontroller_death_init(int player, float x, float y, float z) {
 	camera_mode = CAMERAMODE_DEATH;
-	float len = len3D(camera_x - x, camera_y - y, camera_z - z);
-	cameracontroller_death_velocity_x = (camera_x - x) / len * 3;
-	cameracontroller_death_velocity_y = (camera_y - y) / len * 3;
-	cameracontroller_death_velocity_z = (camera_z - z) / len * 3;
+	float dx = camera_x - x, dy = camera_y - y, dz = camera_z - z;
+	float len = hypotf(hypotf(dx, dy), dz);
+	if(isfinite(len) && len > 0.0001F) {
+		cameracontroller_death_velocity_x = dx / len * 3.0F;
+		cameracontroller_death_velocity_y = dy / len * 3.0F;
+		cameracontroller_death_velocity_z = dz / len * 3.0F;
+	} else {
+		cameracontroller_death_velocity_x = 0.0F;
+		cameracontroller_death_velocity_y = 0.0F;
+		cameracontroller_death_velocity_z = 0.0F;
+	}
+	camera_vx = cameracontroller_death_velocity_x;
+	camera_vy = cameracontroller_death_velocity_y;
+	camera_vz = cameracontroller_death_velocity_z;
 
 	cameracontroller_bodyview_player = player;
 	cameracontroller_bodyview_zoom = 0.0F;
@@ -137,6 +142,9 @@ void cameracontroller_death(float dt) {
 			camera_mode = CAMERAMODE_BODYVIEW;
 		}
 	}
+	camera_vx = cameracontroller_death_velocity_x;
+	camera_vy = cameracontroller_death_velocity_y;
+	camera_vz = cameracontroller_death_velocity_z;
 }
 
 void cameracontroller_death_render() {
@@ -148,6 +156,33 @@ void cameracontroller_death_render() {
 }
 
 float last_cy;
+
+/* The collision transition must be a complete, one-time change, independent
+   of frame rate. Optional smoothing is confined to the rendered camera. */
+static void cameracontroller_update_crouch(struct Player* p, int pressed) {
+	if(!pressed && p->input.keys.crouch) {
+		float old_eye = p->physics.eye.y;
+		if(player_uncrouch(p)) {
+			p->input.keys.crouch = 0;
+			if(settings.crouch_instant) {
+				crouch_cam_offset += old_eye - p->physics.eye.y;
+				player_prev_snap(local_player_id);
+			}
+		}
+	} else if(pressed && !p->input.keys.crouch) {
+		if(!p->physics.airborne) {
+			p->pos.y -= 0.9F;
+			p->physics.eye.y -= 0.9F;
+			last_cy -= 0.9F;
+			if(settings.crouch_instant) {
+				crouch_cam_offset += 0.9F;
+				player_prev_snap(local_player_id);
+			}
+		}
+		p->input.keys.crouch = 1;
+	}
+}
+
 void cameracontroller_fps(float dt) {
 	players[local_player_id].connected = 1;
 	players[local_player_id].alive = 1;
@@ -194,81 +229,12 @@ void cameracontroller_fps(float dt) {
 
 	last_cy = players[local_player_id].physics.eye.y - players[local_player_id].physics.velocity.y * 0.4F;
 
-	if(chat_input_mode == CHAT_NO_INPUT && hud_active->render_world) {
+	if(chat_input_mode == CHAT_NO_INPUT && hud_active && hud_active->render_world) {
 		players[local_player_id].input.keys.up = window_key_down(WINDOW_KEY_UP);
 		players[local_player_id].input.keys.down = window_key_down(WINDOW_KEY_DOWN);
 		players[local_player_id].input.keys.left = window_key_down(WINDOW_KEY_LEFT);
 		players[local_player_id].input.keys.right = window_key_down(WINDOW_KEY_RIGHT);
-		if(players[local_player_id].input.keys.crouch && !window_key_down(WINDOW_KEY_CROUCH)
-		   && player_uncrouch(&players[local_player_id])) {
-			players[local_player_id].input.keys.crouch = 0;
-			if(settings.crouch_instant) {
-				/* player_uncrouch raised the feet instantly (server parity);
-				   ease only the camera up. */
-				if(settings.disable_dynamic_fov)
-					crouch_cam_offset = 0.0F;
-				else
-					crouch_cam_offset -= 0.9F;
-				player_prev_snap(local_player_id);
-			}
-		}
-
-		if(settings.crouch_instant) {
-			/* Collision state changes instantly with the key.  Only shift the
-			   feet when GROUNDED: mid-air crouch must merely switch the
-			   collision box to the shorter height.  The old code moved the
-			   feet by 0.9 unconditionally, so spamming crouch/uncrouch in
-			   mid-air teleported the player downward -- usable to accelerate
-			   falls and reduce fall damage. */
-			if(window_key_down(WINDOW_KEY_CROUCH)
-			   && !players[local_player_id].input.keys.crouch
-			   && !players[local_player_id].physics.airborne) {
-				players[local_player_id].pos.y -= 0.9F;
-				players[local_player_id].physics.eye.y -= 0.9F;
-				last_cy -= 0.9F;
-				if(settings.disable_dynamic_fov)
-					crouch_cam_offset = 0.0F;
-				else
-					crouch_cam_offset += 0.9F;
-				player_prev_snap(local_player_id);
-			}
-			if(window_key_down(WINDOW_KEY_CROUCH))
-				players[local_player_id].input.keys.crouch = 1;
-		} else {
-		if(window_key_down(WINDOW_KEY_CROUCH)) {
-			// Smooth crouch transition with interpolation
-			target_crouch_offset = 0.9F;
-		} else {
-			target_crouch_offset = 0.0F;
-		}
-
-		if(settings.disable_dynamic_fov) {
-			crouch_offset = target_crouch_offset;
-		} else {
-			// Quick smooth crouch transition (~100ms)
-			float crouch_lerp_speed = 40.0F * dt;
-			crouch_offset = crouch_offset + (target_crouch_offset - crouch_offset) * fminf(crouch_lerp_speed, 1.0F);
-		}
-
-		// Apply smooth crouch offset to player position and eye
-		if(window_key_down(WINDOW_KEY_CROUCH)) {
-			// following if-statement disables smooth crouching on local player
-			if(!players[local_player_id].input.keys.crouch && !players[local_player_id].physics.airborne) {
-				players[local_player_id].pos.y -= crouch_offset;
-				players[local_player_id].physics.eye.y -= crouch_offset;
-				last_cy -= crouch_offset;
-			}
-			players[local_player_id].input.keys.crouch = 1;
-		} else {
-			// Uncrouching - raise back up smoothly
-			if(players[local_player_id].input.keys.crouch && crouch_offset > 0.01F) {
-				// Check if we can uncrouch
-				if(player_uncrouch(&players[local_player_id])) {
-					players[local_player_id].input.keys.crouch = 0;
-				}
-			}
-		}
-		}
+		cameracontroller_update_crouch(&players[local_player_id], window_key_down(WINDOW_KEY_CROUCH));
 
 		/* Crouch and sprint are mutually exclusive. This is especially
 		   important for touch/controller movement, where the virtual stick can
@@ -297,7 +263,7 @@ void cameracontroller_fps(float dt) {
 	cam_land_dip *= expf(-dt * 7.5F);
 	cam_shake_value *= expf(-dt * 5.0F);
 	if(crouch_cam_offset != 0.0F) {
-		crouch_cam_offset += (0.0F - crouch_cam_offset) * fminf(40.0F * dt, 1.0F);
+		crouch_cam_offset *= expf(-40.0F * fmaxf(dt, 0.0F));
 		if(fabsf(crouch_cam_offset) < 0.001F)
 			crouch_cam_offset = 0.0F;
 	}
@@ -361,11 +327,6 @@ void cameracontroller_fps(float dt) {
 
 	if(players[local_player_id].input.keys.sprint && chat_input_mode == CHAT_NO_INPUT) {
 		players[local_player_id].item_disabled = window_time();
-	} else {
-		if(window_time() - players[local_player_id].item_disabled < 0.4F && !players[local_player_id].items_show) {
-			// players[local_player_id].items_show_start = window_time();
-			// players[local_player_id].items_show = 1;
-		}
 	}
 
 	players[local_player_id].input.buttons.lmb = button_map[0];
@@ -382,7 +343,8 @@ void cameracontroller_fps(float dt) {
 			players[local_player_id].input.buttons.rmb_start = window_time();
 	}
 
-	if(chat_input_mode != CHAT_NO_INPUT || !hud_active->render_world) {
+	if(chat_input_mode != CHAT_NO_INPUT || !hud_active || !hud_active->render_world) {
+		/* Bit 5 is crouch (see Player.input.keys); preserve collision state. */
 		players[local_player_id].input.keys.packed &= 0b00100000;
 		players[local_player_id].input.buttons.packed = 0;
 	}
@@ -411,7 +373,11 @@ void cameracontroller_fps(float dt) {
 		players[local_player_id].orientation.y = cos(camera_rot_y);
 		players[local_player_id].orientation.z = cos(camera_rot_x) * sin(camera_rot_y);
 	} else {
-		float len = sqrt(lx * lx + ly * ly + lz * lz);
+		float len = sqrtf(lx * lx + ly * ly + lz * lz);
+		if(!isfinite(len) || len < 0.0001F) {
+			camera_vector_from_angles(camera_rot_x, camera_rot_y, &lx, &ly, &lz);
+			len = 1.0F;
+		}
 		players[local_player_id].orientation.x = lx / len;
 		players[local_player_id].orientation.y = ly / len;
 		players[local_player_id].orientation.z = lz / len;
@@ -772,9 +738,14 @@ void cameracontroller_spectator_render() {
 	   && players[cameracontroller_bodyview_player].alive) {
 		struct Player* p = &players[cameracontroller_bodyview_player];
 		float l = len3D(p->orientation_smooth.x, p->orientation_smooth.y, p->orientation_smooth.z);
-		float ox = p->orientation_smooth.x / l;
-		float oy = p->orientation_smooth.y / l;
-		float oz = p->orientation_smooth.z / l;
+		float ox, oy, oz;
+		if(isfinite(l) && l > 0.0001F) {
+			ox = p->orientation_smooth.x / l;
+			oy = p->orientation_smooth.y / l;
+			oz = p->orientation_smooth.z / l;
+		} else {
+			camera_vector_from_angles(camera_rot_x, camera_rot_y, &ox, &oy, &oz);
+		}
 
 		matrix_lookAt(matrix_view, camera_x, camera_y, camera_z, camera_x + ox, camera_y + oy, camera_z + oz, 0.0F,
 					  1.0F, 0.0F);
@@ -851,33 +822,29 @@ void cameracontroller_bodyview(float dt) {
 	AABB camera = {0};
 	aabb_set_size(&camera, 0.4F, 0.4F, 0.4F);
 
-	float k;
+	const struct Player* target = &players[cameracontroller_bodyview_player];
+	const double fx = sin(camera_rot_x) * sin(camera_rot_y);
+	const double fy = cos(camera_rot_y);
+	const double fz = cos(camera_rot_x) * sin(camera_rot_y);
+	const float height = player_height2(target);
 	float traverse_lengths[2] = {-1, -1};
-	for(k = 0.0F; k < 5.0F; k += 0.05F) {
-		// early exit: both forward and backward traverse lengths found
+	for(float k = 0.0F; k < 5.0F; k += 0.05F) {
 		if(traverse_lengths[0] >= 0 && traverse_lengths[1] >= 0)
 			break;
-		// Validate cameracontroller_bodyview_player before each access
-		if(cameracontroller_bodyview_player >= PLAYERS_MAX || cameracontroller_bodyview_player < 0) {
-			break;
+		if(traverse_lengths[0] < 0) {
+			aabb_set_center(&camera, target->pos.x - fx * k,
+			                target->pos.y - fy * k + height, target->pos.z - fz * k);
+			if(aabb_intersection_terrain(&camera, 0))
+				traverse_lengths[0] = fmax(k - 0.1F, 0);
 		}
-		aabb_set_center(&camera,
-						players[cameracontroller_bodyview_player].pos.x - sin(camera_rot_x) * sin(camera_rot_y) * k,
-						players[cameracontroller_bodyview_player].pos.y - cos(camera_rot_y) * k
-							+ player_height2(&players[cameracontroller_bodyview_player]),
-						players[cameracontroller_bodyview_player].pos.z - cos(camera_rot_x) * sin(camera_rot_y) * k);
-		if(aabb_intersection_terrain(&camera, 0) && traverse_lengths[0] < 0) {
-			traverse_lengths[0] = fmax(k - 0.1F, 0);
-		}
-		aabb_set_center(&camera,
-						players[cameracontroller_bodyview_player].pos.x + sin(camera_rot_x) * sin(camera_rot_y) * k,
-						players[cameracontroller_bodyview_player].pos.y + cos(camera_rot_y) * k
-							+ player_height2(&players[cameracontroller_bodyview_player]),
-						players[cameracontroller_bodyview_player].pos.z + cos(camera_rot_x) * sin(camera_rot_y) * k);
-		if(!aabb_intersection_terrain(&camera, 0) && traverse_lengths[1] < 0) {
-			traverse_lengths[1] = fmax(k - 0.1F, 0);
+		if(traverse_lengths[1] < 0) {
+			aabb_set_center(&camera, target->pos.x + fx * k,
+			                target->pos.y + fy * k + height, target->pos.z + fz * k);
+			if(!aabb_intersection_terrain(&camera, 0))
+				traverse_lengths[1] = fmax(k - 0.1F, 0);
 		}
 	}
+
 	if(traverse_lengths[0] < 0)
 		traverse_lengths[0] = 5.0F;
 	if(traverse_lengths[1] < 0)
@@ -924,9 +891,14 @@ void cameracontroller_bodyview_render() {
 	   && players[cameracontroller_bodyview_player].alive) {
 		struct Player* p = &players[cameracontroller_bodyview_player];
 		float l = sqrt(distance3D(p->orientation_smooth.x, p->orientation_smooth.y, p->orientation_smooth.z, 0, 0, 0));
-		float ox = p->orientation_smooth.x / l;
-		float oy = p->orientation_smooth.y / l;
-		float oz = p->orientation_smooth.z / l;
+		float ox, oy, oz;
+		if(isfinite(l) && l > 0.0001F) {
+			ox = p->orientation_smooth.x / l;
+			oy = p->orientation_smooth.y / l;
+			oz = p->orientation_smooth.z / l;
+		} else {
+			camera_vector_from_angles(camera_rot_x, camera_rot_y, &ox, &oy, &oz);
+		}
 
 		matrix_lookAt(matrix_view, camera_x, camera_y, camera_z, camera_x + ox, camera_y + oy, camera_z + oz, 0.0F,
 					  1.0F, 0.0F);
@@ -956,9 +928,6 @@ void cameracontroller_selection(float dt) {
 	camera_vx = 0.0F;
 	camera_vy = 0.0F;
 	camera_vz = 0.0F;
-
-	matrix_rotate(matrix_view, 90.0F, 1.0F, 0.0F, 0.0F);
-	matrix_translate(matrix_view, -camera_x, -camera_y, -camera_z);
 }
 
 void cameracontroller_selection_render() {

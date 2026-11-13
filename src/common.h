@@ -21,6 +21,8 @@
 #ifndef COMMON_H
 #define COMMON_H
 
+#include <stdint.h>
+
 #ifndef OPENGL_ES
 #define GLEW_STATIC
 #include <GL/glew.h>
@@ -54,10 +56,8 @@
 #define GLX_PROGRAMMABLE
 #endif
 
-/* Programmable renderers keep legacy call sites source-compatible while
- * routing their current colour into the default shader.  Unlike the former
- * Core shim, this replaces real state rather than suppressing removed API. */
-#if defined(OPENGL_ES) || defined(OPENGL_CORE)
+/* Keep the tracked colour in sync on every backend: batching also uses it on
+ * fixed-function desktop GL. The desktop implementation updates real GL too. */
 void glx_set_color4f(float r, float g, float b, float a);
 #undef glColor4f
 #undef glColor3f
@@ -67,7 +67,6 @@ void glx_set_color4f(float r, float g, float b, float a);
 #define glColor3f(r, g, b)     glx_set_color4f((r), (g), (b), 1.0F)
 #define glColor3ub(r, g, b)    glx_set_color4f((r) / 255.0F, (g) / 255.0F, (b) / 255.0F, 1.0F)
 #define glColor4ub(r, g, b, a) glx_set_color4f((r) / 255.0F, (g) / 255.0F, (b) / 255.0F, (a) / 255.0F)
-#endif
 
 #ifdef USE_GLFW
 #include <GLFW/glfw3.h>
@@ -90,7 +89,6 @@ void glx_set_color4f(float r, float g, float b, float a);
 #ifdef _WIN32
 #define OS_WINDOWS
 #include <sys/stat.h>
-#include <stdint.h>
 #include <direct.h>
 #endif
 
@@ -193,7 +191,7 @@ extern int          session_log_count;
 #define SCREEN_TEAM_SELECT 1
 #define SCREEN_GUN_SELECT 2
 
-extern int ms_seed;
+extern uint32_t ms_seed;
 int ms_rand(void);
 
 #include <stdlib.h>
