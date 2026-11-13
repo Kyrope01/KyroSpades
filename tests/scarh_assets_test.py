@@ -38,7 +38,7 @@ for (x,y,z),mask in points.items():
 assert min(y for x,y,z in points)==0 and max(y for x,y,z in points)==143
 skins=(root/'src/skins.c').read_text()
 assert '"smg", 0.05F' in skins and 'case SKIN_SMG:' in skins
-assert 'skin_reload_model((enum skin_category_type)c, cat, m, &e->previews[m], mp)' in skins
+assert 'skin_reload_model(ctx->category, cat, m, &e->previews[m], mp)' in skins
 assert 'skin_reload_model(category, cat, m, cat->models[m].ptr, path)' in skins
 assert 'weapon_skin_scale(target->scale, target->ysiz)' in skins
 assert 'smg(SCAR-H).kv6' in (root/'src/CMakeLists.txt').read_text()

@@ -63,7 +63,10 @@ void lighting_add_flash(float x, float y, float z, float red, float green, float
 void lighting_submit_point(float x, float y, float z, float red, float green, float blue,
                            float radius, float intensity);
 
-/* Select the most relevant active and submitted lights for this frame. */
+/* Per render frame, call flashlight_update first, submit transient lights,
+ * then prepare once before any lighting_apply_program/world_begin draws.
+ * prepare consumes submissions, selects lights, and expires old flashes.
+ * It reserves the local spotlight slot based on the preceding update. */
 void lighting_prepare_frame(double now, float camera_x, float camera_y, float camera_z);
 
 /* Render-only lamp-tip location for a living remote player this frame. The
@@ -78,7 +81,7 @@ void lighting_apply_program(unsigned int program);
  * programmable default model shader. Bind their own GLSL 120 light consumer;
  * the light scale occludes daylight only, never the flashlight/point lights.
  * Begin/end must bracket the mesh draws, including the team-colour pass. */
-bool lighting_model_begin(float daylight_occlusion);
+bool lighting_model_begin(float sun_visibility);
 void lighting_model_tint(float red, float green, float blue);
 void lighting_model_end(void);
 

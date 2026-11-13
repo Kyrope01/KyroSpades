@@ -105,6 +105,31 @@ static int submitted_light_count;
 static int frame_light_count;
 static unsigned int flash_generation;
 static struct lighting_flashlight flashlight;
+
+struct lighting_uniform_frame {
+        float position_radius[LIGHTING_SHADER_LIGHTS * 4];
+        float color_intensity[LIGHTING_SHADER_LIGHTS * 4];
+        float flashlight_direction[4];
+        float spot_color_cone[LIGHTING_SHADER_LIGHTS * 4];
+};
+static struct lighting_uniform_frame frame_uniforms;
+static bool frame_uniforms_valid;
+static float normalized_sun[3], last_sun[3];
+static bool normalized_sun_valid;
+
+/* Cached by input values, not merely by frame: callers that update sun_dir
+   between render passes still receive the current direction. */
+static const float* lighting_normalized_sun(void) {
+        if(!normalized_sun_valid || sun_dir[0] != last_sun[0]
+           || sun_dir[1] != last_sun[1] || sun_dir[2] != last_sun[2]) {
+                memcpy(last_sun, sun_dir, sizeof(last_sun));
+                float length = sqrtf(sun_dir[0] * sun_dir[0] + sun_dir[1] * sun_dir[1] + sun_dir[2] * sun_dir[2]);
+                if(length < 0.0001F) length = 1.0F;
+                for(int i = 0; i < 3; i++) normalized_sun[i] = sun_dir[i] / length;
+                normalized_sun_valid = true;
+        }
+        return normalized_sun;
+}
 /* Keep an emissive lamp tip for every remote player, including those whose
  * projected illumination did not fit in this frame's four shader slots. */
 static struct {
@@ -298,6 +323,8 @@ static const char* world_fragment_shader =
         "    vec3 normal = normalize(v_WorldNormal);\n"
         "    if(u_NormalMapEnabled > 0.5) {\n"
         "        vec3 mapped = texture2D(u_NormalMap, v_TexCoord).xyz * 2.0 - 1.0;\n"
+        /* Approximate basis from the geometric normal, not UV tangents;
+           directional normal-map details may rotate across voxel faces. */
         "        vec3 tangent = abs(normal.y) < 0.9 ? normalize(cross(vec3(0.0, 1.0, 0.0), normal)) : vec3(1.0, 0.0, 0.0);\n"
         "        vec3 bitangent = normalize(cross(normal, tangent));\n"
         "        normal = normalize(tangent * mapped.x + bitangent * mapped.y + normal * mapped.z);\n"
@@ -346,10 +373,10 @@ static const char* world_fragment_shader =
         "    }\n"
         "    vec3 sun_direction = normalize(u_SunDirection);\n"
         "    float sun_diffuse = max(dot(normal, sun_direction), 0.0);\n"
-        "    vec3 lit = (0.86 + 0.14 * sun_diffuse) * (u_SunColor.r + added);\n"
-        /* A glowing block's faces carry the marker alpha from the mesher: the
-           surface is the light, so neither the sun nor the point lights may dim
-           it. Over-bright, so the HDR bloom pass picks it up when enabled. */
+        "    vec3 lit = (0.86 + 0.14 * sun_diffuse) * u_SunColor.r + added;\n"
+        /* Emission is keyed to vertex alpha, not texture-multiplied base
+           alpha: texture transparency does not change the marker. A glowing
+           surface remains bright even when the sun or point lights are dim. */
         "    float emissive = 1.0 - step(0.9995, v_Color.a);\n"
         "    base.rgb *= mix(lit, vec3(1.25), emissive);\n"
         "    float fog_distance = clamp(length((v_WorldPosition.xz - u_Camera.xz) * u_FogDistance), 0.0, 1.0);\n"
@@ -434,6 +461,8 @@ static const char* world_fragment_shader_330 =
         "    vec3 normal = geometric_normal;\n"
         "    if(u_NormalMapEnabled > 0.5) {\n"
         "        vec3 mapped = texture(u_NormalMap, v_TexCoord).xyz * 2.0 - 1.0;\n"
+        /* Approximate basis from the geometric normal, not UV tangents;
+           directional normal-map details may rotate across voxel faces. */
         "        vec3 tangent = abs(normal.y) < 0.9 ? normalize(cross(vec3(0.0, 1.0, 0.0), normal)) : vec3(1.0, 0.0, 0.0);\n"
         "        vec3 bitangent = normalize(cross(normal, tangent));\n"
         "        normal = normalize(tangent * mapped.x + bitangent * mapped.y + normal * mapped.z);\n"
@@ -542,6 +571,7 @@ bool lighting_init(void) {
 }
 
 bool lighting_set_enabled(bool enabled) {
+        frame_uniforms_valid = false;
         settings.dynamic_lights = enabled ? 1 : 0;
         if(!enabled) {
                 memset(flashes, 0, sizeof(flashes));
@@ -634,6 +664,8 @@ bool lighting_set_enabled(bool enabled) {
 }
 
 void lighting_deinit(void) {
+        frame_uniforms_valid = false;
+        normalized_sun_valid = false;
         if(world_shader_active)
                 lighting_world_end();
 #ifndef GLX_PROGRAMMABLE
@@ -677,6 +709,7 @@ bool lighting_world_supported(void) {
 }
 
 bool lighting_flashlight_toggle(void) {
+        frame_uniforms_valid = false;
         if(!lighting_supported())
                 return false;
         flashlight.enabled = !flashlight.enabled;
@@ -690,6 +723,7 @@ bool lighting_flashlight_enabled(void) { return flashlight.enabled; }
 
 void lighting_flashlight_set_server_state(bool enabled) {
         if(flashlight.enabled == enabled) return;
+        frame_uniforms_valid = false;
         flashlight.enabled = enabled;
         flashlight.turned_on = window_time();
         flashlight.frame_active = false;
@@ -698,12 +732,14 @@ void lighting_flashlight_set_server_state(bool enabled) {
 
 
 void lighting_flashlight_reset(void) {
+        frame_uniforms_valid = false;
         memset(&flashlight, 0, sizeof(flashlight));
 }
 
 void lighting_flashlight_update(float dt, bool usable,
                                 float x, float y, float z,
                                 float direction_x, float direction_y, float direction_z) {
+        frame_uniforms_valid = false;
         flashlight.frame_active = false;
         if(!flashlight.enabled || !usable || !lighting_supported())
                 return;
@@ -714,7 +750,8 @@ void lighting_flashlight_update(float dt, bool usable,
 
         float target_length = sqrtf(direction_x * direction_x + direction_y * direction_y
                                     + direction_z * direction_z);
-        if(target_length < 0.0001F)
+        if(!isfinite(target_length) || target_length < 0.0001F ||
+           !isfinite(x) || !isfinite(y) || !isfinite(z))
                 return;
         direction_x /= target_length;
         direction_y /= target_length;
@@ -879,6 +916,7 @@ static void lighting_consider_point(const struct lighting_frame_light* source,
 }
 
 void lighting_prepare_frame(double now, float view_x, float view_y, float view_z) {
+        frame_uniforms_valid = false;
         int pending_count = submitted_light_count;
         submitted_light_count = 0;
         frame_light_count = 0;
@@ -968,7 +1006,7 @@ void lighting_prepare_frame(double now, float view_x, float view_y, float view_z
                         struct flashlight_beam beam = flashlight_ext_beam(i);
                         if(!beam.reach || !beam.cone) continue;
                         /* Flicker: the beam and its glare go dark together. */
-                        if(flashlight_ext_dark(i, window_time())) continue;
+                        if(flashlight_ext_dark(i, now)) continue;
                         source.radius = beam.reach;
                         source.spot_color[0] = beam.red / 255.0F;
                         source.spot_color[1] = beam.green / 255.0F;
@@ -1010,7 +1048,7 @@ bool lighting_remote_flashlight_position(int player_id, float position[3]) {
 }
 
 static void lighting_build_uniform_arrays(float* position_radius, float* color_intensity,
-                                          float flashlight_direction[4], float spot_color_cone[LIGHTING_SHADER_LIGHTS * 4]) {
+                                          float flashlight_direction[4], float spot_color_cone[LIGHTING_SHADER_LIGHTS * 4], double now) {
         memset(position_radius, 0, sizeof(float) * LIGHTING_SHADER_LIGHTS * 4);
         memset(color_intensity, 0, sizeof(float) * LIGHTING_SHADER_LIGHTS * 4);
         memset(spot_color_cone, 0, sizeof(float) * LIGHTING_SHADER_LIGHTS * 4);
@@ -1043,7 +1081,7 @@ static void lighting_build_uniform_arrays(float* position_radius, float* color_i
 
         if(flashlight.frame_active) {
                 const int i = LIGHTING_SHADER_LIGHTS - 1;
-                float age = fmaxf((float)(window_time() - flashlight.turned_on), 0.0F);
+                float age = fmaxf((float)(now - flashlight.turned_on), 0.0F);
                 float fade = 1.0F - expf(-age * 5.0F);
                 float brightness = flashlight_ext_negotiated() ? 1.0F : 1.5F;
 #ifdef OPENGL_CORE
@@ -1054,7 +1092,7 @@ static void lighting_build_uniform_arrays(float* position_radius, float* color_i
                 position_radius[i * 4 + 1] = flashlight.position[1];
                 position_radius[i * 4 + 2] = flashlight.position[2];
                 struct flashlight_beam beam = flashlight_ext_beam(local_player_id);
-                if(flashlight_ext_dark(local_player_id, window_time()))
+                if(flashlight_ext_dark(local_player_id, now))
                         brightness = 0.0F;
                 position_radius[i * 4 + 3] = beam.reach;
                 spot_color_cone[i * 4 + 0] = beam.red / 255.0F;
@@ -1072,6 +1110,18 @@ static void lighting_build_uniform_arrays(float* position_radius, float* color_i
         }
 }
 
+/* Rebuild lazily after preparation or a flashlight/lighting state change.
+   One timestamp keeps flicker and fade consistent across all draws this frame. */
+static const struct lighting_uniform_frame* lighting_frame_uniforms(void) {
+        if(!frame_uniforms_valid) {
+                lighting_build_uniform_arrays(frame_uniforms.position_radius, frame_uniforms.color_intensity,
+                                              frame_uniforms.flashlight_direction, frame_uniforms.spot_color_cone,
+                                              window_time());
+                frame_uniforms_valid = true;
+        }
+        return &frame_uniforms;
+}
+
 void lighting_apply_program(unsigned int program) {
         if(!program)
                 return;
@@ -1079,11 +1129,11 @@ void lighting_apply_program(unsigned int program) {
         previous = (GLint)glx_current_program();
         glx_use_program((GLuint)program);
 
-        float position_radius[LIGHTING_SHADER_LIGHTS * 4];
-        float color_intensity[LIGHTING_SHADER_LIGHTS * 4];
-        float flashlight_direction[4];
-        float spot_color_cone[LIGHTING_SHADER_LIGHTS * 4];
-        lighting_build_uniform_arrays(position_radius, color_intensity, flashlight_direction, spot_color_cone);
+        const struct lighting_uniform_frame* uniforms = lighting_frame_uniforms();
+        const float* position_radius = uniforms->position_radius;
+        const float* color_intensity = uniforms->color_intensity;
+        const float* flashlight_direction = uniforms->flashlight_direction;
+        const float* spot_color_cone = uniforms->spot_color_cone;
         GLint location = glx_uniform_location((GLuint)program, "u_LightPositionRadius[0]");
         if(location >= 0)
                 glUniform4fv(location, LIGHTING_SHADER_LIGHTS, position_radius);
@@ -1097,12 +1147,10 @@ void lighting_apply_program(unsigned int program) {
         if(location >= 0)
                 glUniform4fv(location, 1, flashlight_direction);
 
-        float sun_length = sqrtf(sun_dir[0] * sun_dir[0] + sun_dir[1] * sun_dir[1] + sun_dir[2] * sun_dir[2]);
-        if(sun_length < 0.0001F)
-                sun_length = 1.0F;
+        const float* sun_direction = lighting_normalized_sun();
         location = glx_uniform_location((GLuint)program, "u_SunDirection");
         if(location >= 0)
-                glUniform3f(location, sun_dir[0] / sun_length, sun_dir[1] / sun_length, sun_dir[2] / sun_length);
+                glUniform3f(location, sun_direction[0], sun_direction[1], sun_direction[2]);
         location = glx_uniform_location((GLuint)program, "u_SunColor");
         if(location >= 0) {
                 float sun = lighting_sunlight_scale();
@@ -1124,7 +1172,7 @@ void lighting_apply_program(unsigned int program) {
         glx_use_program((GLuint)previous);
 }
 
-bool lighting_model_begin(float daylight_occlusion) {
+bool lighting_model_begin(float sun_visibility) {
 #ifndef GLX_PROGRAMMABLE
         if(!lighting_supported() || glx_uses_explicit_attributes())
                 return false;
@@ -1143,7 +1191,7 @@ bool lighting_model_begin(float daylight_occlusion) {
         lighting_apply_program(model_program);
         GLint location = glx_uniform_location(model_program, "u_LightScale");
         if(location >= 0)
-                glUniform1f(location, fmaxf(daylight_occlusion, 0.0F));
+                glUniform1f(location, fmaxf(sun_visibility, 0.0F));
         location = glx_uniform_location(model_program, "u_Camera");
         if(location >= 0)
                 glUniform3f(location, camera_x, camera_y, camera_z);
@@ -1163,7 +1211,7 @@ bool lighting_model_begin(float daylight_occlusion) {
                 glUniformMatrix4fv(location, 1, GL_FALSE, (float*)matrix_model);
         return true;
 #else
-        (void)daylight_occlusion;
+        (void)sun_visibility;
         return false;
 #endif
 }
@@ -1226,11 +1274,11 @@ bool lighting_world_begin(bool textured) {
         glGetIntegerv(GL_ACTIVE_TEXTURE, &previous_active_texture);
         glActiveTexture(GL_TEXTURE0);
 
-        float position_radius[LIGHTING_SHADER_LIGHTS * 4];
-        float color_intensity[LIGHTING_SHADER_LIGHTS * 4];
-        float flashlight_direction[4];
-        float spot_color_cone[LIGHTING_SHADER_LIGHTS * 4];
-        lighting_build_uniform_arrays(position_radius, color_intensity, flashlight_direction, spot_color_cone);
+        const struct lighting_uniform_frame* uniforms = lighting_frame_uniforms();
+        const float* position_radius = uniforms->position_radius;
+        const float* color_intensity = uniforms->color_intensity;
+        const float* flashlight_direction = uniforms->flashlight_direction;
+        const float* spot_color_cone = uniforms->spot_color_cone;
 
         if(uniform_light_position_radius >= 0)
                 glUniform4fv(uniform_light_position_radius, LIGHTING_SHADER_LIGHTS, position_radius);
@@ -1255,10 +1303,9 @@ bool lighting_world_begin(bool textured) {
                 glBindTexture(GL_TEXTURE_2D, texture_blocks_normal.texture_id);
                 glActiveTexture(GL_TEXTURE0);
         }
-        float sun_length = sqrtf(sun_dir[0] * sun_dir[0] + sun_dir[1] * sun_dir[1] + sun_dir[2] * sun_dir[2]);
-        if(sun_length < 0.0001F) sun_length = 1.0F;
+        const float* sun_direction = lighting_normalized_sun();
         if(uniform_sun_direction >= 0)
-                glUniform3f(uniform_sun_direction, sun_dir[0] / sun_length, sun_dir[1] / sun_length, sun_dir[2] / sun_length);
+                glUniform3f(uniform_sun_direction, sun_direction[0], sun_direction[1], sun_direction[2]);
         float sun = lighting_sunlight_scale();
         if(uniform_sun_color >= 0)
                 glUniform3f(uniform_sun_color, sun, 0.94F * sun, 0.82F * sun);

@@ -53,11 +53,14 @@ typedef struct {
 	} direction;
 } Ray;
 
-bool aabb_intersection(AABB* a, AABB* b);
-bool aabb_intersection_ray(AABB* a, Ray* r, float* distance);
-bool aabb_intersection_terrain(AABB* a, int miny);
+/* Box/box intersections include touching faces, edges and corners. */
+bool aabb_intersection(const AABB* a, const AABB* b);
+/* Distance is in world units even for non-unit directions. Zero directions
+   and non-finite or inverted inputs do not intersect. */
+bool aabb_intersection_ray(const AABB* a, const Ray* r, float* distance);
+/* Only in-map voxels with y >= max(miny, 0) are considered. */
+bool aabb_intersection_terrain(const AABB* a, int miny);
 void aabb_set_size(AABB* a, float x, float y, float z);
 void aabb_set_center(AABB* a, float x, float y, float z);
-void aabb_render(AABB* a);
 
 #endif

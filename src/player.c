@@ -229,8 +229,12 @@ static int player_is_obscured(struct Player* p) {
         /* In first person the ray starts inside our own hitbox. Including
            ourselves makes the nearest hit PLAYER instead of the wall, so
            Teamplay ESP can show only the HUD name while its box is skipped. */
+        float dx = tx - camera_x, dy = ty - camera_y, dz = tz - camera_z;
+        float distance = sqrtf(dx * dx + dy * dy + dz * dz);
+        /* A wall beyond the target cannot obscure it, even if the ray
+           misses its animated hitbox. Keep other player hits in the test. */
         camera_hit_mask(&hit, local_player_id, camera_x, camera_y, camera_z,
-                        tx - camera_x, ty - camera_y, tz - camera_z, 1024.0F);
+                        dx, dy, dz, distance);
         // Player is obscured if terrain is hit before the player hitbox.
         return hit.type == CAMERA_HITTYPE_BLOCK;
 }
@@ -1353,7 +1357,8 @@ static bool hitbox_intersection(mat4 model, const struct hitbox* box, Ray* r, fl
 	glmc_mat4_mulv3(inv_model, r->origin.coords, 1.0F, origin);
 	glmc_mat4_mulv3(inv_model, r->direction.coords, 0.0F, dir);
 
-	return aabb_intersection_ray(
+	float local_distance;
+	bool hit = aabb_intersection_ray(
 		&(AABB) {
 			.min = {-box->pivot[0] * box->scale, -box->pivot[2] * box->scale, -box->pivot[1] * box->scale},
 			.max = {(box->size[0] - box->pivot[0]) * box->scale, (box->size[2] - box->pivot[2]) * box->scale,
@@ -1363,7 +1368,16 @@ static bool hitbox_intersection(mat4 model, const struct hitbox* box, Ray* r, fl
 			.origin.coords = {origin[0], origin[1], origin[2]},
 			.direction.coords = {dir[0], dir[1], dir[2]},
 		},
-		distance);
+		&local_distance);
+	if(hit && distance) {
+		/* The intersection is measured in model space. Convert back to
+		   world distance, including scaled head models. */
+		float world_length = sqrtf(r->direction.x * r->direction.x + r->direction.y * r->direction.y + r->direction.z * r->direction.z);
+		float local_length = sqrtf(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+		if(local_length <= 0.0F || !isfinite(local_length)) return false;
+		*distance = local_distance * world_length / local_length;
+	}
+	return hit;
 }
 
 void player_collision(const struct Player* p, Ray* ray, struct player_intersection* intersects) {
@@ -1918,7 +1932,8 @@ void player_render(struct Player* p, int id) {
 			&& (!p->input.keys.sprint || p->input.keys.crouch)) ? 1.0f : 0.0f;
 		os_aim_state = aimTarget;
 		os_aim_smooth = os_lerp_smooth(os_aim_smooth, os_aim_state, dt, 0.0008f);
-		float speed = sqrtf(powf(p->physics.velocity.x, 2) + powf(p->physics.velocity.z, 2)) / 0.25f;
+		float speed = sqrtf(p->physics.velocity.x * p->physics.velocity.x
+			+ p->physics.velocity.z * p->physics.velocity.z) / 0.25f;
 		if(speed > 2.5f) speed = 2.5f;
 		float* f = player_tool_translate_func(p);
 		float swayX=0, swayY=0;
@@ -2024,8 +2039,6 @@ void player_render(struct Player* p, int id) {
 			}
 		}
 		matrix_translate(matrix_model, f[0] + swayX, f[1] + swayY, 0.1F * player_swing_func(time / 1000.0F) * speed + f[2]);
-	} else {
-		if(render_fpv && p->alive) { float speed = sqrtf(powf(p->physics.velocity.x, 2) + powf(p->physics.velocity.z, 2)) / 0.25f; float* f = player_tool_translate_func(p); matrix_translate(matrix_model, f[0], f[1], 0.1F * player_swing_func(time / 1000.0F) * speed + f[2]); }
 	}
 
 	if(!(p->held_item == TOOL_SPADE && render_fpv && camera_mode == CAMERAMODE_FPS)) {

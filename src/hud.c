@@ -353,7 +353,12 @@ static void hud_refresh_accent_style(mu_Context* ctx) {
         ctx->style->colors[MU_COLOR_SCROLLBASE] = mu_accent_color(0.05F, 255);
 }
 
+static void hud_settings_commit(void);
+
 void hud_change(struct hud* new) {
+        /* A drag can be interrupted by Escape or navigation before mouse-up. */
+        if(hud_active == &hud_settings && new != &hud_settings)
+                hud_settings_commit();
         config_key_reset_togglestates();
         hud_active = new;
 
@@ -416,6 +421,7 @@ static void chat_sel_range(int* lo, int* hi) {
 }
 
 static int chat_sel_delete(void) {
+        chat_cursor_clamp();
         if(!chat_sel_active()) return 0;
         int lo, hi;
         chat_sel_range(&lo, &hi);
@@ -427,6 +433,7 @@ static int chat_sel_delete(void) {
 }
 
 static void chat_sel_copy_to_clipboard(void) {
+        chat_cursor_clamp();
         if(!chat_sel_active()) return;
         int lo, hi;
         chat_sel_range(&lo, &hi);
@@ -2451,7 +2458,7 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                         /* camera_ads_scope_progress stays > 0 for 150 ms after RMB is
                            released, so the scope shrinks away instead of vanishing. */
                         if(settings.iron_sight && players[local_id].held_item == TOOL_GUN
-                           && (players[local_id].input.buttons.rmb || camera_ads_scope_progress > 0.0F)
+                           && camera_ads_scope_progress > 0.0F
                            && players[local_id].alive) {
                                 struct texture* zoom;
                                 switch(players[local_id].weapon) {
@@ -3094,9 +3101,6 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                                                  512 * map_scale * scalef, 512 * map_scale * scalef);
                                         glDisable(GL_SCISSOR_TEST);
 
-                                        int gl_err = glGetError();
-                                        if(gl_err != 0)
-                                                log_warn("minimap draw: glGetError() = 0x%04X", gl_err);
                                 }
 
                                 tracer_minimap(0, scalef, view_x, view_z, viewport);
@@ -4824,6 +4828,11 @@ static int serverlist_checked_for_updates = 0;
 static int serverlist_con_established;
 static pthread_mutex_t serverlist_lock;
 
+static void hud_serverlist_copy_field(char* dst, size_t size, const JSON_Object* object, const char* key) {
+        const char* value = json_object_get_string(object, key);
+        snprintf(dst, size, "%s", value ? value : "");
+}
+
 /* Two-step server selection for touch: a first tap on a row only highlights it
    (records its identifier here); a second tap on the same, already-highlighted
    row actually joins. Tapping a different row moves the highlight there instead
@@ -5057,9 +5066,8 @@ static int pinned_count = 0;
 
 static void pinned_load() {
         if(!file_exists("pinned_servers.txt")) return;
-        int sz = file_size("pinned_servers.txt");
-        if(sz <= 0) return;
-        unsigned char* data = file_load("pinned_servers.txt");
+        size_t sz = 0;
+        unsigned char* data = file_load_sized("pinned_servers.txt", &sz);
         if(!data) return;
         pinned_count = 0;
         char* p = (char*)data;
@@ -5110,8 +5118,14 @@ static void server_c(char* address, char* name, int slots) {
         chat_clear(0);
 
         if(file_exists(address)) {
-                void* data = file_load(address);
-                map_vxl_load(data, file_size(address));
+                size_t map_size = 0;
+                void* data = file_load_sized(address, &map_size);
+                if(!data || !map_size) {
+                        log_warn("Could not read map file: %s", address);
+                        free(data);
+                        return;
+                }
+                map_vxl_load(data, map_size);
                 free(data);
                 chunk_rebuild_all();
                 camera_mode = CAMERAMODE_FPS;
@@ -5699,10 +5713,10 @@ static void hud_serverlist_render(mu_Context* ctx, float scalex, float scaley) {
                 switch(http_process(request_version)) {
                         case HTTP_STATUS_COMPLETED:
                                 serverlist_is_outdated = 1;
-                                strcpy(latest_ver, request_version->response_data);
+                                snprintf(latest_ver, sizeof(latest_ver), "%s", request_version->response_data ? request_version->response_data : "");
                                 log_info("newest game version: %s", latest_ver);
                                 log_info("current game version: %s", JENKINS_BUILD);
-                                serverlist_is_outdated = strcmp(request_version->response_data, JENKINS_BUILD) != 0;
+                                serverlist_is_outdated = strcmp(latest_ver, JENKINS_BUILD) != 0;
                                 http_release(request_version);
                                 request_version = NULL;
                                 break;
@@ -5721,18 +5735,33 @@ static void hud_serverlist_render(mu_Context* ctx, float scalex, float scaley) {
                                 if(serverlist_source != 0) {
                                         void* f = file_open("serverlist_debug.txt", "w");
                                         if(f) {
-                                                file_printf(f, "%s", request_serverlist->response_data);
+                                                file_printf(f, "%s", request_serverlist->response_data ? request_serverlist->response_data : "");
                                                 file_close(f);
                                         }
                                 }
                                 JSON_Value* js = json_parse_string(request_serverlist->response_data);
                                 JSON_Array* servers = json_value_get_array(js);
-                                server_count = json_array_get_count(servers);
+                                size_t count = json_array_get_count(servers);
+                                if(!servers || count > INT_MAX || count > SIZE_MAX / sizeof(struct serverlist_entry)) {
+                                        log_warn("Invalid server-list response");
+                                        json_value_free(js);
+                                        http_release(request_serverlist);
+                                        request_serverlist = NULL;
+                                        break;
+                                }
+                                struct serverlist_entry* entries = count ? calloc(count, sizeof(*entries)) : NULL;
+                                if(count && !entries) {
+                                        log_warn("Could not allocate server list");
+                                        json_value_free(js);
+                                        http_release(request_serverlist);
+                                        request_serverlist = NULL;
+                                        break;
+                                }
 
                                 pthread_mutex_lock(&serverlist_lock);
-                                serverlist = realloc(serverlist, server_count * sizeof(struct serverlist_entry));
-                                CHECK_ALLOCATION_ERROR(serverlist)
-
+                                free(serverlist);
+                                serverlist = entries;
+                                server_count = (int)count;
                                 ping_start(hud_serverlist_pingupdate);
 
                                 player_count = 0;
@@ -5744,14 +5773,11 @@ static void hud_serverlist_render(mu_Context* ctx, float scalex, float scaley) {
                                         serverlist[k].max = (int)json_object_get_number(s, "players_max");
                                         serverlist[k].ping = -1;
 
-                                        strncpy(serverlist[k].name, json_object_get_string(s, "name"), sizeof(serverlist[k].name) - 1);
-                                        strncpy(serverlist[k].map, json_object_get_string(s, "map"), sizeof(serverlist[k].map) - 1);
-                                        strncpy(serverlist[k].gamemode, json_object_get_string(s, "game_mode"),
-                                                        sizeof(serverlist[k].gamemode) - 1);
-                                        strncpy(serverlist[k].identifier, json_object_get_string(s, "identifier"),
-                                                        sizeof(serverlist[k].identifier) - 1);
-                                        strncpy(serverlist[k].country, json_object_get_string(s, "country"),
-                                                        sizeof(serverlist[k].country) - 1);
+                                        hud_serverlist_copy_field(serverlist[k].name, sizeof(serverlist[k].name), s, "name");
+                                        hud_serverlist_copy_field(serverlist[k].map, sizeof(serverlist[k].map), s, "map");
+                                        hud_serverlist_copy_field(serverlist[k].gamemode, sizeof(serverlist[k].gamemode), s, "game_mode");
+                                        hud_serverlist_copy_field(serverlist[k].identifier, sizeof(serverlist[k].identifier), s, "identifier");
+                                        hud_serverlist_copy_field(serverlist[k].country, sizeof(serverlist[k].country), s, "country");
 
                                         int port;
                                         char ip[32];
@@ -5764,7 +5790,8 @@ static void hud_serverlist_render(mu_Context* ctx, float scalex, float scaley) {
                                 for(int k = 0; k < server_count; k++)
                                         serverlist[k].pinned = pinned_contains(serverlist[k].identifier);
 
-                                qsort(serverlist, server_count, sizeof(struct serverlist_entry), hud_serverlist_sort);
+                                if(server_count > 1)
+                                        qsort(serverlist, server_count, sizeof(struct serverlist_entry), hud_serverlist_sort);
                                 pthread_mutex_unlock(&serverlist_lock);
 
                                 http_release(request_serverlist);
@@ -5858,8 +5885,59 @@ static int settings_search_active(void) {
 
 static void hud_settings_init() {
         memcpy(&settings_tmp, &settings, sizeof(struct RENDER_OPTIONS));
+        window_windowed_size(&settings_windowed_width, &settings_windowed_height);
         selected_category = 0;
         settings_search[0] = '\0';
+}
+
+/* Also invoked when leaving settings, so interrupted drags are not lost. */
+static void hud_settings_commit(void) {
+        int old_width, old_height;
+        window_windowed_size(&old_width, &old_height);
+        if(settings_windowed_width < 1) settings_windowed_width = 1;
+        if(settings_windowed_height < 1) settings_windowed_height = 1;
+        int size_changed = settings_windowed_width != old_width || settings_windowed_height != old_height;
+        if(size_changed || memcmp(&settings, &settings_tmp, sizeof(struct RENDER_OPTIONS)) != 0) {
+                int lighting_changed = settings.dynamic_lights != settings_tmp.dynamic_lights;
+                int shadow_changed = settings.shadow_quality != settings_tmp.shadow_quality
+                        || settings.shadow_intensity != settings_tmp.shadow_intensity;
+                int water_mesh_changed = !!(settings.water_shader || settings.water_waves)
+                        != !!(settings_tmp.water_shader || settings_tmp.water_waves);
+                /* Vertex-lit terrain and baked directional shadows must be
+                   regenerated; shader-lit terrain reads the percentage live. */
+                int baked_sunlight_changed = settings.sunlight_intensity != settings_tmp.sunlight_intensity
+                        && (!lighting_world_supported() || shadow_baked_enabled());
+                int remesh = settings.textured_blocks != settings_tmp.textured_blocks
+                        || settings.ambient_occlusion != settings_tmp.ambient_occlusion
+                        || settings.greedy_meshing != settings_tmp.greedy_meshing
+                        || settings.ao_multiplier != settings_tmp.ao_multiplier
+                        || shadow_changed
+                        || water_mesh_changed
+                        || lighting_changed
+                        || baked_sunlight_changed
+                        || (settings.force_displaylist != settings_tmp.force_displaylist
+                            && (settings.sunlight_intensity != 100 || settings_tmp.sunlight_intensity != 100));
+
+                if(size_changed)
+                        window_set_windowed_size(settings_windowed_width, settings_windowed_height);
+
+                memcpy(&settings, &settings_tmp, sizeof(struct RENDER_OPTIONS));
+                if(lighting_changed || shadow_changed) {
+                        lighting_set_enabled(settings.dynamic_lights != 0);
+                        /* set_enabled() turns the option back off when this
+                           context cannot compile the lighting program. */
+                        settings_tmp.dynamic_lights = settings.dynamic_lights;
+                        if(lighting_world_supported())
+                                texture_blocks_prepare_normal_map();
+                        else
+                                texture_blocks_release_normal_map();
+                }
+                window_fromsettings();
+                sound_volume(settings.volume / 10.0F);
+                config_save();
+                if(remesh)
+                        chunk_rebuild_all();
+        }
 }
 
 static int int_slider_defaults(mu_Context* ctx, struct config_setting* setting) {
@@ -6188,53 +6266,9 @@ static void hud_settings_render(mu_Context* ctx, float scalex, float scaley) {
                 mu_end_window(ctx);
         }
 
-        if(memcmp(&settings, &settings_tmp, sizeof(struct RENDER_OPTIONS)) != 0) {
-                int lighting_changed = settings.dynamic_lights != settings_tmp.dynamic_lights;
-                int shadow_changed = settings.shadow_quality != settings_tmp.shadow_quality
-                        || settings.shadow_intensity != settings_tmp.shadow_intensity;
-                int water_mesh_changed = !!(settings.water_shader || settings.water_waves)
-                        != !!(settings_tmp.water_shader || settings_tmp.water_waves);
-                /* Vertex-lit terrain and baked directional shadows must be
-                   regenerated; shader-lit terrain reads the percentage live. */
-                int baked_sunlight_changed = settings.sunlight_intensity != settings_tmp.sunlight_intensity
-                        && (!lighting_world_supported() || shadow_baked_enabled());
-                int remesh = settings.textured_blocks != settings_tmp.textured_blocks
-                        || settings.ambient_occlusion != settings_tmp.ambient_occlusion
-                        || settings.greedy_meshing != settings_tmp.greedy_meshing
-                        || settings.ao_multiplier != settings_tmp.ao_multiplier
-                        || shadow_changed
-                        || water_mesh_changed
-                        || lighting_changed
-                        || baked_sunlight_changed
-                        || (settings.force_displaylist != settings_tmp.force_displaylist
-                            && (settings.sunlight_intensity != 100 || settings_tmp.sunlight_intensity != 100));
-
-                /* "Game width"/"Game height" are the WINDOWED size. An explicit edit
-                   has to replace the size we restore when leaving fullscreen even when
-                   it was made while fullscreen (where it has no visible effect),
-                   otherwise F11 drops the player back into the old window and silently
-                   discards the change. Read before the memcpy overwrites settings. */
-                if(settings_tmp.window_width != settings.window_width
-                   || settings_tmp.window_height != settings.window_height)
-                        window_set_windowed_size(settings_tmp.window_width, settings_tmp.window_height);
-
-                memcpy(&settings, &settings_tmp, sizeof(struct RENDER_OPTIONS));
-                if(lighting_changed || shadow_changed) {
-                        lighting_set_enabled(settings.dynamic_lights != 0);
-                        /* set_enabled() turns the option back off when this
-                           context cannot compile the lighting program. */
-                        settings_tmp.dynamic_lights = settings.dynamic_lights;
-                        if(lighting_world_supported())
-                                texture_blocks_prepare_normal_map();
-                        else
-                                texture_blocks_release_normal_map();
-                }
-                window_fromsettings();
-                sound_volume(settings.volume / 10.0F);
-                config_save();
-                if(remesh)
-                        chunk_rebuild_all();
-        }
+        /* Commit once on release; the working copy remains visible while dragging. */
+        if(!(ctx->mouse_down & MU_MOUSE_LEFT))
+                hud_settings_commit();
 }
 
 static void hud_settings_keyboard(int key, int action, int mods, int internal) {
@@ -6512,7 +6546,7 @@ static void hud_skins_render_overlay(float scalex, float scaley) {
         if(count <= 0)
                 return;
 
-        /* kv6 geometry carries alpha-0 vertex colours, so blending MUST stay off
+        /* Preview models are opaque, so blending MUST stay off
            here or the models would come out invisible. main.c disables it after
            the command list, but state it again so this pass never depends on what
            the UI replay happened to leave behind. Same for the current colour:

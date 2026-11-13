@@ -31,6 +31,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <limits.h>
 
 #include "lodepng/lodepng.h"
 #include "common.h"
@@ -85,10 +86,10 @@ float dt_float = 0.0F;
    frame renders (0..1). Used for partial-tick render interpolation. */
 float physics_tick_alpha = 1.0F;
 
-int ms_seed = 1;
-int ms_rand() {
-        ms_seed = ms_seed * 0x343FD + 0x269EC3;
-        return (ms_seed >> 0x10) & 0x7FFF;
+uint32_t ms_seed = 1;
+int ms_rand(void) {
+        ms_seed = ms_seed * UINT32_C(0x343FD) + UINT32_C(0x269EC3);
+        return (int)((ms_seed >> 16) & UINT32_C(0x7FFF));
 }
 
 static struct {
@@ -200,7 +201,7 @@ static void postproc_release_all(void) {
 static struct {
         bool active;
         double start_time;
-        int texture;
+        GLuint texture;
 } screenshot_anim = {0};
 
 /* Latched "the screenshot key was pressed" request. The key handler must not
@@ -219,9 +220,9 @@ unsigned int session_log_color[SESSION_LOG_MAX];
 int          session_log_count = 0;
 
 static void chat_push_one(int channel, unsigned int color, const char* msg) {
-        memmove(chat[channel][2], chat[channel][1], sizeof(chat[channel][0]) * 125);
-        memmove(&chat_color[channel][2], &chat_color[channel][1], sizeof(chat_color[channel][0]) * 125);
-        memmove(&chat_timer[channel][2], &chat_timer[channel][1], sizeof(chat_timer[channel][0]) * 125);
+        memmove(chat[channel][2], chat[channel][1], sizeof(chat[channel][0]) * (sizeof(chat[channel]) / sizeof(chat[channel][0]) - 2));
+        memmove(&chat_color[channel][2], &chat_color[channel][1], sizeof(chat_color[channel][0]) * (sizeof(chat_color[channel]) / sizeof(chat_color[channel][0]) - 2));
+        memmove(&chat_timer[channel][2], &chat_timer[channel][1], sizeof(chat_timer[channel][0]) * (sizeof(chat_timer[channel]) / sizeof(chat_timer[channel][0]) - 2));
         strncpy(chat[channel][1], msg, sizeof(chat[channel][1]) - 1);
         chat[channel][1][sizeof(chat[channel][1]) - 1] = 0;
         chat_color[channel][1] = color;
@@ -323,27 +324,30 @@ void chat_showpopup(const char* msg, float duration, int color) {
         chat_popup_color = color;
 }
 
-/* Render-height for a dropped intel: the camera-y translate that makes the
-   model's bottom touch the top of the first solid block below the drop cell.
-   dx/dy are the horizontal map coords, dz the vertical (map) coord. */
-static float intel_drop_render_y(float dx, float dy, float dz) {
+/* Protocol positions use z downward, while map/render y increases upward.
+   Scan downward in protocol space; a solid voxel at z has its top face at
+   world y = map_size_y - z. KV6 vertical positions use zpiv, not ypiv. */
+static bool intel_drop_render_y(float dx, float dy, float dz, float* render_y) {
+        if(!render_y || map_size_x <= 0 || map_size_y <= 0 || map_size_z <= 0 ||
+           !isfinite(dx) || !isfinite(dy) || !isfinite(dz) ||
+           dx < 0.0F || (double)dx >= (double)map_size_x || dy < 0.0F || (double)dy >= (double)map_size_z)
+                return false;
         int ix = (int)floorf(dx);
-        int iz = (int)floorf(dy);   /* horizontal map coords */
-        int izm = (int)floorf(dz);  /* vertical map coord */
-        if(ix < 0 || ix >= map_size_x || iz < 0 || iz >= map_size_z)
-                return 63.0F;
-        if(izm < 0) izm = 0;
-        if(izm >= map_size_y) izm = map_size_y - 1;
-
-        int ground = izm;
-        while(ground > 0 && map_isair(ix, 63 - ground, iz))
-                ground--;
-
-        /* `ground` is the solid block under the flag; its top surface in
-           camera-y is 62 - ground.  kv6_render pivots the model around ypiv
-           (so the model's bottom sits at translate_y - ypiv*scale), hence
-           the +ypiv*scale to touch the surface exactly. */
-        return 62.0F - (float)ground + model_intel.ypiv * model_intel.scale;
+        int iz = (int)floorf(dy);
+        double clamped_z = fmax(0.0, fmin((double)dz, (double)(map_size_y - 1)));
+        int ground = (int)floor(clamped_z);
+        map_read_lock();
+        while(ground < map_size_y && map_isair_nolock(ix, map_size_y - 1 - ground, iz))
+                ground++;
+        map_read_unlock();
+        if(ground == map_size_y) {
+                /* No supporting voxel: keep the valid network position rather
+                   than inventing a solid floor at the world boundary. */
+                *render_y = (float)(map_size_y - 1) - clamped_z;
+        } else {
+                *render_y = (float)(map_size_y - ground) + model_intel.zpiv * model_intel.scale;
+        }
+        return true;
 }
 
 static void render_objective_models(void) {
@@ -352,11 +356,13 @@ static void render_objective_models(void) {
            top surface.  The old code rendered it a full block up in the air
            (plus the model pivot offset), which is why it floated. */
         if(gamestate.gamemode_type == GAMEMODE_CTF) {
-                if(!TEAM_1_INTEL_HELD(gamestate.gamemode.ctf)) {
+                float intel_1_y;
+                if(!TEAM_1_INTEL_HELD(gamestate.gamemode.ctf)
+                   && intel_drop_render_y(gamestate.gamemode.ctf.team_1_intel_location.dropped.x,
+                                          gamestate.gamemode.ctf.team_1_intel_location.dropped.y,
+                                          gamestate.gamemode.ctf.team_1_intel_location.dropped.z, &intel_1_y)) {
                         float x = gamestate.gamemode.ctf.team_1_intel_location.dropped.x;
-                        float y = intel_drop_render_y(gamestate.gamemode.ctf.team_1_intel_location.dropped.x,
-                                                      gamestate.gamemode.ctf.team_1_intel_location.dropped.y,
-                                                      gamestate.gamemode.ctf.team_1_intel_location.dropped.z);
+                        float y = intel_1_y;
                         float z = gamestate.gamemode.ctf.team_1_intel_location.dropped.y;
                         matrix_push(matrix_model);
                         matrix_translate(matrix_model, x, y, z);
@@ -365,11 +371,13 @@ static void render_objective_models(void) {
                         kv6_render(&model_intel, TEAM_1);
                         matrix_pop(matrix_model);
                 }
-                if(!TEAM_2_INTEL_HELD(gamestate.gamemode.ctf)) {
+                float intel_2_y;
+                if(!TEAM_2_INTEL_HELD(gamestate.gamemode.ctf)
+                   && intel_drop_render_y(gamestate.gamemode.ctf.team_2_intel_location.dropped.x,
+                                          gamestate.gamemode.ctf.team_2_intel_location.dropped.y,
+                                          gamestate.gamemode.ctf.team_2_intel_location.dropped.z, &intel_2_y)) {
                         float x = gamestate.gamemode.ctf.team_2_intel_location.dropped.x;
-                        float y = intel_drop_render_y(gamestate.gamemode.ctf.team_2_intel_location.dropped.x,
-                                                      gamestate.gamemode.ctf.team_2_intel_location.dropped.y,
-                                                      gamestate.gamemode.ctf.team_2_intel_location.dropped.z);
+                        float y = intel_2_y;
                         float z = gamestate.gamemode.ctf.team_2_intel_location.dropped.y;
                         matrix_push(matrix_model);
                         matrix_translate(matrix_model, x, y, z);
@@ -1818,7 +1826,7 @@ void display() {
                 float t = (float)(elapsed / 1.5);
                 if(t >= 1.0F) {
                         screenshot_anim.active = false;
-                        glDeleteTextures(1, (GLuint*)&screenshot_anim.texture);
+                        glDeleteTextures(1, &screenshot_anim.texture);
                         screenshot_anim.texture = 0;
                 } else {
                         float target_scale = 1.0F / 6.0F;
@@ -1894,6 +1902,7 @@ void init() {
         sound_init();
         skins_init();
         tracer_init();
+        rpc_init();
         hud_init();
         chunk_init();
         grenade_init();
@@ -1901,8 +1910,6 @@ void init() {
         damagenumbers_init();
 
         weapon_set(false);
-
-        rpc_init();
 }
 
 void reshape(struct window_instance* window, int width, int height) {
@@ -1976,6 +1983,12 @@ void text_input(struct window_instance* window, const char* utf8) {
                 unsigned char c = (unsigned char)utf8[i];
                 if(c < 0x20 && c != '\n') return;
         }
+
+        /* Both indices may outlive a shorter replacement/history entry. */
+        int current_len = (int)strlen(chat[0][0]);
+        if(chat_cursor < 0) chat_cursor = 0;
+        if(chat_cursor > current_len) chat_cursor = current_len;
+        if(chat_sel_anchor > current_len) chat_sel_anchor = current_len;
 
         /* Replace selection if any. */
         if(chat_sel_anchor >= 0 && chat_sel_anchor != chat_cursor) {
@@ -2055,6 +2068,7 @@ void keys(struct window_instance* window, int key, int scancode, int action, int
            is already in, so F11 can never trigger a display mode switch. */
         if(key == WINDOW_KEY_FULLSCREEN && action == WINDOW_PRESS) { // switch between fullscreen
                 settings.fullscreen = !settings.fullscreen;
+                settings_tmp.fullscreen = settings.fullscreen;
                 window_fromsettings();
         }
 
@@ -2130,6 +2144,10 @@ static void screenshot_capture(void) {
 
         /* Room for two frames: the readback lands in the first half, the
            vertically flipped copy that actually gets encoded in the second. */
+        if((size_t)w > SIZE_MAX / 8 / (size_t)h) {
+                log_warn("Screenshot skipped: framebuffer dimensions are too large (%ix%i)", w, h);
+                return;
+        }
         size_t frame_bytes = (size_t)w * (size_t)h * 4;
         unsigned char* pic_data = malloc(frame_bytes * 2);
         CHECK_ALLOCATION_ERROR(pic_data)
@@ -2149,13 +2167,13 @@ static void screenshot_capture(void) {
                 memcpy(dst, pic_data + (size_t)(h - y - 1) * (size_t)w * 4, (size_t)w * 4);
 
                 for(int x = 0; x < w; x++) {
-                        rgb_or |= (unsigned char)(dst[x * 4] | dst[x * 4 + 1] | dst[x * 4 + 2]);
+                        rgb_or |= (unsigned char)(dst[(size_t)x * 4] | dst[(size_t)x * 4 + 1] | dst[(size_t)x * 4 + 2]);
                         /* The alpha of the default framebuffer is meaningless
                            (EGL configs on Wayland commonly have 8 alpha bits
                            that the renderer never writes), so force opaque -
                            otherwise the PNG is fully transparent and image
                            viewers show it as black. */
-                        dst[x * 4 + 3] = 255;
+                        dst[(size_t)x * 4 + 3] = 255;
                 }
         }
 
@@ -2166,8 +2184,8 @@ static void screenshot_capture(void) {
         unsigned lodepng_err = lodepng_encode32_file(pic_name, flipped, w, h);
 
         if(screenshot_anim.texture)
-                glDeleteTextures(1, (GLuint*)&screenshot_anim.texture);
-        glGenTextures(1, (GLuint*)&screenshot_anim.texture);
+                glDeleteTextures(1, &screenshot_anim.texture);
+        glGenTextures(1, &screenshot_anim.texture);
         glBindTexture(GL_TEXTURE_2D, screenshot_anim.texture);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, flipped);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -2233,9 +2251,13 @@ void deinit() {
         postproc_release_all();
         /* Workers must stop before map/GL storage is released; keep the GL
            context alive through all texture, display-list and shader cleanup. */
-        water_deinit();
         if(network_connected)
                 network_disconnect();
+        /* The collapse worker may enqueue chunk work; stop it before joining
+           chunk workers, and keep map/water/lighting storage alive until both. */
+        map_stop_worker();
+        chunk_deinit();
+        water_deinit();
         hud_deinit();
         map_deinit();
         particle_deinit();
@@ -2660,6 +2682,8 @@ int main(int argc, char** argv) {
                         perf_preset_bs = 1;
                 } else if(!strncmp(argv[i], "--perf-preset=default", 21)) {
                         perf_preset_bs = 0;
+                } else if(!strncmp(argv[i], "-aos://", 7)) {
+                        connect_arg = argv[i] + 1;
                 } else if(argv[i][0] != '-') {
                         connect_arg = argv[i];
                 }
@@ -2727,8 +2751,11 @@ int main(int argc, char** argv) {
                 log_info("MSAAx%i on", settings.multisamples);
         }
 
-        while(glGetError() != GL_NO_ERROR)
-                ;
+        int gl_errors_drained = 0;
+        while(gl_errors_drained < 64 && glGetError() != GL_NO_ERROR)
+                gl_errors_drained++;
+        if(gl_errors_drained == 64)
+                log_warn("GL error queue did not drain after 64 reads");
 
         init();
         recorder_init();
@@ -2743,11 +2770,11 @@ int main(int argc, char** argv) {
                 window_swapping(0);
 
         if(connect_arg) {
-                if(!network_connect_string(connect_arg + 1)) {
+                if(!network_connect_string(connect_arg)) {
                         log_error("Error: Connection failed (use --help for instructions)");
                         exit(1);
                 } else {
-                        log_info("Connection to %s successful", connect_arg + 1);
+                        log_info("Connection to %s successful", connect_arg);
                         hud_change(&hud_ingame);
                 }
         }
@@ -2769,9 +2796,9 @@ int main(int argc, char** argv) {
                 prof_frame_begin();
                 glx_frame_stats_reset();
 
-                double now = window_time();
-                double dt = now - last_frame_start;
-                last_frame_start = now;
+                double frame_start = window_time();
+                double dt = fmax(frame_start - last_frame_start, 0.0);
+                last_frame_start = frame_start;
                 dt_float = (float)dt;
 
                 /* Read this frame's input as late as possible before it is
@@ -2795,6 +2822,7 @@ int main(int argc, char** argv) {
                    the server. Clear gameplay controls before the fixed tick;
                    preserve crouch as the chat input path does. */
                 if(network_connected && !hud_active->render_world) {
+                        /* Bit 5 is crouch; keep its collision state across menus. */
                         players[local_player_id].input.keys.packed &= 0b00100000;
                         players[local_player_id].input.buttons.packed = 0;
                         button_map[0] = button_map[1] = button_map[2] = 0;
@@ -2807,8 +2835,10 @@ int main(int argc, char** argv) {
 
 // these run at exactly ~60fps
 #define PHYSICS_STEP_TIME (1.0 / 60.0)
-                        while(physics_time_fixed >= PHYSICS_STEP_TIME) {
+                        int fixed_catchup_count = 0;
+                        while(physics_time_fixed >= PHYSICS_STEP_TIME && fixed_catchup_count < 4) {
                                 physics_time_fixed -= PHYSICS_STEP_TIME;
+                                fixed_catchup_count++;
                                 if(!demo_is_frozen()) {
                                         /* snapshot pre-tick state for the
                                            partial-tick render interpolation */
@@ -3012,8 +3042,7 @@ int main(int argc, char** argv) {
                     wait is frame_pace_wait() at the top of the next
                     iteration, just before window_poll(). */
                  prof_frame_end();
-
-                 fps = 1.0F / dt;
+                 fps = dt > 0.0 ? (int)fmin(1.0 / dt, (double)INT_MAX) : 0;
 
         }
 }

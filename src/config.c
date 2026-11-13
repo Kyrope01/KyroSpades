@@ -38,6 +38,8 @@
    an absent key keeps the value here. */
 struct RENDER_OPTIONS settings = {.sunlight_intensity = 100, .client_key_login = 1,
                                   .killfeed_distance = 1}, settings_tmp;
+/* Settings controls use window-manager points, not drawable pixels. */
+int settings_windowed_width, settings_windowed_height;
 struct list config_keys;
 struct list config_macros;
 struct list config_settings;
@@ -297,8 +299,7 @@ void config_save() {
            compositor session down with it. */
         int xres = settings.window_width;
         int yres = settings.window_height;
-        if(settings.fullscreen)
-                window_windowed_size(&xres, &yres);
+        window_windowed_size(&xres, &yres);
         config_seti("client", "xres", xres);
         config_seti("client", "yres", yres);
         config_seti("client", "windowed", !settings.fullscreen);
@@ -1070,7 +1071,7 @@ void config_reload() {
 #endif
         list_add(&config_settings,
                          &(struct config_setting) {
-                                 .value = &settings_tmp.window_width,
+                                 .value = &settings_windowed_width,
                                  .type = CONFIG_TYPE_INT,
                                  .min = 0,
                                  .max = INT_MAX,
@@ -1080,7 +1081,7 @@ void config_reload() {
                          });
         list_add(&config_settings,
                          &(struct config_setting) {
-                                 .value = &settings_tmp.window_height,
+                                 .value = &settings_windowed_height,
                                  .type = CONFIG_TYPE_INT,
                                  .min = 0,
                                  .max = INT_MAX,
@@ -1124,7 +1125,7 @@ void config_reload() {
                                  .min = 0,
                                  .max = 16,
                                  .name = "Multisamples",
-                                 .help = "Smooth out block edges",
+                                 .help = "Scene MSAA applies live when supported; default framebuffer MSAA may require restart",
                                  .defaults = 0,
                                  2,
                                  4,
@@ -1968,8 +1969,8 @@ void config_reload() {
                                  .type = CONFIG_TYPE_INT,
                                  .min = 0,
                                  .max = 1,
-                                 .help = "Server-instant crouch physics; only the camera eases",
-                                 .name = "Instant crouch physics",
+                                 .help = "Instant crouch physics; enable to ease the camera transition",
+                                 .name = "Smooth crouch camera",
                                  .category = "Gameplay Feel",
                                  .subcategory = "Input",
                          });
@@ -2159,7 +2160,7 @@ void config_reload() {
                                  .type = CONFIG_TYPE_FLOAT,
                                  .min = 5,
                                  .max = CAMERA_DEFAULT_FOV,
-                                 .help = "Field of View for rifles when aiming down sights",
+                                 .help = "Base field of view used to calculate 2x rifle sight zoom",
                                  .name = "Rifle ADS FOV",
                                  .category = "Weapon Settings",
                          });
@@ -2170,7 +2171,7 @@ void config_reload() {
                                  .type = CONFIG_TYPE_FLOAT,
                                  .min = 5,
                                  .max = CAMERA_DEFAULT_FOV,
-                                 .help = "Field of View for shotguns when aiming down sights",
+                                 .help = "Base field of view used to calculate 2x shotgun sight zoom",
                                  .name = "Shotgun ADS FOV",
                                  .category = "Weapon Settings",
                          });
@@ -2181,7 +2182,7 @@ void config_reload() {
                                  .type = CONFIG_TYPE_FLOAT,
                                  .min = 5,
                                  .max = CAMERA_DEFAULT_FOV,
-                                 .help = "Field of View for SMGs when aiming down sights",
+                                 .help = "Base field of view used to calculate 2x SMG sight zoom",
                                  .name = "SMG ADS FOV",
                                  .category = "Weapon Settings",
                          });

@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <limits.h>
 
 #include "common.h"
 #include "glx.h"
@@ -76,14 +77,11 @@ struct kv6_t model_shotgun_casing;
 static float kv6_light_scale = 1.0F;
 
 static void kv6_load_file(struct kv6_t* kv6, char* filename, float scale) {
-	void* data = file_load(filename);
-	if(!data) {
-		log_debug("Failed to load model: %s", filename);
+	if(kv6_reload(kv6, filename, scale) != 0) {
+		log_warn("Failed to load model: %s", filename);
 		return;
 	}
-	kv6_load(kv6, data, scale);
 	log_debug("Loaded model: %s (%i voxels)", filename, kv6->voxel_count);
-	free(data);
 }
 
 int model_loaded_count(void) {
@@ -143,6 +141,9 @@ int model_total_voxels(void) {
 static void kv6_check_dimensions(struct kv6_t* kv6, float max) {
 	if(max(max(kv6->xsiz, kv6->ysiz), kv6->zsiz) * kv6->scale > max) {
 		log_error("Model dimensions too large");
+		kv6_rebuild(kv6);
+		free(kv6->voxels);
+		kv6->voxels = NULL;
 		kv6->voxel_count = 0;
 	}
 }
@@ -265,7 +266,7 @@ void kv6_load(struct kv6_t* kv6, void* bytes, float scale) {
 		kv6->voxels = malloc(sizeof(struct kv6_voxel) * kv6->voxel_count);
 		CHECK_ALLOCATION_ERROR(kv6->voxels)
 
-		for(size_t k = 0; k < kv6->voxel_count; k++) {
+		for(size_t k = 0; k < (size_t)kv6->voxel_count; k++) {
 			uint32_t color = buffer_read32(bytes, index);
 			index += 4;
 			uint16_t zpos = buffer_read16(bytes, index);
@@ -302,17 +303,45 @@ void kv6_load(struct kv6_t* kv6, void* bytes, float scale) {
 	}
 }
 
+/* Validate untrusted/custom KV6s before the legacy decoder reads them. In
+   particular, column counts must not write beyond the voxel allocation. */
+static bool kv6_valid_data(unsigned char* data, size_t size) {
+	if(size < 32 || buffer_read32(data, 0) != 0x6C78764B) return false;
+	uint32_t x = buffer_read32(data, 4), y = buffer_read32(data, 8), z = buffer_read32(data, 12);
+	uint32_t count = buffer_read32(data, 28);
+	if(!x || !y || !z || x > UINT16_MAX || y > UINT16_MAX || z > UINT16_MAX ||
+	   !count || count > INT_MAX || (uint64_t)count * sizeof(struct kv6_voxel) > SIZE_MAX || !isfinite(buffer_readf(data, 16)) ||
+	   !isfinite(buffer_readf(data, 20)) || !isfinite(buffer_readf(data, 24))) return false;
+	/* Derive all offsets using 64-bit arithmetic before indexing the file. */
+	uint64_t columns = (uint64_t)x * y;
+	uint64_t table = 32ULL + (uint64_t)count * 8 + (uint64_t)x * 4;
+	/* The buffer readers take int offsets, including their final byte. */
+	if(table + columns * 2 > size || table + columns * 2 > INT_MAX) return false;
+	uint64_t total = 0;
+	for(uint64_t i = 0; i < columns; ++i)
+		total += buffer_read16(data, (int)(table + 2 * i));
+	if(total != count) return false;
+	for(uint32_t i = 0; i < count; ++i)
+		if(buffer_read16(data, (int)(32ULL + 8ULL * i + 4)) >= z) return false;
+	return true;
+}
+
 int kv6_reload(struct kv6_t* kv6, const char* path, float orig_scale) {
-	if(!file_exists(path))
+	if(!file_exists(path)) return -1;
+	size_t size;
+	unsigned char* data = file_load_sized(path, &size);
+	if(!data) return -1;
+	if(!kv6_valid_data(data, size)) {
+		log_warn("Invalid KV6 model: %s", path);
+		free(data);
 		return -1;
-	void* data = file_load(path);
-	if(!data)
-		return -1;
-	if(kv6->voxels)
-		free(kv6->voxels);
+	}
+	/* kv6_load resets has_display_list: release the old GPU objects first. */
+	kv6_rebuild(kv6);
+	free(kv6->voxels);
+	kv6->voxels = NULL;
 	kv6_load(kv6, data, orig_scale);
 	free(data);
-	kv6_rebuild(kv6);
 	return 0;
 }
 
@@ -370,7 +399,7 @@ static int kv6_voxel_cmp(const void* a, const void* b) {
 }
 
 static void greedy_mesh(struct kv6_t* kv6, struct kv6_voxel* voxel, uint8_t* marked, size_t* max_a, size_t* max_b,
-						uint8_t face) {
+						uint8_t face, struct kv6_voxel** recent) {
 	if(!settings.greedy_meshing) {
 		*max_a = 1;
 		*max_b = 1;
@@ -396,7 +425,6 @@ static void greedy_mesh(struct kv6_t* kv6, struct kv6_voxel* voxel, uint8_t* mar
 		struct kv6_voxel lookup = *voxel;
 
 		for(size_t a = 0; a < *max_a; a++) {
-			struct kv6_voxel* recent[*max_b];
 			size_t b;
 			for(b = 0; b < *max_b; b++) {
 				switch(face) {
@@ -445,6 +473,148 @@ static void greedy_mesh(struct kv6_t* kv6, struct kv6_voxel* voxel, uint8_t* mar
 	}
 }
 
+/* Keep point-light equations in sync with lighting.c and glx.c. */
+#if defined(GLX_PROGRAMMABLE)
+static const char kv6_explicit_vertex[] =
+	"attribute vec3 a_Position;\n"
+	"attribute vec4 a_Color;\n"
+	"attribute vec3 a_Normal;\n"
+	"uniform float size;\n"
+	"uniform vec3 fog;\n"
+	"uniform vec3 camera;\n"
+	"uniform mat4 model;\n"
+	"uniform mat4 u_MVP;\n"
+	"uniform float dist_factor;\n"
+	"uniform float light_scale;\n"
+	"uniform vec4 u_TeamColor;\n"
+	"uniform vec3 u_SunDirection;\n"
+	"uniform float u_SunIntensity;\n"
+	"uniform vec4 u_LightPositionRadius[4];\n"
+	"uniform vec4 u_LightColorIntensity[4];\n"
+	"uniform vec4 u_SpotColorCone[4];\n"
+	"uniform vec4 u_FlashlightDirection;\n"
+	"varying vec4 v_Color;\n"
+	"void main(void) {\n"
+	"    gl_Position = u_MVP * vec4(a_Position, 1.0);\n"
+	"    vec3 world = (model * vec4(a_Position, 1.0)).xyz;\n"
+	"    float dist = length(world.xz - camera.xz) * dist_factor;\n"
+	"    vec3 N = normalize((model * vec4(a_Normal, 0.0)).xyz);\n"
+	"    vec3 L = normalize(u_SunDirection);\n"
+	"    float d = (0.5 + 0.5 * clamp(dot(N, L), 0.0, 1.0)) * u_SunIntensity;\n"
+	"    vec3 light = vec3(d * light_scale);\n"
+	"    bool flashlight_active = u_FlashlightDirection.w >= 0.0;\n"
+	"    for(int i = 0; i < 4; ++i) {\n"
+	"        vec4 pr = u_LightPositionRadius[i];\n"
+	"        vec4 ci = u_LightColorIntensity[i];\n"
+	"        if(ci.a > 0.0 && (i != 3 || !flashlight_active)) {\n"
+	"            vec3 delta = pr.xyz - world;\n"
+	"            float distance_to_light = length(delta);\n"
+	"            float ratio = distance_to_light / max(abs(pr.w), 0.0001);\n"
+	"            float attenuation = clamp(1.0 - ratio, 0.0, 1.0);\n"
+	"            attenuation *= attenuation;\n"
+	"            vec3 light_direction = delta / max(distance_to_light, 0.0001);\n"
+	"            float diffuse = max(dot(N, light_direction), 0.0);\n"
+	"            float facing = 0.18 + 0.82 * diffuse;\n"
+	"            if(pr.w < 0.0) {\n"
+	"                float cone = smoothstep(u_SpotColorCone[i].w, mix(u_SpotColorCone[i].w, 1.0, 0.15),\n"
+	"                                        dot(-light_direction, normalize(ci.rgb)));\n"
+	"                float fill = clamp(1.0 - distance_to_light / 10.0, 0.0, 1.0);\n"
+	"                fill = 0.30 * fill * fill;\n"
+	"                light += u_SpotColorCone[i].rgb * ci.a * cone * (attenuation + fill * attenuation) * facing;\n"
+	"            } else {\n"
+	"                light += ci.rgb * ci.a * attenuation * facing;\n"
+	"            }\n"
+	"        }\n"
+	"    }\n"
+	"    if(flashlight_active) {\n"
+	"        vec4 pr = u_LightPositionRadius[3];\n"
+	"        vec4 ci = u_LightColorIntensity[3];\n"
+	"        vec3 from_light = world - pr.xyz;\n"
+	"        float light_distance = length(from_light);\n"
+	"        vec3 ray_direction = from_light / max(light_distance, 0.0001);\n"
+	"        float cone = smoothstep(u_SpotColorCone[3].w, mix(u_SpotColorCone[3].w, 1.0, 0.15),\n"
+	"                                dot(ray_direction, normalize(u_FlashlightDirection.xyz)));\n"
+	"        float range = clamp(1.0 - light_distance / max(pr.w, 0.0001), 0.0, 1.0);\n"
+	"        range *= range;\n"
+	"        float diffuse = max(dot(N, -ray_direction), 0.0);\n"
+	"        float fill = clamp(1.0 - light_distance / 10.0, 0.0, 1.0);\n"
+	"        fill = 0.30 * fill * fill;\n"
+	"        light += u_SpotColorCone[3].rgb * ci.a * cone * (range + fill * range) * (0.18 + 0.82 * diffuse);\n"
+	"    }\n"
+	"    vec4 lit = vec4(light, 1.0) * a_Color * u_TeamColor;\n"
+	"    v_Color = mix(lit, vec4(fog, 1.0), min(dist, 1.0));\n"
+	"    gl_PointSize = size / gl_Position.w;\n"
+	"}\n";
+static const char kv6_explicit_fragment[] =
+	"precision mediump float;\n"
+	"varying vec4 v_Color;\n"
+	"void main(void) {\n"
+	"    gl_FragColor = v_Color;\n"
+	"}\n";
+#endif
+#if !defined(GLX_PROGRAMMABLE)
+static const char kv6_compat_vertex[] =
+	"uniform float size;\n"
+	"uniform vec3 fog;\n"
+	"uniform vec3 camera;\n"
+	"uniform mat4 model;\n"
+	"uniform float dist_factor;\n"
+	"uniform vec3 u_SunDirection;\n"
+	"uniform float u_SunIntensity;\n"
+	"uniform vec4 u_LightPositionRadius[4];\n"
+	"uniform vec4 u_LightColorIntensity[4];\n"
+	"uniform vec4 u_SpotColorCone[4];\n"
+	"uniform vec4 u_FlashlightDirection;\n"
+	"void main(void) {\n"
+	"	gl_Position = gl_ModelViewProjectionMatrix*gl_Vertex;\n"
+	"	vec3 world = (model*gl_Vertex).xyz;\n"
+	"	float dist = length(world.xz-camera.xz)*dist_factor;\n"
+	"	vec3 N = normalize((model*vec4(gl_Normal,0)).xyz);\n"
+	"	vec3 L = normalize(u_SunDirection);\n"
+	"	float d = (0.5+0.5*clamp(dot(N,L),0.0,1.0))*u_SunIntensity;\n"
+	"	vec3 light = vec3(d);\n"
+	"	bool flashlight_active=u_FlashlightDirection.w>=0.0;\n"
+	"	for(int i=0;i<4;++i){\n"
+	"		vec4 pr=u_LightPositionRadius[i];\n"
+	"		vec4 ci=u_LightColorIntensity[i];\n"
+	"		if(ci.a>0.0&&(i!=3||!flashlight_active)){\n"
+	"			vec3 delta=pr.xyz-world;\n"
+	"			float distance_to_light=length(delta);\n"
+	"			float ratio=distance_to_light/max(abs(pr.w),0.0001);\n"
+	"			float attenuation=clamp(1.0-ratio,0.0,1.0);\n"
+	"			attenuation*=attenuation;\n"
+	"			vec3 light_direction=delta/max(distance_to_light,0.0001);\n"
+	"			float diffuse=max(dot(N,light_direction),0.0);\n"
+	"			float facing=0.18+0.82*diffuse;\n"
+	"			if(pr.w<0.0){\n"
+	"				float cone=smoothstep(u_SpotColorCone[i].w,mix(u_SpotColorCone[i].w,1.0,0.15),dot(-light_direction,normalize(ci.rgb)));\n"
+	"				float fill=clamp(1.0-distance_to_light/10.0,0.0,1.0);fill=0.30*fill*fill;\n"
+	"				light+=u_SpotColorCone[i].rgb*ci.a*cone*(attenuation+fill*attenuation)*facing;\n"
+	"			}else{\n"
+	"				light+=ci.rgb*ci.a*attenuation*facing;\n"
+	"			}\n"
+	"		}\n"
+	"	}\n"
+	"	if(flashlight_active){\n"
+	"		vec4 pr=u_LightPositionRadius[3],ci=u_LightColorIntensity[3];\n"
+	"		vec3 from_light=world-pr.xyz;\n"
+	"		float light_distance=length(from_light);\n"
+	"		vec3 ray_direction=from_light/max(light_distance,0.0001);\n"
+	"		float cone=smoothstep(u_SpotColorCone[3].w,mix(u_SpotColorCone[3].w,1.0,0.15),dot(ray_direction,normalize(u_FlashlightDirection.xyz)));\n"
+	"		float range=clamp(1.0-light_distance/max(pr.w,0.0001),0.0,1.0);range*=range;\n"
+	"		float diffuse=max(dot(N,-ray_direction),0.0);\n"
+	"		float fill=clamp(1.0-light_distance/10.0,0.0,1.0);fill=0.30*fill*fill;\n"
+	"		light+=u_SpotColorCone[3].rgb*ci.a*cone*(range+fill*range)*(0.18+0.82*diffuse);\n"
+	"	}\n"
+	"	gl_FrontColor = mix(vec4(light,1.0)*gl_Color,vec4(fog,1.0),min(dist,1.0));\n"
+	"	gl_PointSize = size/gl_Position.w;\n"
+	"}\n";
+static const char kv6_compat_fragment[] =
+	"void main(void) {\n"
+	"	gl_FragColor = gl_Color;\n"
+	"}\n";
+#endif
+
 static int kv6_program = -1;
 #if defined(GLX_PROGRAMMABLE)
 static int kv6_program_explicit = -1;
@@ -456,13 +626,36 @@ static bool model_programmable_active(void) {
 #endif
 }
 #endif
+/* Remember the actual format and meshing policy of each uploaded list. */
+static void kv6_sync_render_settings(struct kv6_t* kv6, int point, int greedy) {
+	point = !!point;
+	greedy = !!greedy;
+	if(kv6->has_display_list && (kv6->display_list_point != point
+	   || (!point && kv6->display_list_greedy != greedy)))
+		kv6_rebuild(kv6);
+	if(!kv6->has_display_list) {
+		kv6->display_list_point = point;
+		kv6->display_list_greedy = greedy;
+	}
+}
+
 static void kv6_render_unflipped(struct kv6_t* kv6, unsigned char team) {
 	if(!kv6)
 		return;
-	if(team == TEAM_SPECTATOR)
-		team = 2;
+	/* Cached lists belong to each model, including skin previews. Invalidate
+	   lazily on setting changes rather than relying on a global model list. */
+	kv6_sync_render_settings(kv6, settings.voxlap_models, settings.greedy_meshing);
 	if(!settings.voxlap_models) {
 		if(!kv6->has_display_list) {
+			uint8_t* marked = calloc((size_t)kv6->voxel_count, 1);
+			if(!marked) { log_warn("Could not allocate KV6 mesh workspace"); return; }
+			size_t max_dim = max(max(kv6->xsiz, kv6->ysiz), kv6->zsiz);
+			struct kv6_voxel** recent = settings.greedy_meshing ? malloc(max_dim * sizeof(*recent)) : NULL;
+			if(settings.greedy_meshing && !recent) {
+				free(marked);
+				log_warn("Could not allocate KV6 greedy mesh workspace");
+				return;
+			}
 			struct tesselator tess_color;
 			tesselator_create(&tess_color, VERTEX_INT, 1, 0);
 			struct tesselator tess_team;
@@ -471,11 +664,8 @@ static void kv6_render_unflipped(struct kv6_t* kv6, unsigned char team) {
 			glx_displaylist_create(kv6->display_list + 0, true, true);
 			glx_displaylist_create(kv6->display_list + 1, true, true);
 
-			uint8_t marked[kv6->voxel_count];
-			memset(marked, 0, sizeof(uint8_t) * kv6->voxel_count);
-
 			struct kv6_voxel* voxel = kv6->voxels;
-			for(size_t k = 0; k < kv6->voxel_count; k++, voxel++) {
+			for(size_t k = 0; k < (size_t)kv6->voxel_count; k++, voxel++) {
 				int b = red(voxel->color);
 				int g = green(voxel->color);
 				int r = blue(voxel->color);
@@ -494,57 +684,59 @@ static void kv6_render_unflipped(struct kv6_t* kv6, unsigned char team) {
 
 				if(voxel->visfaces & KV6_VIS_POS_Y) {
 					size_t max_x, max_z;
-					greedy_mesh(kv6, voxel, marked, &max_x, &max_z, KV6_VIS_POS_Y);
+					greedy_mesh(kv6, voxel, marked, &max_x, &max_z, KV6_VIS_POS_Y, recent);
 
-					tesselator_set_color(tess, rgba(r, g, b, 0));
+					tesselator_set_color(tess, rgba(r, g, b, 255));
 					tesselator_addi_cube_face_adv(tess, CUBE_FACE_Y_P, voxel->x, voxel->z, voxel->y, max_x, 1, max_z);
 				}
 
 				if(voxel->visfaces & KV6_VIS_NEG_Y) {
 					size_t max_x, max_z;
-					greedy_mesh(kv6, voxel, marked, &max_x, &max_z, KV6_VIS_NEG_Y);
+					greedy_mesh(kv6, voxel, marked, &max_x, &max_z, KV6_VIS_NEG_Y, recent);
 
-					tesselator_set_color(tess, rgba(r * 0.6F, g * 0.6F, b * 0.6F, 0));
+					tesselator_set_color(tess, rgba(r * 0.6F, g * 0.6F, b * 0.6F, 255));
 					tesselator_addi_cube_face_adv(tess, CUBE_FACE_Y_N, voxel->x, voxel->z, voxel->y, max_x, 1, max_z);
 				}
 
 				if(voxel->visfaces & KV6_VIS_NEG_Z) {
 					size_t max_x, max_y;
-					greedy_mesh(kv6, voxel, marked, &max_x, &max_y, KV6_VIS_NEG_Z);
+					greedy_mesh(kv6, voxel, marked, &max_x, &max_y, KV6_VIS_NEG_Z, recent);
 
-					tesselator_set_color(tess, rgba(r * 0.95F, g * 0.95F, b * 0.95F, 0));
+					tesselator_set_color(tess, rgba(r * 0.95F, g * 0.95F, b * 0.95F, 255));
 					tesselator_addi_cube_face_adv(tess, CUBE_FACE_Z_N, voxel->x, voxel->z - (max_y - 1), voxel->y,
 												  max_x, max_y, 1);
 				}
 
 				if(voxel->visfaces & KV6_VIS_POS_Z) {
 					size_t max_x, max_y;
-					greedy_mesh(kv6, voxel, marked, &max_x, &max_y, KV6_VIS_POS_Z);
+					greedy_mesh(kv6, voxel, marked, &max_x, &max_y, KV6_VIS_POS_Z, recent);
 
-					tesselator_set_color(tess, rgba(r * 0.9F, g * 0.9F, b * 0.9F, 0));
+					tesselator_set_color(tess, rgba(r * 0.9F, g * 0.9F, b * 0.9F, 255));
 					tesselator_addi_cube_face_adv(tess, CUBE_FACE_Z_P, voxel->x, voxel->z - (max_y - 1), voxel->y,
 												  max_x, max_y, 1);
 				}
 
 				if(voxel->visfaces & KV6_VIS_NEG_X) {
 					size_t max_y, max_z;
-					greedy_mesh(kv6, voxel, marked, &max_y, &max_z, KV6_VIS_NEG_X);
+					greedy_mesh(kv6, voxel, marked, &max_y, &max_z, KV6_VIS_NEG_X, recent);
 
-					tesselator_set_color(tess, rgba(r * 0.85F, g * 0.85F, b * 0.85F, 0));
+					tesselator_set_color(tess, rgba(r * 0.85F, g * 0.85F, b * 0.85F, 255));
 					tesselator_addi_cube_face_adv(tess, CUBE_FACE_X_N, voxel->x, voxel->z - (max_y - 1), voxel->y, 1,
 												  max_y, max_z);
 				}
 
 				if(voxel->visfaces & KV6_VIS_POS_X) {
 					size_t max_y, max_z;
-					greedy_mesh(kv6, voxel, marked, &max_y, &max_z, KV6_VIS_POS_X);
+					greedy_mesh(kv6, voxel, marked, &max_y, &max_z, KV6_VIS_POS_X, recent);
 
-					tesselator_set_color(tess, rgba(r * 0.8F, g * 0.8F, b * 0.8F, 0));
+					tesselator_set_color(tess, rgba(r * 0.8F, g * 0.8F, b * 0.8F, 255));
 					tesselator_addi_cube_face_adv(tess, CUBE_FACE_X_P, voxel->x, voxel->z - (max_y - 1), voxel->y, 1,
 												  max_y, max_z);
 				}
 			}
 
+			free(recent);
+			free(marked);
 			tesselator_glx(&tess_color, kv6->display_list + 0);
 			tesselator_glx(&tess_team, kv6->display_list + 1);
 
@@ -670,6 +862,7 @@ static void kv6_render_unflipped(struct kv6_t* kv6, unsigned char team) {
 #endif
 			glx_displaylist_draw(kv6->display_list + 1, GLX_DISPLAYLIST_NORMAL);
 
+			/* KV6 paths leave the shader tint neutral for the next draw. */
 			glx_set_team_color(1.0F, 1.0F, 1.0F);
 #ifndef GLX_PROGRAMMABLE
 			if(dynamic_model)
@@ -693,9 +886,20 @@ static void kv6_render_unflipped(struct kv6_t* kv6, unsigned char team) {
 	} else {
 		// render like on voxlap
 		if(!kv6->has_display_list) {
-			float vertices[2][kv6->voxel_count * 3];
-			uint8_t colors[2][kv6->voxel_count * 4];
-			int8_t normals[2][kv6->voxel_count * 3];
+			/* High-resolution skins can exceed mobile thread stack limits. */
+			size_t count = (size_t)kv6->voxel_count;
+			if(count > SIZE_MAX / (6 * sizeof(float))) {
+				log_warn("KV6 point workspace is too large");
+				return;
+			}
+			float (*vertices)[count * 3] = malloc(2 * sizeof(*vertices));
+			uint8_t (*colors)[count * 4] = malloc(2 * sizeof(*colors));
+			int8_t (*normals)[count * 3] = malloc(2 * sizeof(*normals));
+			if(!vertices || !colors || !normals) {
+				free(vertices); free(colors); free(normals);
+				log_warn("Could not allocate KV6 point workspace");
+				return;
+			}
 			kv6->has_display_list = true;
 
 			int cnt[2] = {0, 0};
@@ -711,18 +915,18 @@ static void kv6_render_unflipped(struct kv6_t* kv6, unsigned char team) {
 
 				int ind = ((r | g | b) == 0) ? 1 : 0;
 
-				colors[ind][cnt[ind] * 4 + 0] = r;
-				colors[ind][cnt[ind] * 4 + 1] = g;
-				colors[ind][cnt[ind] * 4 + 2] = b;
-				colors[ind][cnt[ind] * 4 + 3] = 255;
+				colors[ind][(size_t)cnt[ind] * 4 + 0] = r;
+				colors[ind][(size_t)cnt[ind] * 4 + 1] = g;
+				colors[ind][(size_t)cnt[ind] * 4 + 2] = b;
+				colors[ind][(size_t)cnt[ind] * 4 + 3] = 255;
 
-				normals[ind][cnt[ind] * 3 + 0] = kv6_normals[a][0] * 127;
-				normals[ind][cnt[ind] * 3 + 1] = -kv6_normals[a][2] * 127;
-				normals[ind][cnt[ind] * 3 + 2] = kv6_normals[a][1] * 127;
+				normals[ind][(size_t)cnt[ind] * 3 + 0] = kv6_normals[a][0] * 127;
+				normals[ind][(size_t)cnt[ind] * 3 + 1] = -kv6_normals[a][2] * 127;
+				normals[ind][(size_t)cnt[ind] * 3 + 2] = kv6_normals[a][1] * 127;
 
-				vertices[ind][cnt[ind] * 3 + 0] = (kv6->voxels[i].x - kv6->xpiv + 0.5F) * kv6->scale;
-				vertices[ind][cnt[ind] * 3 + 1] = (kv6->voxels[i].z - kv6->zpiv + 0.5F) * kv6->scale;
-				vertices[ind][cnt[ind] * 3 + 2] = (kv6->voxels[i].y - kv6->ypiv + 0.5F) * kv6->scale;
+				vertices[ind][(size_t)cnt[ind] * 3 + 0] = (kv6->voxels[i].x - kv6->xpiv + 0.5F) * kv6->scale;
+				vertices[ind][(size_t)cnt[ind] * 3 + 1] = (kv6->voxels[i].z - kv6->zpiv + 0.5F) * kv6->scale;
+				vertices[ind][(size_t)cnt[ind] * 3 + 2] = (kv6->voxels[i].y - kv6->ypiv + 0.5F) * kv6->scale;
 
 				cnt[ind]++;
 			}
@@ -732,86 +936,16 @@ static void kv6_render_unflipped(struct kv6_t* kv6, unsigned char team) {
 
 			glx_displaylist_update(kv6->display_list + 1, cnt[1], GLX_DISPLAYLIST_POINTS, colors[1], vertices[1],
 								   normals[1], NULL);
+			free(vertices); free(colors); free(normals);
 
 			if(kv6_program < 0) {
 #if defined(GLX_PROGRAMMABLE)
 				if(model_programmable_active()) {
-					/* Portable KV6 point shader with explicit vertex attributes. */
+					/* Portable KV6 point shader with explicit vertex attributes. Its
+					   flashlight fill matches lighting.c: fill *= range. Point
+					   sizes are subject to the driver's supported range. */
 					kv6_program_explicit
-						= glx_shader("attribute vec3 a_Position;\n"
-									 "attribute vec4 a_Color;\n"
-									 "attribute vec3 a_Normal;\n"
-									 "uniform float size;\n"
-									 "uniform vec3 fog;\n"
-									 "uniform vec3 camera;\n"
-									 "uniform mat4 model;\n"
-									 "uniform mat4 u_MVP;\n"
-									 "uniform float dist_factor;\n"
-									 "uniform float light_scale;\n"
-									 "uniform vec4 u_TeamColor;\n"
-									 "uniform vec3 u_SunDirection;\n"
-									 "uniform float u_SunIntensity;\n"
-									 "uniform vec4 u_LightPositionRadius[4];\n"
-									 "uniform vec4 u_LightColorIntensity[4];\n"
-									 "uniform vec4 u_SpotColorCone[4];\n"
-									 "uniform vec4 u_FlashlightDirection;\n"
-									 "varying vec4 v_Color;\n"
-									 "void main(void) {\n"
-									 "    gl_Position = u_MVP * vec4(a_Position, 1.0);\n"
-									 "    vec3 world = (model * vec4(a_Position, 1.0)).xyz;\n"
-									 "    float dist = length(world.xz - camera.xz) * dist_factor;\n"
-									 "    vec3 N = normalize((model * vec4(a_Normal, 0.0)).xyz);\n"
-									 "    vec3 L = normalize(u_SunDirection);\n"
-									 "    float d = (0.5 + 0.5 * clamp(dot(N, L), 0.0, 1.0)) * u_SunIntensity;\n"
-									 "    vec3 light = vec3(d * light_scale);\n"
-					 "    bool flashlight_active = u_FlashlightDirection.w >= 0.0;\n"
-					 "    for(int i = 0; i < 4; ++i) {\n"
-					 "        vec4 pr = u_LightPositionRadius[i];\n"
-					 "        vec4 ci = u_LightColorIntensity[i];\n"
-					 "        if(ci.a > 0.0 && (i != 3 || !flashlight_active)) {\n"
-					 "            vec3 delta = pr.xyz - world;\n"
-					 "            float distance_to_light = length(delta);\n"
-					 "            float ratio = distance_to_light / max(abs(pr.w), 0.0001);\n"
-					 "            float attenuation = clamp(1.0 - ratio, 0.0, 1.0);\n"
-					 "            attenuation *= attenuation;\n"
-					 "            vec3 light_direction = delta / max(distance_to_light, 0.0001);\n"
-					 "            float diffuse = max(dot(N, light_direction), 0.0);\n"
-					 "            float facing = 0.18 + 0.82 * diffuse;\n"
-					 "            if(pr.w < 0.0) {\n"
-					 "                float cone = smoothstep(u_SpotColorCone[i].w, mix(u_SpotColorCone[i].w, 1.0, 0.15),\n"
-					 "                                        dot(-light_direction, normalize(ci.rgb)));\n"
-					 "                float fill = clamp(1.0 - distance_to_light / 10.0, 0.0, 1.0);\n"
-					 "                fill = 0.30 * fill * fill;\n"
-					 "                light += u_SpotColorCone[i].rgb * ci.a * cone * (attenuation + fill * attenuation) * facing;\n"
-					 "            } else {\n"
-					 "                light += ci.rgb * ci.a * attenuation * facing;\n"
-					 "            }\n"
-					 "        }\n"
-					 "    }\n"
-					 "    if(flashlight_active) {\n"
-					 "        vec4 pr = u_LightPositionRadius[3];\n"
-					 "        vec4 ci = u_LightColorIntensity[3];\n"
-					 "        vec3 from_light = world - pr.xyz;\n"
-					 "        float light_distance = length(from_light);\n"
-					 "        vec3 ray_direction = from_light / max(light_distance, 0.0001);\n"
-					 "        float cone = smoothstep(u_SpotColorCone[3].w, mix(u_SpotColorCone[3].w, 1.0, 0.15),\n"
-					 "                                dot(ray_direction, normalize(u_FlashlightDirection.xyz)));\n"
-					 "        float range = clamp(1.0 - light_distance / max(pr.w, 0.0001), 0.0, 1.0);\n"
-					 "        range *= range;\n"
-					 "        float diffuse = max(dot(N, -ray_direction), 0.0);\n"
-					 "        float fill = clamp(1.0 - light_distance / 10.0, 0.0, 1.0);\n"
-					 "        fill = 0.30 * fill * fill;\n"
-					 "        light += u_SpotColorCone[3].rgb * ci.a * cone * (range + fill * range) * (0.18 + 0.82 * diffuse);\n"
-					 "    }\n"
-					 "    vec4 lit = vec4(light, 1.0) * a_Color * u_TeamColor;\n"
-									 "    v_Color = mix(lit, vec4(fog, 1.0), min(dist, 1.0));\n"
-									 "    gl_PointSize = size / gl_Position.w;\n"
-									 "}\n",
-									 "precision mediump float;\n"
-									 "varying vec4 v_Color;\n"
-									 "void main(void) {\n"
-									 "    gl_FragColor = v_Color;\n"
-									 "}\n");
+						= glx_shader(kv6_explicit_vertex, kv6_explicit_fragment);
 				if(kv6_program_explicit) {
 					log_info("KV6 explicit-attribute shader compiled (program %u)", kv6_program_explicit);
 					glx_use_program(kv6_program_explicit);
@@ -825,64 +959,7 @@ static void kv6_render_unflipped(struct kv6_t* kv6, unsigned char team) {
 #endif
 #if !defined(GLX_PROGRAMMABLE)
 				kv6_program
-					= glx_shader("uniform float size;\n"
-								 "uniform vec3 fog;\n"
-								 "uniform vec3 camera;\n"
-								 "uniform mat4 model;\n"
-								 "uniform float dist_factor;\n"
-								 "uniform vec3 u_SunDirection;\n"
-								 "uniform float u_SunIntensity;\n"
-								 "uniform vec4 u_LightPositionRadius[4];\n"
-								 "uniform vec4 u_LightColorIntensity[4];\n"
-									 "uniform vec4 u_SpotColorCone[4];\n"
-								 "uniform vec4 u_FlashlightDirection;\n"
-								 "void main(void) {\n"
-								 "	gl_Position = gl_ModelViewProjectionMatrix*gl_Vertex;\n"
-								 "	vec3 world = (model*gl_Vertex).xyz;\n"
-								 "	float dist = length(world.xz-camera.xz)*dist_factor;\n"
-								 "	vec3 N = normalize((model*vec4(gl_Normal,0)).xyz);\n"
-								 "	vec3 L = normalize(u_SunDirection);\n"
-								 "	float d = (0.5+0.5*clamp(dot(N,L),0.0,1.0))*u_SunIntensity;\n"
-								 "	vec3 light = vec3(d);\n"
-								 "	bool flashlight_active=u_FlashlightDirection.w>=0.0;\n"
-								 "	for(int i=0;i<4;++i){\n"
-								 "		vec4 pr=u_LightPositionRadius[i];\n"
-								 "		vec4 ci=u_LightColorIntensity[i];\n"
-								 "		if(ci.a>0.0&&(i!=3||!flashlight_active)){\n"
-								 "			vec3 delta=pr.xyz-world;\n"
-								 "			float distance_to_light=length(delta);\n"
-								 "			float ratio=distance_to_light/max(abs(pr.w),0.0001);\n"
-								 "			float attenuation=clamp(1.0-ratio,0.0,1.0);\n"
-								 "			attenuation*=attenuation;\n"
-								 "			vec3 light_direction=delta/max(distance_to_light,0.0001);\n"
-								 "			float diffuse=max(dot(N,light_direction),0.0);\n"
-								 "			float facing=0.18+0.82*diffuse;\n"
-								 "			if(pr.w<0.0){\n"
-								 "				float cone=smoothstep(u_SpotColorCone[i].w,mix(u_SpotColorCone[i].w,1.0,0.15),dot(-light_direction,normalize(ci.rgb)));\n"
-								 "				float fill=clamp(1.0-distance_to_light/10.0,0.0,1.0);fill=0.30*fill*fill;\n"
-								 "				light+=u_SpotColorCone[i].rgb*ci.a*cone*(attenuation+fill*attenuation)*facing;\n"
-								 "			}else{\n"
-								 "				light+=ci.rgb*ci.a*attenuation*facing;\n"
-								 "			}\n"
-								 "		}\n"
-								 "	}\n"
-								 "	if(flashlight_active){\n"
-								 "		vec4 pr=u_LightPositionRadius[3],ci=u_LightColorIntensity[3];\n"
-								 "		vec3 from_light=world-pr.xyz;\n"
-								 "		float light_distance=length(from_light);\n"
-								 "		vec3 ray_direction=from_light/max(light_distance,0.0001);\n"
-								 "		float cone=smoothstep(u_SpotColorCone[3].w,mix(u_SpotColorCone[3].w,1.0,0.15),dot(ray_direction,normalize(u_FlashlightDirection.xyz)));\n"
-								 "		float range=clamp(1.0-light_distance/max(pr.w,0.0001),0.0,1.0);range*=range;\n"
-								 "		float diffuse=max(dot(N,-ray_direction),0.0);\n"
-								 "		float fill=clamp(1.0-light_distance/10.0,0.0,1.0);fill=0.30*fill*fill;\n"
-								 "		light+=u_SpotColorCone[3].rgb*ci.a*cone*(range+fill*range)*(0.18+0.82*diffuse);\n"
-								 "	}\n"
-								 "	gl_FrontColor = mix(vec4(light,1.0)*gl_Color,vec4(fog,1.0),min(dist,1.0));\n"
-								 "	gl_PointSize = size/gl_Position.w;\n"
-								 "}\n",
-								 "void main(void) {\n"
-								 "	gl_FragColor = gl_Color;\n"
-								 "}\n");
+					= glx_shader(kv6_compat_vertex, kv6_compat_fragment);
 #endif
 			}
 		}
@@ -934,7 +1011,14 @@ static void kv6_render_unflipped(struct kv6_t* kv6, unsigned char team) {
 #endif
 #endif
 #ifndef OPENGL_CORE
+#if !defined(GLX_PROGRAMMABLE)
+		if(!glx_version || !kv6_program) {
+			/* Shader compilation already logged the failure. Use the fixed
+			   pipeline instead of binding program zero with shader uniforms. */
+			if(glx_version) glx_use_program(0);
+#else
 		if(!glx_version) {
+#endif
 			glPointParameterfv(GL_POINT_DISTANCE_ATTENUATION, (float[]) {0.0F, 0.0F, 1.0F});
 			glPointSize(1.414F * near_plane_height * kv6->scale * (len_x + len_y + len_z) / 3.0F);
 			glEnable(GL_LIGHTING);
@@ -946,7 +1030,11 @@ static void kv6_render_unflipped(struct kv6_t* kv6, unsigned char team) {
 			glEnable(GL_NORMALIZE);
 		}
 
+#if !defined(GLX_PROGRAMMABLE)
+		if(glx_version && kv6_program) {
+#else
 		if(glx_version) {
+#endif
 			glEnable(GL_PROGRAM_POINT_SIZE);
 			glx_use_program(kv6_program);
 			glUniform1f(glx_uniform_location(kv6_program, "dist_factor"),
@@ -997,6 +1085,7 @@ static void kv6_render_unflipped(struct kv6_t* kv6, unsigned char team) {
 
 		glx_displaylist_draw(kv6->display_list + 1, GLX_DISPLAYLIST_POINTS);
 
+		/* KV6 paths leave the shader tint neutral for the next draw. */
 		glx_set_team_color(1.0F, 1.0F, 1.0F);
 
 		if(settings.multisamples)
@@ -1015,7 +1104,11 @@ static void kv6_render_unflipped(struct kv6_t* kv6, unsigned char team) {
 #endif
 #endif
 #ifndef OPENGL_CORE
+#if !defined(GLX_PROGRAMMABLE)
+		if(glx_version && kv6_program) {
+#else
 		if(glx_version) {
+#endif
 			glx_use_program(0);
 			glDisable(GL_PROGRAM_POINT_SIZE);
 		}
@@ -1043,7 +1136,7 @@ static void kv6_render_unflipped(struct kv6_t* kv6, unsigned char team) {
    a reversed model often has an off-center grip pivot. Keep its center in
    place while reversing its muzzle. This applies to mesh and point renderers. */
 void kv6_render(struct kv6_t* kv6, unsigned char team) {
-    if(!kv6) return;
+    if(!kv6 || !kv6->voxels || kv6->voxel_count <= 0) return;
     if(kv6->flip_yaw) {
         float cx = (kv6->xsiz * 0.5F - kv6->xpiv) * kv6->scale;
         float cz = (kv6->ysiz * 0.5F - kv6->ypiv) * kv6->scale;

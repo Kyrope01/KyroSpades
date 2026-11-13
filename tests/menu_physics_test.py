@@ -28,8 +28,8 @@ assert 'if(!demo_is_frozen())' in loop[simulation:fixed_tick]
 assert 'if(hud_active->render_world || camera_mode == CAMERAMODE_FPS)' in loop
 
 fps = controller.split('void cameracontroller_fps(float dt) {', 1)[1].split('void cameracontroller_fps_render()', 1)[0]
-assert 'if(chat_input_mode == CHAT_NO_INPUT && hud_active->render_world)' in fps
-assert 'if(chat_input_mode != CHAT_NO_INPUT || !hud_active->render_world)' in fps
+assert 'if(chat_input_mode == CHAT_NO_INPUT && hud_active && hud_active->render_world)' in fps
+assert 'if(chat_input_mode != CHAT_NO_INPUT || !hud_active || !hud_active->render_world)' in fps
 assert 'input.buttons.packed = 0' in fps
 assert 'players[local_player_id].pos.x' in network.split('int network_update()', 1)[1]
 print('Menu simulation, input suppression and demo-freeze integration checks passed')

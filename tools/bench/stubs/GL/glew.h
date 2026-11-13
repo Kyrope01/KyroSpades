@@ -62,6 +62,7 @@ typedef unsigned short GLhalf;
 #define GL_QUADS 0x0007
 #define GL_LINES 0x0001
 #define GL_POINTS 0x0000
+#define GL_CLIENT_VERTEX_ARRAY_BIT 0x00000002
 #define GL_VERTEX_ARRAY 0x8074
 #define GL_NORMAL_ARRAY 0x8075
 #define GL_COLOR_ARRAY 0x8076
@@ -88,6 +89,7 @@ typedef unsigned short GLhalf;
 #define GL_CURRENT_PROGRAM 0x8B8D
 #define GL_CURRENT_COLOR 0x0B00
 #define GL_DEPTH_WRITEMASK 0x0B72
+#define GL_DEPTH_FUNC 0x0B74
 #define GL_PROGRAM_POINT_SIZE 0x8642
 #define GL_POINT_DISTANCE_ATTENUATION 0x8129
 #define GL_FRAMEBUFFER_BINDING 0x8CA6
@@ -143,6 +145,8 @@ static inline void glVertexPointer(GLint s, GLenum t, GLsizei stride, const void
 static inline void glNormalPointer(GLenum t, GLsizei stride, const void* p) { (void)t;(void)stride;(void)p; }
 static inline void glColorPointer(GLint s, GLenum t, GLsizei stride, const void* p) { (void)s;(void)t;(void)stride;(void)p; }
 static inline void glTexCoordPointer(GLint s, GLenum t, GLsizei stride, const void* p) { (void)s;(void)t;(void)stride;(void)p; }
+static inline void glPushClientAttrib(GLbitfield mask) { (void)mask; }
+static inline void glPopClientAttrib(void) {}
 static inline void glEnableClientState(GLenum c) { (void)c; }
 static inline void glDisableClientState(GLenum c) { (void)c; }
 static inline void glEnable(GLenum c) { (void)c; }

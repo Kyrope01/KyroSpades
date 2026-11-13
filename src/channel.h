@@ -47,6 +47,9 @@ void channel_put(struct channel* ch, void* object);
 
 void channel_await(struct channel* ch, void* object);
 
+/* Remove one item if available, without waiting. */
+bool channel_try_await(struct channel* ch, void* object);
+
 void channel_clear(struct channel* ch);
 
 #endif

@@ -50,7 +50,7 @@ enum sound_space {
 extern int sound_enabled;
 
 struct Sound_wav {
-        int openal_buffer;
+        unsigned int openal_buffer;
         float min, max;
 };
 

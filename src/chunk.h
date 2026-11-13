@@ -38,13 +38,14 @@ extern struct chunk {
 	int max_height; /* upper vertex bound, including the highest block's top face */
 	bool updated;
 	bool created;
-	int gen;
+	uint64_t gen;
 	int x, y;
 } chunks[CHUNKS_PER_DIM * CHUNKS_PER_DIM];
 
 #define CHUNK_WORKERS_MAX 16
 
 void chunk_init(void);
+void chunk_deinit(void);
 
 void chunk_block_update(int x, int y, int z);
 void chunk_update_all(void);

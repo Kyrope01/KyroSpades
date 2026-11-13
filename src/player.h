@@ -231,6 +231,9 @@ void player_set_orientation(int id, float x, float y, float z); /* remote player
 float player_height(const struct Player* p);
 float player_height2(const struct Player* p);
 void player_reposition(struct Player* p);
+/* locked=1 advances fixed-step player movement/collision. locked=0 updates
+   render-rate remote orientation/correction smoothing and corpse simulation;
+   it must not run authoritative player movement a second time. */
 void player_update(float dt, int locked);
 void player_render_all(void);
 void player_render(struct Player* p, int id);

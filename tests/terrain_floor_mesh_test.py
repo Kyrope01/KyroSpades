@@ -185,10 +185,10 @@ struct texture texture_minimap;
 int texture_blocks_custom_loaded = 0;
 struct Sound_wav sound_bounce;
 struct Sound_wav sound_debris;
-int ms_seed = 1;
+uint32_t ms_seed = 1;
 
 int ms_rand(void) {
-    ms_seed = ms_seed * 0x343FD + 0x269EC3;
+    ms_seed = ms_seed * 0x343FDu + 0x269EC3u;
     return (ms_seed >> 16) & 0x7FFF;
 }
 

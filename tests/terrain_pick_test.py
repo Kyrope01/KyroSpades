@@ -15,18 +15,9 @@ from pathlib import Path
 root = Path(__file__).resolve().parents[1]
 source = (root / 'src' / 'camera.c').read_text()
 
-# The traversal itself is camera_terrain_traverse() since the max walk distance
-# became a parameter (the audio probes pass their own, much shorter one);
-# camera_terrain_pickEx() is the public entry point that passes the map-wide
-# 128 units, which is what this test has always exercised.
-start = source.index('static int* camera_terrain_traverse(unsigned char mode,')
-end = source.index('\nint* camera_terrain_pickEx(unsigned char mode,', start)
-ddasrc = source[start:end] + '''
-int* camera_terrain_pickEx(unsigned char mode, float gx0, float gy0, float gz0,
-                           float ray_x, float ray_y, float ray_z) {
-    return camera_terrain_traverse(mode, gx0, gy0, gz0, ray_x, ray_y, ray_z, 128.0F);
-}
-'''
+start = source.index('static int* camera_terrain_pick_range(unsigned char mode, float gx0')
+end = source.index('\n}\n', start) + len('\n}\n')
+ddasrc = source[start:end] + '\n' + source[end:source.index('\nvoid camera_local_eye', end)]
 assert 'tmaxx' in ddasrc and 'INFINITY' in ddasrc, \
     'camera_terrain_traverse is no longer the tMax/dDelta traversal; update this test'
 

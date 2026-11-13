@@ -540,7 +540,7 @@ float map_sunblock(int x, int y, int z) {
         int dec = 18;
         int i = 127;
 
-        while(dec && y < map_size_y) {
+        while(dec && y + 1 < map_size_y) {
                 if(!map_isair(x, ++y, --z))
                         i -= dec;
                 dec -= 2;
@@ -595,7 +595,7 @@ static void map_collapsing_release(struct map_collapsing* c) {
                 tesselator_free(&c->mesh_geometry);
 }
 
-void map_deinit(void) {
+void map_stop_worker(void) {
         if(map_worker_started) {
                 channel_clear(&map_work_queue);
                 struct map_work_packet stop = {.x = -1};
@@ -603,6 +603,10 @@ void map_deinit(void) {
                 pthread_join(map_worker, NULL);
                 map_worker_started = 0;
         }
+}
+
+void map_deinit(void) {
+        map_stop_worker();
         while(channel_size(&map_result_queue)) {
                 struct map_collapsing result;
                 channel_await(&map_result_queue, &result);
@@ -623,33 +627,24 @@ void map_deinit(void) {
 
 int map_height_at(int x, int z) {
         uint32_t result[2];
-        if(!libvxl_map_gettop(&map, x, z, result))
+        pthread_rwlock_rdlock(&map_lock);
+        bool found = libvxl_map_gettop(&map, x, z, result);
+        pthread_rwlock_unlock(&map_lock);
+        if(!found)
                 return map_size_y - 1; /* Empty column: ground-height fallback. */
         return map_size_y - 1 - (int)result[1];
 }
 
-/* map_isair / map_get are the engine's hottest map probes — player physics,
-   particle collisions, bullet raycasts, camera clipping and the HUD call
-   them thousands of times per frame, and combat multiplies that (particle
-   bursts from breaking blocks, tracer steps from automatic fire). They used
-   to take a full pthread rwlock round-trip per call. That is nearly free
-   with glibc's futex-based rwlock on Linux, but winpthreads implements
-   rwlocks on top of a mutex + condition variables, so on Windows every
-   single probe cost several lock object operations — enough to collapse the
-   frame rate exactly when shooting at or breaking blocks.
-
-   All call sites of these two functions run on the MAIN thread, and writes
-   on the main thread can't race each other. The only off-main-thread writer
-   is the falling-blocks worker; a read racing its map_set just observes a
-   one-frame-stale block, which is benign for collision and shading. So the
-   main-thread probes take no lock at all, while the collapse worker keeps
-   its own serialized variants below. */
+/* The collapse worker can mutate/reallocate libvxl's chunk arrays while the
+   main thread reads. A stale-read argument is insufficient for these data
+   structures; synchronize readers with that writer. Bulk readers use the
+   _nolock variants while already holding one read lock. */
 bool map_isair(int x, int y, int z) {
-        return map_isair_nolock(x, y, z);
+        return map_isair_locked(x, y, z);
 }
 
 unsigned int map_get(int x, int y, int z) {
-        return map_get_nolock(x, y, z);
+        return map_get_locked(x, y, z);
 }
 
 void map_read_lock(void) {

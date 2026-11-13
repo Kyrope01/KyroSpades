@@ -1,9 +1,10 @@
 
 #include <stdlib.h>
 #include <string.h>
-#include <dirent.h>
 #include <math.h>
-#include <sys/stat.h>
+#include <ctype.h>
+#include <errno.h>
+#include <limits.h>
 
 #include "common.h"
 #include "skins.h"
@@ -47,9 +48,22 @@ static void flip_load(void) {
     if(!file_exists("skin-flips.txt")) return;
     char* data=(char*)file_load("skin-flips.txt");
     if(!data) return;
+    /* file_load returns a writable, NUL-terminated heap buffer. */
     for(char* line=strtok(data,"\r\n");line;line=strtok(NULL,"\r\n")) {
-        int c; char hex[SKIN_NAME_MAX*2+1], suffix[SKIN_NAME_MAX];
-        if(sscanf(line,"%d %96s",&c,hex)!=2) continue;
+        char* end;
+        errno = 0;
+        long category = strtol(line, &end, 10);
+        if(end == line || errno == ERANGE || category < INT_MIN || category > INT_MAX ||
+           !isspace((unsigned char)*end)) continue;
+        while(isspace((unsigned char)*end)) end++;
+        char* start = end;
+        while(*end && !isspace((unsigned char)*end)) end++;
+        size_t len = (size_t)(end - start);
+        char hex[SKIN_NAME_MAX * 2 + 1], suffix[SKIN_NAME_MAX];
+        if(!len || len >= sizeof(hex)) continue;
+        memcpy(hex, start, len);
+        hex[len] = 0;
+        int c = (int)category;
         if(!strcmp(hex,"-")) suffix[0]=0;
         else {
             size_t n=strlen(hex); bool valid=!(n&1) && n/2 < SKIN_NAME_MAX;
@@ -122,13 +136,73 @@ static int skin_reload_model(enum skin_category_type category, struct skin_categ
 	return 0;
 }
 
+/* Keep these in the same order as the player's live model definitions. */
+enum skin_player_model {
+	SKIN_PLAYER_HEAD, SKIN_PLAYER_TORSO, SKIN_PLAYER_TORSO_CROUCH,
+	SKIN_PLAYER_ARMS, SKIN_PLAYER_LEG, SKIN_PLAYER_LEG_CROUCH,
+	SKIN_PLAYER_DEAD, SKIN_PLAYER_MODEL_COUNT
+};
+
+struct skin_scan_context {
+	struct skin_category* cat;
+	enum skin_category_type category;
+	int capacity;
+};
+
+/* file_dir_list also sees packaged Android assets, unlike opendir/stat. */
+static void skin_scan_file(const char* name, void* user) {
+	struct skin_scan_context* ctx = user;
+	struct skin_category* cat = ctx->cat;
+	char prefix[64];
+	snprintf(prefix, sizeof(prefix), "%s(", cat->models[0].basename);
+	size_t prefix_len = strlen(prefix), len = strlen(name);
+	if(len <= prefix_len + 5 || strncmp(name, prefix, prefix_len) ||
+	   strcmp(name + len - 5, ").kv6")) return;
+	size_t name_len = len - prefix_len - 5;
+	if(name_len >= SKIN_NAME_MAX || memchr(name + prefix_len, ')', name_len)) return;
+	if(cat->count >= ctx->capacity) {
+		int capacity = ctx->capacity * 2;
+		void* entries = realloc(cat->entries, sizeof(struct skin_entry) * capacity);
+		if(!entries) { log_warn("Could not allocate skin entry"); return; }
+		cat->entries = entries;
+		ctx->capacity = capacity;
+	}
+	struct skin_entry* e = &cat->entries[cat->count];
+	memcpy(e->name, name + prefix_len, name_len);
+	e->name[name_len] = 0;
+	memcpy(e->suffix, e->name, name_len + 1);
+	/* Keep a user skin named Default selectable without disguising it. */
+	if(!strcmp(e->name, "Default"))
+		snprintf(e->name, sizeof(e->name), "Default (custom)");
+	e->previews = calloc(cat->model_count, sizeof(struct kv6_t));
+	if(!e->previews) { log_warn("Could not allocate skin previews"); return; }
+	for(int m = 0; m < cat->model_count; m++) {
+		char mp[256];
+		snprintf(mp, sizeof(mp), "kv6/%s(%s).kv6", cat->models[m].basename, e->suffix);
+		skin_reload_model(ctx->category, cat, m, &e->previews[m], mp);
+		e->previews[m].flip_yaw = skins_weapon_category(ctx->category) && flip_find(ctx->category, e->suffix) >= 0;
+	}
+	/* Do not offer directories or malformed models as selectable skins. */
+	if(!e->previews[0].voxels) {
+		for(int m = 0; m < cat->model_count; m++) free(e->previews[m].voxels);
+		free(e->previews);
+		return;
+	}
+	cat->count++;
+}
+
 void skins_scan(void) {
 	for(int c = 0; c < SKIN_CATEGORIES; c++) {
 		struct skin_category* cat = &skin_categories[c];
 
 		if(cat->entries) {
-			for(int i = 0; i < cat->count; i++)
+			for(int i = 0; i < cat->count; i++) {
+				for(int m = 0; m < cat->model_count; m++) {
+					kv6_rebuild(&cat->entries[i].previews[m]);
+					free(cat->entries[i].previews[m].voxels);
+				}
 				free(cat->entries[i].previews);
+			}
 			free(cat->entries);
 			cat->entries = NULL;
 		}
@@ -171,14 +245,14 @@ void skins_scan(void) {
 				break;
 			case SKIN_PLAYER:
 				strcpy(cat->label, "Player");
-				cat->model_count = 7;
-				cat->models[0] = (struct skin_model_def){&model_playerhead, "playerhead", 0.1F};
-				cat->models[1] = (struct skin_model_def){&model_playertorso, "playertorso", 0.1F};
-				cat->models[2] = (struct skin_model_def){&model_playertorsoc, "playertorsoc", 0.1F};
-				cat->models[3] = (struct skin_model_def){&model_playerarms, "playerarms", 0.1F};
-				cat->models[4] = (struct skin_model_def){&model_playerleg, "playerleg", 0.1F};
-				cat->models[5] = (struct skin_model_def){&model_playerlegc, "playerlegc", 0.1F};
-				cat->models[6] = (struct skin_model_def){&model_playerdead, "playerdead", 0.1F};
+				cat->model_count = SKIN_PLAYER_MODEL_COUNT;
+				cat->models[SKIN_PLAYER_HEAD] = (struct skin_model_def){&model_playerhead, "playerhead", 0.1F};
+				cat->models[SKIN_PLAYER_TORSO] = (struct skin_model_def){&model_playertorso, "playertorso", 0.1F};
+				cat->models[SKIN_PLAYER_TORSO_CROUCH] = (struct skin_model_def){&model_playertorsoc, "playertorsoc", 0.1F};
+				cat->models[SKIN_PLAYER_ARMS] = (struct skin_model_def){&model_playerarms, "playerarms", 0.1F};
+				cat->models[SKIN_PLAYER_LEG] = (struct skin_model_def){&model_playerleg, "playerleg", 0.1F};
+				cat->models[SKIN_PLAYER_LEG_CROUCH] = (struct skin_model_def){&model_playerlegc, "playerlegc", 0.1F};
+				cat->models[SKIN_PLAYER_DEAD] = (struct skin_model_def){&model_playerdead, "playerdead", 0.1F};
 				cat->sound_count = 0;
 				break;
 			case SKIN_INTEL:
@@ -195,11 +269,22 @@ void skins_scan(void) {
 				break;
 		}
 
+		/* Capacity is per scan; callbacks grow it as needed. */
 		int capacity = 8;
 		cat->entries = malloc(sizeof(struct skin_entry) * capacity);
+		if(!cat->entries) {
+			log_warn("Could not allocate skin category %d", c);
+			continue;
+		}
 		strcpy(cat->entries[0].name, "Default");
 		cat->entries[0].suffix[0] = 0;
 		cat->entries[0].previews = calloc(cat->model_count, sizeof(struct kv6_t));
+		if(!cat->entries[0].previews) {
+			log_warn("Could not allocate default skin previews for category %d", c);
+			free(cat->entries);
+			cat->entries = NULL;
+			continue;
+		}
 		for(int m = 0; m < cat->model_count; m++) {
 			char mp[256];
 			snprintf(mp, sizeof(mp), "kv6/%s.kv6", cat->models[m].basename);
@@ -208,65 +293,35 @@ void skins_scan(void) {
 		}
 		cat->count = 1;
 
-		char prefix[64];
-		snprintf(prefix, sizeof(prefix), "%s(", cat->models[0].basename);
-		int prefix_len = strlen(prefix);
-
-		DIR* dir = opendir("kv6");
-		if(!dir)
-			continue;
-
-		struct dirent* entry;
-		while((entry = readdir(dir)) != NULL) {
-			/* d_type is unreliable: MinGW and some filesystems always report
-			   DT_UNKNOWN, so we can't gate on DT_REG. stat() the path and test
-			   S_ISREG instead — correct on every platform. This replaces the
-			   old CI-time sed patch that rewrote this block on Windows only. */
-			struct stat st;
-			char stat_path[512];
-			snprintf(stat_path, sizeof(stat_path), "kv6/%s", entry->d_name);
-			if(stat(stat_path, &st) == 0 && S_ISREG(st.st_mode)) {
-				const char* name = entry->d_name;
-				int len = strlen(name);
-				if(len > 4 && strcmp(name + len - 4, ".kv6") == 0) {
-					if(strncmp(name, prefix, prefix_len) == 0) {
-						const char* paren_close = strchr(name + prefix_len, ')');
-						if(paren_close && paren_close > name + prefix_len
-						   && (size_t)(paren_close - name) == (size_t)(len - 5)) {
-							int name_len = paren_close - (name + prefix_len);
-							if(name_len > 0 && name_len < SKIN_NAME_MAX) {
-								if(cat->count >= capacity) {
-									capacity *= 2;
-									cat->entries = realloc(cat->entries,
-										sizeof(struct skin_entry) * capacity);
-								}
-								struct skin_entry* e = &cat->entries[cat->count];
-								memcpy(e->name, name + prefix_len, name_len);
-								e->name[name_len] = 0;
-								memcpy(e->suffix, e->name, name_len + 1);
-								e->previews = calloc(cat->model_count, sizeof(struct kv6_t));
-								for(int m = 0; m < cat->model_count; m++) {
-									char mp[256];
-									snprintf(mp, sizeof(mp), "kv6/%s(%s).kv6",
-										cat->models[m].basename, e->suffix);
-									skin_reload_model((enum skin_category_type)c, cat, m, &e->previews[m], mp);
-									e->previews[m].flip_yaw = skins_weapon_category(c) && flip_find(c, e->suffix) >= 0;
-								}
-								cat->count++;
-							}
-						}
-					}
-				}
-			}
-		}
-		closedir(dir);
+		struct skin_scan_context context = {cat, (enum skin_category_type)c, capacity};
+		file_dir_list("kv6", skin_scan_file, &context);
 
 		if(cat->count > 1)
 			qsort(cat->entries + 1, cat->count - 1, sizeof(struct skin_entry), entry_compare);
 	}
 }
 
-int skins_apply(enum skin_category_type category, int entry, int models) {
+/* A failed decode must not destroy the previous usable sight. */
+static void skin_load_scope(struct texture* zoom_tex, char* path, const char* default_png) {
+	struct texture replacement = {0};
+	int loaded = texture_create(&replacement, path);
+	if(!loaded && strcmp(path, default_png)) {
+		log_warn("Could not load skin PNG %s, falling back to %s", path, default_png);
+		loaded = texture_create(&replacement, (char*)default_png);
+	}
+	if(loaded) {
+		texture_delete(zoom_tex);
+		*zoom_tex = replacement;
+	} else {
+		log_warn("Could not load scope PNG %s; keeping previous sight", default_png);
+	}
+}
+
+static bool sound_uses_skin_suffix(enum skin_category_type category, int sound_index, const char* suffix) {
+	return suffix[0] && (category != SKIN_RIFLE || sound_index == 0 || legacy_mod_reload_suffix(suffix));
+}
+
+int skins_apply(enum skin_category_type category, int entry, int reload_models) {
 	if(category < 0 || category >= SKIN_CATEGORIES)
 		return -1;
 	struct skin_category* cat = &skin_categories[category];
@@ -276,8 +331,9 @@ int skins_apply(enum skin_category_type category, int entry, int models) {
 	struct skin_entry* e = &cat->entries[entry];
 	int ok = 0;
 
-	if(models) {
+	if(reload_models) {
 		for(int m = 0; m < cat->model_count; m++) {
+			if(!cat->models[m].ptr) continue;
 			char path[256];
 			if(e->suffix[0])
 				snprintf(path, sizeof(path), "kv6/%s(%s).kv6",
@@ -293,9 +349,14 @@ int skins_apply(enum skin_category_type category, int entry, int models) {
 		}
 	}
 
+	/* If the model disappeared or is invalid, keep the previous skin's
+	   tracer, sound and sight instead of applying a partial selection. */
+	if(reload_models && !ok)
+		return -1;
+
 	/* Tracers follow the selected weapon skin. Unspecified models reset to
 	   the base tracer instead of retaining the previous skin's projectile. */
-	if(models && skins_weapon_category(category)) {
+	if(reload_models && skins_weapon_category(category)) {
 		struct kv6_t* tracer = category == SKIN_RIFLE ? &model_semi_tracer :
 		                      category == SKIN_SMG ? &model_smg_tracer : &model_shotgun_tracer;
 		char tracer_path[256];
@@ -312,7 +373,7 @@ int skins_apply(enum skin_category_type category, int entry, int models) {
 
 	for(int s = 0; s < cat->sound_count; s++) {
 		char path[256];
-		if(e->suffix[0] && (s == 0 || category != SKIN_RIFLE || legacy_mod_reload_suffix(e->suffix))) {
+		if(sound_uses_skin_suffix(category, s, e->suffix)) {
 			snprintf(path, sizeof(path), "wav/%s(%s).wav",
 				cat->sounds[s].basename, e->suffix);
 			if(!file_exists(path))
@@ -358,22 +419,21 @@ int skins_apply(enum skin_category_type category, int entry, int models) {
 		} else {
 			snprintf(path, sizeof(path), "%s", default_png);
 		}
-		texture_delete(zoom_tex);
-		texture_create(zoom_tex, path);
+		skin_load_scope(zoom_tex, path, default_png);
 	}
 
 	return ok ? 0 : -1;
 }
 
-void skins_apply_all(int models) {
-	skins_apply(SKIN_SPADE, settings.skin_spade, models);
-	skins_apply(SKIN_GRENADE, settings.skin_grenade, models);
-	skins_apply(SKIN_RIFLE, settings.skin_rifle, models);
-	skins_apply(SKIN_SMG, settings.skin_smg, models);
-	skins_apply(SKIN_SHOTGUN, settings.skin_shotgun, models);
-	skins_apply(SKIN_PLAYER, settings.skin_player, models);
-	skins_apply(SKIN_INTEL, settings.skin_intel, models);
-	skins_apply(SKIN_TENT, settings.skin_tent, models);
+void skins_apply_all(int reload_models) {
+	skins_apply(SKIN_SPADE, settings.skin_spade, reload_models);
+	skins_apply(SKIN_GRENADE, settings.skin_grenade, reload_models);
+	skins_apply(SKIN_RIFLE, settings.skin_rifle, reload_models);
+	skins_apply(SKIN_SMG, settings.skin_smg, reload_models);
+	skins_apply(SKIN_SHOTGUN, settings.skin_shotgun, reload_models);
+	skins_apply(SKIN_PLAYER, settings.skin_player, reload_models);
+	skins_apply(SKIN_INTEL, settings.skin_intel, reload_models);
+	skins_apply(SKIN_TENT, settings.skin_tent, reload_models);
 }
 
 void skins_render_preview(enum skin_category_type category, int entry, float cx, float cy, float size) {
@@ -383,7 +443,9 @@ void skins_render_preview(enum skin_category_type category, int entry, float cx,
 	if(entry < 0 || entry >= cat->count)
 		return;
 
-	mat4 saved_proj;
+	mat4 saved_proj, saved_view;
+	memcpy(saved_view, matrix_view, sizeof(mat4));
+	matrix_identity(matrix_view);
 	memcpy(saved_proj, matrix_projection, sizeof(mat4));
 	matrix_ortho(matrix_projection, 0.0, settings.window_width, 0.0, settings.window_height, -100.0, 100.0);
 	matrix_upload_p();
@@ -405,7 +467,8 @@ void skins_render_preview(enum skin_category_type category, int entry, float cx,
 
 	for(int m = 0; m < cat->model_count; m++) {
 		/* skip colored variants and dead body for player */
-		if(category == SKIN_PLAYER && (m == 2 || m == 5 || m == 6))
+		if(category == SKIN_PLAYER && (m == SKIN_PLAYER_TORSO_CROUCH ||
+		    m == SKIN_PLAYER_LEG_CROUCH || m == SKIN_PLAYER_DEAD))
 			continue;
 
 		struct kv6_t* model = &cat->entries[entry].previews[m];
@@ -413,15 +476,12 @@ void skins_render_preview(enum skin_category_type category, int entry, float cx,
 		matrix_push(matrix_model);
 
 		if(category == SKIN_PLAYER) {
-			float offsets[][3] = {
-				{0.0F, 0.9F, 0.0F},  // head
-				{0.0F, 0.0F, 0.0F},  // torso
-				{0.0F, 0.0F, 0.0F},  // arms
-				{0.0F, -0.8F, 0.0F}, // leg
+			static const float offsets[SKIN_PLAYER_MODEL_COUNT][3] = {
+				[SKIN_PLAYER_HEAD] = {0.0F, 0.9F, 0.0F},
+				[SKIN_PLAYER_LEG] = {0.0F, -0.8F, 0.0F},
 			};
-			int idx = (m < 2) ? m : (m - 1);
-			if(idx >= 0 && idx < 4)
-				matrix_translate(matrix_model, offsets[idx][0], offsets[idx][1], offsets[idx][2]);
+			if(m < SKIN_PLAYER_MODEL_COUNT)
+				matrix_translate(matrix_model, offsets[m][0], offsets[m][1], offsets[m][2]);
 		} else if(category == SKIN_INTEL || category == SKIN_TENT) {
 			/* center models using their pivot */
 			matrix_translate(matrix_model,
@@ -436,6 +496,7 @@ void skins_render_preview(enum skin_category_type category, int entry, float cx,
 	}
 
 	memcpy(matrix_model, saved_model, sizeof(mat4));
+	memcpy(matrix_view, saved_view, sizeof(mat4));
 	memcpy(matrix_projection, saved_proj, sizeof(mat4));
 	matrix_upload();
 	matrix_upload_p();

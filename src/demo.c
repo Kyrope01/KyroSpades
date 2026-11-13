@@ -9,6 +9,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <math.h>
+#include <limits.h>
 #include <sys/stat.h>
 #ifndef _WIN32
 #include <dirent.h>
@@ -134,12 +136,20 @@ FILE* create_demo_file(void) {
 void register_demo_packet(ENetPacket* packet) {
     if (!CurrentDemo.fp) return;
 
-    float          c_time = (float)(window_time() - CurrentDemo.start_time);
-    unsigned short len    = (unsigned short)packet->dataLength;
-
-    fwrite(&c_time,         sizeof(float),          1, CurrentDemo.fp);
-    fwrite(&len,            sizeof(unsigned short),  1, CurrentDemo.fp);
-    fwrite(packet->data,    packet->dataLength,      1, CurrentDemo.fp);
+    if (!packet || !packet->data || !packet->dataLength || packet->dataLength > USHRT_MAX) {
+        log_error("Demo: packet cannot be represented in the recording; stopping");
+        demo_stop_record();
+        return;
+    }
+    float c_time = (float)(window_time() - CurrentDemo.start_time);
+    unsigned short len = (unsigned short)packet->dataLength;
+    if (!isfinite(c_time) || c_time < 0 ||
+        fwrite(&c_time, sizeof(c_time), 1, CurrentDemo.fp) != 1 ||
+        fwrite(&len, sizeof(len), 1, CurrentDemo.fp) != 1 ||
+        fwrite(packet->data, 1, len, CurrentDemo.fp) != len) {
+        log_error("Demo: recording write failed; stopping");
+        demo_stop_record();
+    }
 }
 
 static void demo_record_teamplay_packet(const uint8_t* data, size_t len) {
@@ -333,23 +343,31 @@ bool demo_playback_open(const char* filename) {
     int count = 0;
     float last_ts = 0.0f;
 
-    while (!feof(f)) {
+    bool invalid = false;
+    for (;;) {
         float          ts;
         unsigned short len;
 
-        if (fread(&ts,  sizeof(float),          1, f) != 1) break;
-        if (fread(&len, sizeof(unsigned short),  1, f) != 1) break;
-        if (len == 0) break;
+        size_t got = fread(&ts, 1, sizeof(ts), f);
+        if (!got && feof(f) && !ferror(f)) break;
+        if (got != sizeof(ts) || fread(&len, 1, sizeof(len), f) != sizeof(len) ||
+            !len || !isfinite(ts) || ts < 0 || (count && ts < last_ts)) {
+            invalid = true;
+            break;
+        }
 
         unsigned char* data = malloc(len);
-        if (!data) break;
-        if (fread(data, 1, len, f) != len) { free(data); break; }
+        if (!data) { invalid = true; break; }
+        if (fread(data, 1, len, f) != len) { free(data); invalid = true; break; }
 
         if (count == capacity) {
+            if (capacity > INT_MAX / 2 || (size_t)capacity * 2 > SIZE_MAX / sizeof(*pkts)) {
+                free(data); invalid = true; break;
+            }
             capacity *= 2;
             struct DemoPacketEntry* tmp =
                 realloc(pkts, (size_t)capacity * sizeof(struct DemoPacketEntry));
-            if (!tmp) { free(data); break; }
+            if (!tmp) { free(data); invalid = true; break; }
             pkts = tmp;
         }
 
@@ -361,8 +379,9 @@ bool demo_playback_open(const char* filename) {
     }
     fclose(f);
 
-    if (count == 0) {
-        log_error("Demo: no packets found in '%s'", filename);
+    if (invalid || count == 0) {
+        log_error("Demo: invalid or empty recording '%s'", filename);
+        for (int i = 0; i < count; i++) free(pkts[i].data);
         free(pkts);
         return false;
     }
@@ -486,7 +505,9 @@ void demo_playback_save_initial_map(const void* data, size_t size) {
     memcpy(copy, data, size);
 
     struct DemoMapSnapshot* m = &DemoPlaybackState.maps[DemoPlaybackState.map_count++];
-    m->timestamp    = DemoPlaybackState.current_time;
+    m->timestamp    = pkt < DemoPlaybackState.packet_count
+                          ? DemoPlaybackState.packets[pkt].timestamp
+                          : DemoPlaybackState.current_time;
     m->packet_index = pkt;
     m->data         = copy;
     m->size         = size;
@@ -596,7 +617,7 @@ static void demo_fast_replay_to(int from_index, float target_time) {
  *  and replay up to the target; demo_reset_world() also wipes chat so the *
  *  silent pass rebuilds it without duplicates.                            */
 void demo_playback_seek(float time) {
-    if (!DemoPlaybackState.active) return;
+    if (!DemoPlaybackState.active || !isfinite(time)) return;
 
     if (time < 0.0f) time = 0.0f;
     if (time > DemoPlaybackState.duration) time = DemoPlaybackState.duration;
@@ -678,6 +699,7 @@ void demo_playback_toggle_pause(void) {
 }
 
 void demo_playback_set_speed(float speed) {
+    if (!isfinite(speed)) return;
     if (speed < 0.25f) speed = 0.25f;
     if (speed > 8.0f)  speed = 8.0f;
     DemoPlaybackState.speed = speed;
