@@ -277,8 +277,8 @@ static const char* default_fs =
         "            light += u_SpotColorCone[3].rgb * ci.a * (cone * (range + fill)) * (0.18 + 0.82 * diffuse);\n"
         "        }\n"
         /* A glowing block's faces are the light themselves (marker alpha written
-           by the mesher), so the accumulated light must not dim them. */
-        "        float emissive = 1.0 - step(0.9995, v_Color.a);\n"
+            by the mesher), so the accumulated light must not dim them. */
+        "        float emissive = step(0.995, v_Color.a) * (1.0 - step(0.9995, v_Color.a));\n"
         "        c.rgb *= mix(light, vec3(1.25), emissive);\n"
         "    }\n"
         "    float fog = v_FogDistance * v_FogDistance * (3.0 - 2.0 * v_FogDistance);\n"
@@ -444,7 +444,10 @@ void glx_init() {
                         if(sun_location >= 0) glUniform3f(sun_location, -0.5F, 0.8F, -0.3F);
                         if(sun_color_location >= 0) glUniform3f(sun_color_location, 1.0F, 0.94F, 0.82F);
                         if(ambient_location >= 0) glUniform3f(ambient_location, 0.68F, 0.72F, 0.80F);
-                        glx_use_program(0);
+glx_use_program(0);
+                         GLint flashlight_dir_location = glx_uniform_location(default_shader, "u_FlashlightDirection");
+                         if(flashlight_dir_location >= 0)
+                                 glUniform4f(flashlight_dir_location, 0.0F, 0.0F, -1.0F, -1.0F);
 #ifdef OPENGL_ES
                         log_info("GLES 2.0 default shader compiled (program %u)", default_shader);
 #else
@@ -762,6 +765,13 @@ void glx_displaylist_update(struct glx_displaylist* x, size_t size, int type, vo
 
 #ifndef GLX_PROGRAMMABLE
         if(x->use_legacy) {
+                /* The pointers below refer to client memory, not VBO offsets. */
+                if(glx_version)
+                        glBindBuffer(GL_ARRAY_BUFFER, 0);
+                glNewList(x->legacy, GL_COMPILE);
+                /* OpenGL only records commands issued inside the list body, so
+                   the client-state enables must live inside glNewList/glEndList
+                   to be replayed by glCallList. */
                 glEnableClientState(GL_VERTEX_ARRAY);
                 if(x->has_color)
                         glEnableClientState(GL_COLOR_ARRAY);
@@ -770,10 +780,6 @@ void glx_displaylist_update(struct glx_displaylist* x, size_t size, int type, vo
                 if(x->has_texcoord)
                         glEnableClientState(GL_TEXTURE_COORD_ARRAY);
 
-                /* The pointers below refer to client memory, not VBO offsets. */
-                if(glx_version)
-                        glBindBuffer(GL_ARRAY_BUFFER, 0);
-                glNewList(x->legacy, GL_COMPILE);
                 if(size > 0) {
                         if(x->has_color)
                                 glColorPointer(4, GL_UNSIGNED_BYTE, 0, color);
@@ -791,14 +797,6 @@ void glx_displaylist_update(struct glx_displaylist* x, size_t size, int type, vo
                         glDrawArrays((type == GLX_DISPLAYLIST_POINTS) ? GL_POINTS : GL_QUADS, 0, x->size);
                 }
                 glEndList();
-
-                glDisableClientState(GL_VERTEX_ARRAY);
-                if(x->has_color)
-                        glDisableClientState(GL_COLOR_ARRAY);
-                if(x->has_normal)
-                        glDisableClientState(GL_NORMAL_ARRAY);
-                if(x->has_texcoord)
-                        glDisableClientState(GL_TEXTURE_COORD_ARRAY);
         } else {
 #endif
                 size_t len_vertex = ((type == GLX_DISPLAYLIST_NORMAL) ? sizeof(GLshort) : sizeof(GLfloat)) * 3;
@@ -1017,6 +1015,14 @@ void glx_displaylist_draw(struct glx_displaylist* x, int type) {
                                 glVertexAttrib4f(1, 1.0F, 1.0F, 1.0F, 1.0F);
                         }
 #ifdef GLX_PROGRAMMABLE
+                        /* No vertex colour data for this mesh: the shader must
+                           sample the current colour, not a stale uniform left
+                           over from the previously drawn mesh. */
+                        if(glx_current_program() == (GLint)default_shader) {
+                                glUniform4fv(loc_u_Color, 1, gles_current_color);
+                        }
+#endif
+#ifdef GLX_PROGRAMMABLE
                         /* Only the programmable default shader owns this uniform. */
                         GLint cur_prog;
                         cur_prog = (GLint)glx_current_program();
@@ -1133,22 +1139,34 @@ void glx_default_shader_set_draw_state(int with_vertex_color, int texture_enable
 
 void glx_default_shader_set_texcoord_scale(float scale) {
         if(glx_programmable_active() && default_shader) {
-                glx_use_default_shader();
-                glUniform1f(loc_u_TexCoordScale, scale);
+                GLint cur_prog;
+                cur_prog = (GLint)glx_current_program();
+                if(cur_prog == (GLint)default_shader) {
+                        glx_use_default_shader();
+                        glUniform1f(loc_u_TexCoordScale, scale);
+                }
         }
 }
 
 void glx_default_shader_set_alpha_cutoff(float threshold) {
         if(glx_programmable_active() && default_shader) {
-                glx_use_default_shader();
-                glUniform1f(loc_u_AlphaCutoff, fmaxf(threshold, 0.0F));
+                GLint cur_prog;
+                cur_prog = (GLint)glx_current_program();
+                if(cur_prog == (GLint)default_shader) {
+                        glx_use_default_shader();
+                        glUniform1f(loc_u_AlphaCutoff, fmaxf(threshold, 0.0F));
+                }
         }
 }
 
 void glx_default_shader_set_light_scale(float scale) {
         if(glx_programmable_active() && default_shader) {
-                glx_use_default_shader();
-                glUniform1f(loc_u_LightScale, fmaxf(scale, 0.0F));
+                GLint cur_prog;
+                cur_prog = (GLint)glx_current_program();
+                if(cur_prog == (GLint)default_shader) {
+                        glx_use_default_shader();
+                        glUniform1f(loc_u_LightScale, fmaxf(scale, 0.0F));
+                }
         }
 }
 
@@ -1225,14 +1243,11 @@ void glx_draw_screen_quad(void) {
         if(!quad_vbo)
                 return;
 #ifdef OPENGL_CORE
-        if(!quad_vbo || !quad_vao)
+        if(!quad_vao || !quad_vao)
                 return;
-        GLint previous_vao = 0;
-        glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &previous_vao);
         glBindVertexArray(quad_vao);
         glx_stats_draw();
         glDrawArrays(GL_TRIANGLES, 0, 6);
-        glBindVertexArray((GLuint)previous_vao);
 #else
         glBindBuffer(GL_ARRAY_BUFFER, quad_vbo);
         glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
@@ -1361,6 +1376,7 @@ void glx_draw_line_2d(float x1, float y1, float x2, float y2) {
         {
                 float verts[] = {x1, y1, x2, y2};
                 glBindBuffer(GL_ARRAY_BUFFER, 0);
+                GLboolean texture_was_enabled = glIsEnabled(GL_TEXTURE_2D);
                 glDisable(GL_TEXTURE_2D);
                 glDisableClientState(GL_TEXTURE_COORD_ARRAY);
                 glDisableClientState(GL_COLOR_ARRAY);
@@ -1370,7 +1386,8 @@ void glx_draw_line_2d(float x1, float y1, float x2, float y2) {
                 glx_stats_draw();
                 glDrawArrays(GL_LINES, 0, 2);
                 glDisableClientState(GL_VERTEX_ARRAY);
-                glEnable(GL_TEXTURE_2D);
+                if(texture_was_enabled)
+                        glEnable(GL_TEXTURE_2D);
         }
 #endif
 #else
@@ -1434,6 +1451,7 @@ void glx_draw_ring_segment_2d(float cx, float cy, float inner_radius, float oute
         }
 #ifndef OPENGL_CORE
         glBindBuffer(GL_ARRAY_BUFFER, 0);
+        GLboolean texture_was_enabled = glIsEnabled(GL_TEXTURE_2D);
         glDisable(GL_TEXTURE_2D);
         glDisableClientState(GL_TEXTURE_COORD_ARRAY);
         glDisableClientState(GL_COLOR_ARRAY);
@@ -1442,7 +1460,8 @@ void glx_draw_ring_segment_2d(float cx, float cy, float inner_radius, float oute
         glVertexPointer(3, GL_FLOAT, 0, verts);
         glDrawArrays(GL_TRIANGLE_STRIP, 0, (steps + 1) * 2);
         glDisableClientState(GL_VERTEX_ARRAY);
-        glEnable(GL_TEXTURE_2D);
+        if(texture_was_enabled)
+                glEnable(GL_TEXTURE_2D);
 #endif
 #else
         glBegin(GL_TRIANGLE_STRIP);
@@ -1650,6 +1669,7 @@ void glx_draw_quad_2d(float x, float y, float w, float h) {
                         x, y,        x + w, y - h, x + w, y,
                 };
                 glBindBuffer(GL_ARRAY_BUFFER, 0);
+                GLboolean texture_was_enabled = glIsEnabled(GL_TEXTURE_2D);
                 glDisable(GL_TEXTURE_2D);
                 glDisableClientState(GL_TEXTURE_COORD_ARRAY);
                 glDisableClientState(GL_COLOR_ARRAY);
@@ -1658,7 +1678,8 @@ void glx_draw_quad_2d(float x, float y, float w, float h) {
                 glVertexPointer(2, GL_FLOAT, 0, verts);
                 glDrawArrays(GL_TRIANGLES, 0, 6);
                 glDisableClientState(GL_VERTEX_ARRAY);
-                glEnable(GL_TEXTURE_2D);
+                if(texture_was_enabled)
+                        glEnable(GL_TEXTURE_2D);
         }
 #endif
 #else
@@ -1736,6 +1757,7 @@ void glx_draw_gradient_quad_2d(float x, float y, float w, float h, float r1, flo
         /* ES 1.1 fixed-function fallback */
         float posf[] = {x, y, x, y - h, x + w, y, x + w, y - h};
         glBindBuffer(GL_ARRAY_BUFFER, 0);
+        GLboolean texture_was_enabled = glIsEnabled(GL_TEXTURE_2D);
         glDisable(GL_TEXTURE_2D);
         glDisableClientState(GL_TEXTURE_COORD_ARRAY);
         glDisableClientState(GL_NORMAL_ARRAY);
@@ -1746,7 +1768,8 @@ void glx_draw_gradient_quad_2d(float x, float y, float w, float h, float r1, flo
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
         glDisableClientState(GL_VERTEX_ARRAY);
         glDisableClientState(GL_COLOR_ARRAY);
-        glEnable(GL_TEXTURE_2D);
+        if(texture_was_enabled)
+                glEnable(GL_TEXTURE_2D);
 #endif
 #else
         glBegin(GL_QUADS);
@@ -1811,6 +1834,10 @@ void glx_enable_sphericalfog() {
                 matrix_identity(matrix_model);
                 matrix_upload();
                 matrix_pop(matrix_model);
+                /* Re-upload after pop so GL_MODELVIEW is not left at identity. */
+                matrix_upload();
+                /* Re-upload after pop so GL_MODELVIEW is not left at identity. */
+                matrix_upload();
 
                 glEnable(GL_LIGHTING);
                 glEnable(GL_LIGHT1);
@@ -1818,15 +1845,15 @@ void glx_enable_sphericalfog() {
                 glColorMaterial(GL_FRONT, GL_DIFFUSE);
                 glLightModelfv(GL_LIGHT_MODEL_AMBIENT, (float[]) {fc[0], fc[1], fc[2], 1.0F});
 
-                glLightfv(GL_LIGHT1, GL_POSITION,
-                                  (float[]) {camera_x, (settings.render_distance * map_size_y) / 16.0F, camera_z, 1.0F});
-                glLightfv(GL_LIGHT1, GL_SPOT_DIRECTION, (float[]) {0.0F, -1.0F, 0.0F});
-                float sun = lighting_sunlight_scale();
-                glLightfv(GL_LIGHT1, GL_DIFFUSE, (float[]) {sun, sun, sun, 1.0F});
-                glLightfv(GL_LIGHT1, GL_AMBIENT, (float[]) {-fc[0], -fc[1], -fc[2], 1.0F});
-                glLightf(GL_LIGHT1, GL_SPOT_CUTOFF, tan(16.0F / map_size_y) / PI * 180.0F);
-                glLightf(GL_LIGHT1, GL_SPOT_EXPONENT, 128.0F);
-                glNormal3f(0.0F, 1.0F, 0.0F);
+glLightfv(GL_LIGHT1, GL_POSITION,
+                                   (float[]) {camera_x, (settings.render_distance * map_size_y) / 16.0F, camera_z, 1.0F});
+                 glLightfv(GL_LIGHT1, GL_SPOT_DIRECTION, (float[]) {0.0F, -1.0F, 0.0F});
+                 float sun = lighting_sunlight_scale();
+                 glLightfv(GL_LIGHT1, GL_DIFFUSE, (float[]) {sun, sun, sun, 1.0F});
+                 glLightfv(GL_LIGHT1, GL_AMBIENT, (float[]) {-fc[0], -fc[1], -fc[2], 1.0F});
+                 glLightf(GL_LIGHT1, GL_SPOT_CUTOFF, atanf(16.0F / map_size_y) / PI * 180.0F);
+                 glLightf(GL_LIGHT1, GL_SPOT_EXPONENT, 128.0F);
+                 glNormal3f(0.0F, 1.0F, 0.0F);
         }
 #elif defined(OPENGL_ES)
         if(gles_version < 2) {
@@ -1842,18 +1869,18 @@ void glx_enable_sphericalfog() {
                 float amb[4] = {0.0F, 0.0F, 0.0F, 1.0F};
                 glLightModelfv(GL_LIGHT_MODEL_AMBIENT, amb);
 
-                float lpos[4] = {camera_x, (settings.render_distance * map_size_y) / 16.0F, camera_z, 1.0F};
-                glLightfv(GL_LIGHT1, GL_POSITION, lpos);
-                float dir[3] = {0.0F, -1.0F, 0.0F};
-                glLightfv(GL_LIGHT1, GL_SPOT_DIRECTION, dir);
-                float dif[4] = {0.0F, 0.0F, 0.0F, 1.0F};
-                glLightfv(GL_LIGHT1, GL_DIFFUSE, dif);
-                float sun = lighting_sunlight_scale();
-                float amb2[4] = {sun, sun, sun, 1.0F};
-                glLightfv(GL_LIGHT1, GL_AMBIENT, amb2);
-                glLightf(GL_LIGHT1, GL_SPOT_CUTOFF, tan(16.0F / map_size_y) / PI * 180.0F);
-                glLightf(GL_LIGHT1, GL_SPOT_EXPONENT, 128.0F);
-                glNormal3f(0.0F, 1.0F, 0.0F);
+float lpos[4] = {camera_x, (settings.render_distance * map_size_y) / 16.0F, camera_z, 1.0F};
+                 glLightfv(GL_LIGHT1, GL_POSITION, lpos);
+                 float dir[3] = {0.0F, -1.0F, 0.0F};
+                 glLightfv(GL_LIGHT1, GL_SPOT_DIRECTION, dir);
+                 float dif[4] = {0.0F, 0.0F, 0.0F, 1.0F};
+                 glLightfv(GL_LIGHT1, GL_DIFFUSE, dif);
+                 float sun = lighting_sunlight_scale();
+                 float amb2[4] = {sun, sun, sun, 1.0F};
+                 glLightfv(GL_LIGHT1, GL_AMBIENT, amb2);
+                 glLightf(GL_LIGHT1, GL_SPOT_CUTOFF, atanf(16.0F / map_size_y) / PI * 180.0F);
+                 glLightf(GL_LIGHT1, GL_SPOT_EXPONENT, 128.0F);
+                 glNormal3f(0.0F, 1.0F, 0.0F);
                 glEnable(GL_FOG);
                 glFogf(GL_FOG_MODE, GL_LINEAR);
                 glFogf(GL_FOG_START, 0.0F);

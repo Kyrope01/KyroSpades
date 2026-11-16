@@ -384,6 +384,14 @@ void read_PacketBlockLine(void* data, int len) {
         if(p->sx < 0 || p->sx >= map_size_x || p->ex < 0 || p->ex >= map_size_x ||
            p->sy < 0 || p->sy >= map_size_z || p->ey < 0 || p->ey >= map_size_z ||
            p->sz < 0 || p->sz >= map_size_y || p->ez < 0 || p->ez >= map_size_y) return;
+        /* Bound the line length to avoid buffer overflow in map_cube_line
+           (which writes up to 64 points into struct Point blocks[64]). */
+        int line_length = abs(p->ex - p->sx) > abs(p->ey - p->sy) ? abs(p->ex - p->sx) : abs(p->ey - p->sy);
+        if(abs(p->ez - p->sz) > line_length) line_length = abs(p->ez - p->sz);
+        if(line_length >= 64) {
+                log_warn("PacketBlockLine: line length %d exceeds 64-block limit", line_length);
+                return;
+        }
         if(p->player_id >= PLAYERS_MAX) {
                 return;
         }
@@ -836,10 +844,29 @@ void read_PacketWorldUpdate(void* data, int len) {
                 }
                 network_wu_last = now;
 
-                int is_075 = (len % sizeof(struct PacketWorldUpdate075) == 0);
                 int is_076 = (len % sizeof(struct PacketWorldUpdate076) == 0);
+                int is_075 = (len % sizeof(struct PacketWorldUpdate075) == 0);
 
-                if(is_075) {
+                /* Check 0.76 first: lengths that are multiples of both struct
+                   sizes (LCM 168) must be decoded as 0.76 to avoid corrupt
+                   positions. */
+                if(is_076) {
+                        if(len / (int)sizeof(struct PacketWorldUpdate076) > PLAYERS_MAX)
+                                return;
+                        /* 255 real players, plus the reserved server-action slot. */
+                        for(int k = 0; k < (len / sizeof(struct PacketWorldUpdate076)); k++) {
+                                struct PacketWorldUpdate076* p
+                                        = (struct PacketWorldUpdate076*)((const unsigned char*)data + k * sizeof(struct PacketWorldUpdate076));
+                                if(players[p->player_id].connected && players[p->player_id].alive
+                                   && p->player_id != local_player_id) {
+                                        if(distance3D(players[p->player_id].pos.x, players[p->player_id].pos.y, players[p->player_id].pos.z, p->x, 63.0F - p->z, p->y)
+                                           > 0.1F * 0.1F) {
+                                                player_net_correct(p->player_id, p->x, 63.0F - p->z, p->y);
+                                        }
+                                        player_set_orientation(p->player_id, p->ox, -p->oz, p->oy);
+                                }
+                        }
+                } else if(is_075) {
                         if(len / (int)sizeof(struct PacketWorldUpdate075) > PLAYERS_MAX)
                                 return;
                         /* 255 real players, plus the reserved server-action slot. */
@@ -851,22 +878,7 @@ void read_PacketWorldUpdate(void* data, int len) {
                                            > 0.1F * 0.1F) {
                                                 player_net_correct(k, p->x, 63.0F - p->z, p->y);
                                         }
-					player_set_orientation(k, p->ox, -p->oz, p->oy);
-                                }
-                        }
-                } else {
-                        if(is_076) {
-                                for(int k = 0; k < (len / sizeof(struct PacketWorldUpdate076)); k++) {
-                                        struct PacketWorldUpdate076* p
-                                                = (struct PacketWorldUpdate076*)((const unsigned char*)data + k * sizeof(struct PacketWorldUpdate076));
-                                        if(players[p->player_id].connected && players[p->player_id].alive
-                                           && p->player_id != local_player_id) {
-                                                if(distance3D(players[p->player_id].pos.x, players[p->player_id].pos.y, players[p->player_id].pos.z, p->x, 63.0F - p->z, p->y)
-                                                   > 0.1F * 0.1F) {
-                                                        player_net_correct(p->player_id, p->x, 63.0F - p->z, p->y);
-                                                }
-						player_set_orientation(p->player_id, p->ox, -p->oz, p->oy);
-                                        }
+                                        player_set_orientation(k, p->ox, -p->oz, p->oy);
                                 }
                         }
                 }
@@ -1111,6 +1123,8 @@ void read_PacketGrenade(void* data, int len) {
                 return;
         }
         struct PacketGrenade* p = (struct PacketGrenade*)data;
+        if(p->player_id >= PLAYERS_MAX)
+                return;
         /* Simulation casts positions to int and integrates velocity. Reject
            nonfinite and wildly unreasonable values before they reach it. */
         if(!isfinite(p->fuse_length) || p->fuse_length < 0.0F || p->fuse_length > 60.0F ||
@@ -1192,6 +1206,8 @@ void read_PacketWeaponReload(void* data, int len) {
                 return;
         }
         struct PacketWeaponReload* p = (struct PacketWeaponReload*)data;
+        if(p->player_id >= PLAYERS_MAX)
+                return;
         if(p->player_id == local_player_id) {
                 local_player_ammo = p->ammo;
                 local_player_ammo_reserved = p->reserved;
@@ -1541,8 +1557,9 @@ void read_PacketVersionGet(void* data, int len) {
         os = "KyroSpades (Linux)";
 #elif defined(OS_HAIKU)
         os = "KyroSpades (Haiku)";
-#endif
-        strcpy(ver.operatingsystem, os);
+                #endif
+        memcpy(ver.operatingsystem, os, sizeof(ver.operatingsystem));
+        ver.operatingsystem[sizeof(ver.operatingsystem) - 1] = '\0';
         network_send(PACKET_VERSIONSEND_ID, &ver, sizeof(ver) - sizeof(ver.operatingsystem) + strlen(os));
 }
 
@@ -1696,6 +1713,8 @@ void read_PacketExtInfo(void* data, int len) {
 
 void read_PacketPlayerProperties(void* data, int len) {
         struct PacketPlayerProperties* p = (struct PacketPlayerProperties*)data;
+
+        if(p->player_id >= PLAYERS_MAX) return;
 
         if(len >= sizeof(struct PacketPlayerProperties) && p->subID == 0) {
                 players[p->player_id].ammo = p->ammo_clip;

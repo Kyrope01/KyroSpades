@@ -82,51 +82,60 @@ struct damaged_voxel {
 
 HashTable map_damaged_voxels;
 struct tesselator map_damaged_tesselator;
+/* Guards map_damaged_voxels: written by network/player threads, read and
+   removed from by the render thread. */
+static pthread_mutex_t map_damaged_lock = PTHREAD_MUTEX_INITIALIZER;
 
 int map_object_visible(float x, float y, float z) {
         return !(x <= 0.0F && z <= 0.0F);
 }
 
 int map_damage(int x, int y, int z, int damage) {
+        pthread_mutex_lock(&map_damaged_lock);
         uint32_t key = pos_key(x, y, z);
         struct damaged_voxel* voxel = ht_lookup(&map_damaged_voxels, &key);
+        int result;
 
         if(voxel) {
                 voxel->damage = min(damage + voxel->damage, 100);
                 voxel->timer = window_time();
-
-                return voxel->damage;
-        } else {
+                result = voxel->damage;
+} else {
                 ht_insert(&map_damaged_voxels, &key,
-                                  &(struct damaged_voxel) {
-                                          .damage = damage,
-                                          .timer = window_time(),
-                                          .action_timer = -FLT_MAX,
-                                  });
-
-                return damage;
+                          &(struct damaged_voxel) {
+                                  .damage = damage,
+                                  .timer = window_time(),
+                                  .action_timer = -FLT_MAX,
+                          });
+                result = damage;
         }
+        pthread_mutex_unlock(&map_damaged_lock);
+        return result;
 }
 
 bool map_damage_action(int x, int y, int z) {
+        pthread_mutex_lock(&map_damaged_lock);
         uint32_t key = pos_key(x, y, z);
         struct damaged_voxel* voxel = ht_lookup(&map_damaged_voxels, &key);
+        bool result = false;
 
-        if(!voxel) {
-                return false;
-        } else if(voxel->damage >= 100 && window_time() - voxel->action_timer > 5.0F) {
-                voxel->action_timer = window_time();
-                return true;
-        } else {
-                return false;
+        if(voxel) {
+                if(voxel->damage >= 100 && window_time() - voxel->action_timer > 5.0F) {
+                        voxel->action_timer = window_time();
+                        result = true;
+                }
         }
+        pthread_mutex_unlock(&map_damaged_lock);
+        return result;
 }
 
 int map_damage_get(int x, int y, int z) {
+        pthread_mutex_lock(&map_damaged_lock);
         uint32_t key = pos_key(x, y, z);
         struct damaged_voxel* voxel = ht_lookup(&map_damaged_voxels, &key);
-
-        return voxel ? voxel->damage : 0;
+        int result = voxel ? voxel->damage : 0;
+        pthread_mutex_unlock(&map_damaged_lock);
+        return result;
 }
 
 static int map_nearest_wrapped_coordinate(int coordinate, float view, int size) {
@@ -191,7 +200,9 @@ void map_damaged_voxels_render() {
 
         tesselator_clear(&map_damaged_tesselator);
 
+        pthread_mutex_lock(&map_damaged_lock);
         ht_iterate_remove(&map_damaged_voxels, &map_damaged_tesselator, damaged_voxel_update);
+        pthread_mutex_unlock(&map_damaged_lock);
 
         tesselator_draw(&map_damaged_tesselator, 1);
 
@@ -431,7 +442,8 @@ void map_collapsing_render() {
 static bool falling_blocks_collision(void* key, void* value, void* user) {
         uint32_t pos = *(uint32_t*)key;
         struct map_collapsing* collapsing = ((struct map_collapsing**)user)[0];
-        float dt = *(((float**)user)[1]);
+        void** u = (void**)user;
+        float dt = *(float*)u[1];
 
         vec4 v = {pos_keyx(pos) + collapsing->v.x * dt * 32.0F - collapsing->p2.x + 0.5F,
                           pos_keyy(pos) + collapsing->v.y * dt * 32.0F - collapsing->p2.y + 0.5F,
@@ -782,18 +794,18 @@ int map_cube_line(int x1, int y1, int z1, int x2, int y2, int z2, struct Point* 
 
                 if(dz <= dx && dz <= dy) {
                         c.z += izi;
-                        if(c.z < 0 || c.z >= 64)
+                        if(c.z < 0 || c.z >= map_size_y)
                                 return count;
                         dz += dzi;
                 } else {
                         if(dx < dy) {
                                 c.x += ixi;
-                                if((unsigned long)c.x >= 512)
+                                if((unsigned long)c.x >= (unsigned long)map_size_x)
                                         return count;
                                 dx += dxi;
                         } else {
                                 c.y += iyi;
-                                if((unsigned long)c.y >= 512)
+                                if((unsigned long)c.y >= (unsigned long)map_size_z)
                                         return count;
                                 dy += dyi;
                         }
@@ -810,6 +822,7 @@ static int dirt_color_table[]
 
 // thanks to BR_ for deobfuscating this method
 int map_dirt_color(int x, int y, int z) {
+        if(y < 0 || y >= map_size_y) return 0;
         int vertical_slice = (map_size_y - 1 - y) / 8;
         int lerp_amt = (map_size_y - 1 - y) % 8;
         int dirt_base_color = dirt_color_table[vertical_slice];
@@ -827,7 +840,7 @@ int map_dirt_color(int x, int y, int z) {
         return rgb(red, green, blue);
 }
 
-static int gkrand = 0;
+static unsigned int gkrand = 0;
 int map_placedblock_color(int color) {
         color = color | 0x7F000000;
         gkrand = 0x1A4E86D * gkrand + 1;
@@ -899,6 +912,7 @@ float map_sun_shadow(int x, int y, int z, int steps) {
         float tmax_y = sun_dir[1] > 0.0F ? ((gy + 1) - oy) * tdelta_y : (oy - gy) * tdelta_y;
         float tmax_z = sun_dir[2] > 0.0F ? ((gz + 1) - oz) * tdelta_z : (oz - gz) * tdelta_z;
 
+        map_read_lock();
         for(int i = 0; i < steps; i++) {
                 if(tmax_x < tmax_y && tmax_x < tmax_z) {
                         gx += step_x;
@@ -912,15 +926,16 @@ float map_sun_shadow(int x, int y, int z, int steps) {
                 }
 
                 if(gy >= map_size_y)
-                        return 1.0F;
+                        { map_read_unlock(); return 1.0F; }
                 if(gy < 0)
-                        return 1.0F;
+                        { map_read_unlock(); return 1.0F; }
                 if(gx < 0 || gx >= map_size_x || gz < 0 || gz >= map_size_z)
-                        return 1.0F;
+                        { map_read_unlock(); return 1.0F; }
 
                 if(!map_isair_nolock(gx, gy, gz))
-                        return 0.0F;
+                        { map_read_unlock(); return 0.0F; }
         }
+        map_read_unlock();
 
         return 1.0F;
 }
