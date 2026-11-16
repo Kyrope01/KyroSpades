@@ -1295,8 +1295,25 @@ void chunk_update_all() {
         /* Bind the minimap atlas once for the whole batch instead of doing a
            bind/unbind pair per uploaded chunk (two driver round-trips each). */
         bool minimap_bound = false;
+        /* Running estimate of upload cost per quad, used to defer a chunk that
+           would blow the remaining budget before we spend time processing it. */
+        float ms_per_quad = 0.0F;
+        int quads_processed = 0;
+        float elapsed = 0.0F;
 
         while(channel_try_await(&chunk_result_queue, &result)) {
+                /* Estimate cost before starting work on this result. A single
+                   large textured chunk can exceed the whole 6 ms budget alone;
+                   defer it rather than stalling the frame. */
+                if(quads_processed > 0 && ms_per_quad > 0.0F) {
+                        float remaining = budget - elapsed;
+                        float est_ms = result.tesselator.quad_count * ms_per_quad * 0.001F;
+                        if(est_ms > remaining)
+                                break;
+                }
+
+                float chunk_start = window_time();
+
                 if(result.bulk && result.gen == chunk_gen && chunk_bulk_pending > 0)
                         chunk_bulk_pending--;
 
@@ -1321,10 +1338,16 @@ void chunk_update_all() {
                                                         CHUNK_SIZE, CHUNK_SIZE, GL_RGBA, GL_UNSIGNED_BYTE, result.minimap_data);
                 }
 
+                float chunk_ms = window_time() - chunk_start;
+                elapsed += chunk_ms;
+                quads_processed += result.tesselator.quad_count;
+                if(quads_processed > 0)
+                        ms_per_quad = elapsed * 1000.0F / (float)quads_processed;
+
                 tesselator_free(&result.tesselator);
                 free(result.minimap_data);
 
-                if(window_time() - start > budget)
+                if(elapsed > budget)
                         break;
         }
 

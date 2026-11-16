@@ -264,7 +264,9 @@ static struct {
         uint32_t* render_cache;
         uint8_t* render_state;
         uint8_t* dirty_rows;
+        uint32_t* seabed_cache;
         unsigned int dirty_row_count;
+        unsigned int seabed_revision;
         int size_x, size_z;
         int render_size_x, render_size_z;
         unsigned int cursor;
@@ -275,6 +277,7 @@ static struct {
         bool was_active;
         bool snapshot_invalidated;
         bool refresh_initialized;
+        bool snapshot_has_surface;
         unsigned int seen_map_revision;
         unsigned int snapshot_revision;
         float refresh_cam_x, refresh_cam_y, refresh_cam_z;
@@ -421,6 +424,7 @@ void water_deinit(void) {
         free(wr.render_cache);
         free(wr.render_state);
         free(wr.dirty_rows);
+        free(wr.seabed_cache);
         memset(&wr, 0, sizeof(wr));
         pthread_mutex_unlock(&water_lock);
 
@@ -466,6 +470,8 @@ void water_invalidate(void) {
         if(wr.render_state && wr.render_size_x > 0 && wr.render_size_z > 0)
                 memset(wr.render_state, 0,
                        (size_t)wr.render_size_x * (size_t)wr.render_size_z * sizeof(uint8_t));
+        if(wr.seabed_cache)
+                memset(wr.seabed_cache, 0, (size_t)wr.size_x * (size_t)wr.size_z * sizeof(uint32_t));
         if(wr.dirty_rows)
                 memset(wr.dirty_rows, 0, (size_t)wr.size_z * sizeof(uint8_t));
         wr.dirty_row_count = 0;
@@ -582,11 +588,26 @@ static int water_wrap_fast(int v, int m) {
    water cell has individual color variation. Returns a default
    deep-water tone if nothing is found (void column). */
 static uint32_t water_seabed_color(int wx, int wz) {
+        uint32_t cached = wr.seabed_cache
+                ? wr.seabed_cache[(size_t)wz * (size_t)wr.size_x + (size_t)wx]
+                : 0;
+        if(cached != 0U)
+                return cached;
+
+        uint32_t result;
         for (int y = (int)WATER_LEVEL - 1; y >= 0; y--) {
-                if (!map_isair_nolock(wx, y, wz))
-                        return map_get_nolock(wx, y, wz);
+                if (!map_isair_nolock(wx, y, wz)) {
+                        result = map_get_nolock(wx, y, wz);
+                        goto store;
+                }
         }
-        return rgba(30, 60, 90, 255);
+        result = rgba(30, 60, 90, 255);
+
+store:
+        if(wr.seabed_cache) {
+                wr.seabed_cache[(size_t)wz * (size_t)wr.size_x + (size_t)wx] = result;
+        }
+        return result;
 }
 
 static uint32_t water_cell_compute(int x, int z, int wx, int wz) {
@@ -720,17 +741,20 @@ static bool water_buffers_ensure(void) {
                 wr.render_cache = calloc(cells, sizeof(uint32_t));
                 wr.render_state = calloc(cells, sizeof(uint8_t));
                 wr.dirty_rows = calloc((size_t)map_size_z, sizeof(uint8_t));
-                if(!wr.cache || !wr.state || !wr.render_cache || !wr.render_state || !wr.dirty_rows) {
+                wr.seabed_cache = calloc(cells, sizeof(uint32_t));
+                if(!wr.cache || !wr.state || !wr.render_cache || !wr.render_state || !wr.dirty_rows || !wr.seabed_cache) {
                         free(wr.cache);
                         free(wr.state);
                         free(wr.render_cache);
                         free(wr.render_state);
                         free(wr.dirty_rows);
+                        free(wr.seabed_cache);
                         wr.cache = NULL;
                         wr.state = NULL;
                         wr.render_cache = NULL;
                         wr.render_state = NULL;
                         wr.dirty_rows = NULL;
+                        wr.seabed_cache = NULL;
                         wr.dirty_row_count = 0;
                         return false;
                 }
@@ -739,6 +763,8 @@ static bool water_buffers_ensure(void) {
                 wr.render_size_x = map_size_x;
                 wr.render_size_z = map_size_z;
                 wr.dirty_row_count = 0;
+                wr.seabed_revision = 0;
+                wr.snapshot_has_surface = false;
         }
 
         water_gl_ensure();
@@ -762,6 +788,16 @@ static void water_slice(void) {
         int budget = WATER_CELL_BUDGET;
         int rows_to_process = min(span, wr.rows_remaining);
         int rows_processed = 0;
+
+        /* Only clear the seabed cache at slice start if map changed; avoids
+           per-cell mutex in water_seabed_color. */
+        static unsigned int last_slice_rev = 0;
+        unsigned int cur_rev = water_current_map_revision();
+        if(cur_rev != last_slice_rev) {
+                last_slice_rev = cur_rev;
+                if(wr.seabed_cache && wr.size_x == map_size_x && wr.size_z == map_size_z)
+                        memset(wr.seabed_cache, 0, (size_t)wr.size_x * (size_t)wr.size_z * sizeof(uint32_t));
+        }
 
         for(; rows_processed < rows_to_process && budget > 0; rows_processed++) {
                 /* Visit the eye row first, then alternate outwards. Fresh or
