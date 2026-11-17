@@ -358,8 +358,6 @@ void read_PacketBlockAction(void* data, int len) {
                                         player_stats_blocks_placed++;
                                 }
                                 bool play_sound = map_isair(p->x, 63 - p->z, p->y);
-                                if(play_sound && p->player_id == local_player_id && !demo_is_playing() && local_player_blocks)
-                                        local_player_blocks--;
                                 uint32_t color = players[p->player_id].block.red
                                         | (players[p->player_id].block.green << 8)
                                         | (players[p->player_id].block.blue << 16);
@@ -408,8 +406,6 @@ void read_PacketBlockLine(void* data, int len) {
                 | (players[p->player_id].block.green << 8)
                 | (players[p->player_id].block.blue << 16);
         if(p->sx == p->ex && p->sy == p->ey && p->sz == p->ez) {
-                if(p->player_id == local_player_id && !demo_is_playing() && local_player_blocks &&
-                   map_isair(p->sx, 63 - p->sz, p->sy)) local_player_blocks--;
                 map_set(p->sx, 63 - p->sz, p->sy, color);
                 if(p->player_id == local_player_id)
                         glowing_blocks_confirm_local_build(p->sx, 63 - p->sz, p->sy);
@@ -421,8 +417,6 @@ void read_PacketBlockLine(void* data, int len) {
                         int y = 63 - blocks[len - 1].z;
                         int z = blocks[len - 1].y;
                         if(map_isair(x, y, z)) {
-                                if(p->player_id == local_player_id && !demo_is_playing() && local_player_blocks)
-                                        local_player_blocks--;
                                 map_set(x, y, z, color);
                                 if(p->player_id == local_player_id)
                                         glowing_blocks_confirm_local_build(x, y, z);

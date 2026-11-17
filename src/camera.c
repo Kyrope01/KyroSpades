@@ -430,10 +430,50 @@ static int* camera_terrain_pick_range(unsigned char mode, float gx0, float gy0, 
 	float dy = ray_y / len;
 	float dz = ray_z / len;
 
-	/* Reject out-of-map starts before converting floats to integer voxels. */
-	if(gx0 < 0.0F || gx0 >= map_size_x || gy0 < 0.0F || gy0 >= map_size_y
-	   || gz0 < 0.0F || gz0 >= map_size_z)
-		return NULL;
+	/* Rays can legitimately start outside the map: a player standing on
+	   Babel's heaven platform, or on the top block at the build ceiling,
+	   has their eye above map_size_y. Rejecting the start outright made
+	   every shot and block pick from there fail ("no damage from heaven",
+	   "can't place the top block"). Clip the origin to the map's bounding
+	   box and continue along the ray instead. */
+	{
+		float origin[3] = {gx0, gy0, gz0};
+		float dir[3] = {dx, dy, dz};
+		float enter = 0.0F;
+		float leave = INFINITY;
+		for(int i = 0; i < 3; i++) {
+			float lo = 0.0F;
+			float hi = (i == 0) ? (float)map_size_x : (i == 1 ? (float)map_size_y : (float)map_size_z);
+			if(fabsf(dir[i]) < 1e-9F) {
+				if(origin[i] < lo || origin[i] >= hi)
+					return NULL;
+				continue;
+			}
+			float inv = 1.0F / dir[i];
+			float ta = (lo - origin[i]) * inv;
+			float tb = (hi - origin[i]) * inv;
+			if(ta > tb) {
+				float tmp = ta;
+				ta = tb;
+				tb = tmp;
+			}
+			if(ta > enter) enter = ta;
+			if(tb < leave) leave = tb;
+		}
+		if(enter > leave || enter > maxdist)
+			return NULL;
+		if(enter > 0.0F) {
+			gx0 = origin[0] + dir[0] * enter;
+			gy0 = origin[1] + dir[1] * enter;
+			gz0 = origin[2] + dir[2] * enter;
+			maxdist -= enter;
+			/* Nudge just inside so the entry cell cannot round back onto
+			   the outside boundary. */
+			gx0 += dir[0] * 1e-4F;
+			gy0 += dir[1] * 1e-4F;
+			gz0 += dir[2] * 1e-4F;
+		}
+	}
 
 	int gx = (int)floorf(gx0);
 	int gy = (int)floorf(gy0);

@@ -3583,6 +3583,11 @@ void hud_ingame_mouseclick(double x, double y, int button, int action, int mods)
                                         line.ez = 63 - pos[1];
                                         network_sync_build_state();
                                         network_send(PACKET_BLOCKLINE_ID, &line, sizeof(line));
+                                        /* Predict the line cost locally; the
+                                           server's PlayerProperties already
+                                           accounts for it, so the echo handler
+                                           must not subtract these again. */
+                                        local_player_blocks -= amount;
                                 }
                                 players[local_player_id].item_showup = window_time();
                         }

@@ -335,6 +335,12 @@ static bool send_block(int x, int y, int z) {
     blk.x = x; blk.y = z; blk.z = 63-y;
     network_sync_build_state();
     network_send(PACKET_BLOCKACTION_ID, &blk, sizeof(blk));
+    /* Stock is server-authoritative through PlayerProperties/Restock, but
+       waiting for the echo would make the HUD lag a full round trip. Predict
+       the decrement here only -- the echo handlers must not decrement again
+       or every build is counted twice and the stock never refills correctly. */
+    if(local_player_blocks)
+        local_player_blocks--;
     p->item_showup = window_time();
     return true;
 }

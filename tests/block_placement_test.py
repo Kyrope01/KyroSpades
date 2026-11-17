@@ -62,7 +62,7 @@ int main(void) {
  assert(!player_try_place_block() && pending_block && sent==0);
  p->physics.eye.y=11.3f; player_update_pending_block();
  assert(!pending_block && sent==1 && synced==1 && last.x==10 && last.y==10 && last.z==54);
- assert(local_player_blocks==50); /* no prediction */
+ assert(local_player_blocks==49); /* predicted once on send */
  player_update_pending_block();assert(sent==1);
  now=2; p->physics.eye.y=10.f; assert(!player_try_place_block() && pending_block);
  p->physics.airborne=0;player_update_pending_block();assert(!pending_block && sent==1);
@@ -84,10 +84,10 @@ with tempfile.TemporaryDirectory() as d:
     subprocess.run([str(exe)],check=True)
 network=(root/'src/network.c').read_text(); hud=(root/'src/hud.c').read_text(); main=(root/'src/main.c').read_text()
 assert 'network_sync_build_state();' in logic and logic.index('network_sync_build_state();') < logic.index('network_send(PACKET_BLOCKACTION_ID')
-assert 'local_player_blocks--' not in logic
-assert 'local_player_blocks -= amount' not in hud
+assert 'local_player_blocks--' in logic
+assert 'local_player_blocks -= amount' in hud
 assert 'player_update_pending_block();' in main
-assert network.count('local_player_blocks--;') >= 3
+assert network.count('local_player_blocks--;') == 0
 assert 'player_cancel_pending_block();' in network
 print('Placement network, confirmed stock, and simulation wiring checks passed')
 
@@ -97,6 +97,7 @@ packet_handlers=network[network.index('void read_PacketBlockAction('):network.in
 packet_stub=r'''
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <assert.h>
 #include <stdio.h>
 #define PLAYERS_MAX 32
@@ -132,15 +133,15 @@ int main(void){
  struct PacketBlockLine bad={0,-2147483647-1,2,50,4,2,50};
  read_PacketBlockLine(&bad,sizeof(bad));
  struct PacketBlockAction a={0,ACTION_BUILD,2,2,50};
- read_PacketBlockAction(&a,sizeof(a)); assert(local_player_blocks==4 && world[2][2][13]);
- read_PacketBlockAction(&a,sizeof(a)); assert(local_player_blocks==4);
- a.player_id=1;a.x=3;read_PacketBlockAction(&a,sizeof(a));assert(local_player_blocks==4);
- is_demo=1;a.player_id=0;a.x=4;read_PacketBlockAction(&a,sizeof(a));assert(local_player_blocks==4);is_demo=0;
+ read_PacketBlockAction(&a,sizeof(a)); assert(local_player_blocks==5 && world[2][2][13]);
+ read_PacketBlockAction(&a,sizeof(a)); assert(local_player_blocks==5);
+ a.player_id=1;a.x=3;read_PacketBlockAction(&a,sizeof(a));assert(local_player_blocks==5);
+ is_demo=1;a.player_id=0;a.x=4;read_PacketBlockAction(&a,sizeof(a));assert(local_player_blocks==5);is_demo=0;
  struct PacketBlockLine l={0,1,2,50,4,2,50};
- read_PacketBlockLine(&l,sizeof(l));assert(local_player_blocks==3); /* 2,3,4 already occupied */
- read_PacketBlockLine(&l,sizeof(l));assert(local_player_blocks==3);
- struct PacketBlockLine single={0,5,2,50,5,2,50};read_PacketBlockLine(&single,sizeof(single));assert(local_player_blocks==2);
- is_demo=1;single.sx=single.ex=6;read_PacketBlockLine(&single,sizeof(single));assert(local_player_blocks==2);
+ read_PacketBlockLine(&l,sizeof(l));assert(local_player_blocks==5); /* echo must not consume stock */
+ read_PacketBlockLine(&l,sizeof(l));assert(local_player_blocks==5);
+ struct PacketBlockLine single={0,5,2,50,5,2,50};read_PacketBlockLine(&single,sizeof(single));assert(local_player_blocks==5);
+ is_demo=1;single.sx=single.ex=6;read_PacketBlockLine(&single,sizeof(single));assert(local_player_blocks==5);
  puts("confirmed single and line stock accounting checks passed");return 0;
 }
 '''
