@@ -266,7 +266,6 @@ static struct {
         uint8_t* dirty_rows;
         uint32_t* seabed_cache;
         unsigned int dirty_row_count;
-        unsigned int seabed_revision;
         int size_x, size_z;
         int render_size_x, render_size_z;
         unsigned int cursor;
@@ -610,6 +609,14 @@ store:
         return result;
 }
 
+static uint32_t water_seabed_color_no_cache(int wx, int wz) {
+        for (int y = (int)WATER_LEVEL - 1; y >= 0; y--) {
+                if (!map_isair_nolock(wx, y, wz))
+                        return map_get_nolock(wx, y, wz);
+        }
+        return rgba(30, 60, 90, 255);
+}
+
 static uint32_t water_cell_compute(int x, int z, int wx, int wz) {
         /* The worker only consumes its immutable job snapshot; settings and
            fog can change on the main thread while a slice is running. */
@@ -763,7 +770,6 @@ static bool water_buffers_ensure(void) {
                 wr.render_size_x = map_size_x;
                 wr.render_size_z = map_size_z;
                 wr.dirty_row_count = 0;
-                wr.seabed_revision = 0;
                 wr.snapshot_has_surface = false;
         }
 
@@ -1005,7 +1011,7 @@ static bool water_sample_surface_cell(int wx, int wz, int size_x, int size_z,
                 }
         }
 
-        uint32_t wc = water_seabed_color(wx, wz);
+        uint32_t wc = water_seabed_color_no_cache(wx, wz);
         float h = cell_hash(wx, wz);
         float shimmer = 0.85F + 0.22F * h;
         float wr_ = (float)red(wc) * shimmer;
