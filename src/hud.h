@@ -69,6 +69,7 @@ struct serverlist_entry {
 extern int screen_current;
 extern int show_exit;
 
+void hud_process_aimtrainer_request(void);
 void hud_deinit(void);
 
 extern struct hud hud_ingame;

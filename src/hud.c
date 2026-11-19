@@ -28,6 +28,7 @@
 #include <ctype.h>
 
 #include "lodepng/lodepng.h"
+#include "aimtrainer.h"
 #include "main.h"
 #include "file.h"
 #include "common.h"
@@ -2600,7 +2601,10 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 case TOOL_GUN: {
                                         int ammo = is_local ? local_player_ammo : players[local_id].ammo;
                                         int ammo_reserve = is_local ? local_player_ammo_reserved : players[local_id].ammo_reserved;
-                                        sprintf(item_mini_str, "%i/%i", ammo, ammo_reserve);
+                                        if(is_local && aimtrainer_active())
+                                                strcpy(item_mini_str, "Unlimited");
+                                        else
+                                                sprintf(item_mini_str, "%i/%i", ammo, ammo_reserve);
                                         switch(players[local_id].weapon) {
                                                 case WEAPON_RIFLE: item_mini = &texture_ammo_semi; break;
                                                 case WEAPON_SMG: item_mini = &texture_ammo_smg; break;
@@ -3407,6 +3411,7 @@ texture_draw_empty_rotated(settings.window_width - 143 * scalef + tent2_x * map_
 }
 
 static void hud_ingame_scroll(double yoffset) {
+        if(aimtrainer_active()) return;
         if(pie_menu_opened()) return;
         /* While the chat input is open, the scroll wheel pages through the
          * chat history instead of switching weapons. yoffset > 0 scrolls
@@ -3911,7 +3916,7 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
                                 if(key == WINDOW_KEY_DEMO_SPEED_DOWN) { demo_playback_set_speed(DemoPlaybackState.speed * 0.5f); return; }
                                 if(key == WINDOW_KEY_DEMO_SPEED_UP) { demo_playback_set_speed(DemoPlaybackState.speed * 2.0f); return; }
                         }
-                        if(!network_connected) {
+                        if(!network_connected && !aimtrainer_active()) {
                                 if(key == WINDOW_KEY_F1) {
                                         camera_mode = CAMERAMODE_SELECTION;
                                 }
@@ -3975,7 +3980,7 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
                                || (config_key(WINDOW_KEY_PIE_MENU)
                                    && config_key(WINDOW_KEY_LASTTOOL)->def == config_key(WINDOW_KEY_PIE_MENU)->def)))
                                 return; /* a shared menu binding must not change tools */
-                        if(key == WINDOW_KEY_LASTTOOL) {
+                        if(!aimtrainer_active() && key == WINDOW_KEY_LASTTOOL) {
                                 int tmp = players[local_player_id].held_item;
                                 players[local_player_id].held_item = local_player_lasttool;
                                 local_player_lasttool = tmp;
@@ -4134,7 +4139,7 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
                                 hud_switch_next_player();
                         }
 
-                        if(screen_current == SCREEN_NONE && camera_mode == CAMERAMODE_FPS) {
+                        if(!aimtrainer_active() && screen_current == SCREEN_NONE && camera_mode == CAMERAMODE_FPS) {
                                 unsigned char tool_switch = 0;
                                 switch(key) {
                                         case WINDOW_KEY_TOOL1:
@@ -4181,7 +4186,7 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
                                 }
                         }
 
-                        if(screen_current == SCREEN_NONE) {
+                        if(!aimtrainer_active() && screen_current == SCREEN_NONE) {
                                 if(key == WINDOW_KEY_CHANGETEAM) {
                                         screen_current = SCREEN_TEAM_SELECT;
                                         return;
@@ -4955,7 +4960,30 @@ static void pinned_save();
 static int pinned_contains(const char* identifier);
 static void pinned_toggle(const char* identifier);
 
+static bool aimtrainer_requested;
+
+void hud_process_aimtrainer_request(void) {
+        if(!aimtrainer_requested)
+                return;
+        aimtrainer_requested = false;
+        if(!aimtrainer_start()) {
+                chat_showpopup("Could not open Aim Trainer", 3.0F, rgb(255, 180, 180));
+                return;
+        }
+        ping_stop();
+        if(request_serverlist) {
+                http_release(request_serverlist);
+                request_serverlist = NULL;
+        }
+        chat_clear(0);
+        show_exit = 0;
+        screen_current = SCREEN_NONE;
+        window_title("Aim Trainer");
+        hud_change(&hud_ingame);
+}
+
 static void hud_serverlist_init() {
+        aimtrainer_stop();
         ping_stop();
         network_disconnect();
         window_title(NULL);
@@ -5274,8 +5302,15 @@ void hud_common_sidebar(mu_Context* ctx, float scalex, float scaley) {
         }
 #endif
 
-        if(!network_connected)
+        if(!network_connected && !aimtrainer_active()) {
                 hud_nav_button(ctx, &hud_serverlist, "Servers");
+                if(mu_button(ctx, "Aim Trainer"))
+                        aimtrainer_requested = true;
+        }
+        if(aimtrainer_active() && mu_button(ctx, "Resume training")) {
+                show_exit = 0;
+                hud_change(&hud_ingame);
+        }
 
         hud_nav_button(ctx, &hud_settings, "Settings");
         hud_nav_button(ctx, &hud_controls, "Controls");
@@ -5285,7 +5320,7 @@ void hud_common_sidebar(mu_Context* ctx, float scalex, float scaley) {
         hud_nav_button(ctx, &hud_replay, "Replay Settings");
 
 
-        if(!network_connected)
+        if(!network_connected && !aimtrainer_active())
                 hud_nav_button(ctx, &hud_demolist, "Demos");
 
         if(network_connected)
@@ -5299,8 +5334,8 @@ void hud_common_sidebar(mu_Context* ctx, float scalex, float scaley) {
         }
 
         mu_text_color(ctx, 255, 60, 60);
-        if(mu_button(ctx, network_connected ? "Disconnect" : "Exit")) {
-                if(network_connected)
+        if(mu_button(ctx, aimtrainer_active() ? "Leave training" : (network_connected ? "Disconnect" : "Exit"))) {
+                if(network_connected || aimtrainer_active())
                         hud_change(&hud_serverlist);
                 else
                         exit(0);

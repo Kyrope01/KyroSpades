@@ -33,6 +33,7 @@
 #include <math.h>
 #include <limits.h>
 
+#include "aimtrainer.h"
 #include "lodepng/lodepng.h"
 #include "common.h"
 #include "file.h"
@@ -2832,6 +2833,7 @@ int main(int argc, char** argv) {
                    used: network service, physics, camera and display below all
                    work from the state polled here. */
                 window_poll();
+                hud_process_aimtrainer_request();
                 if(window_closed())
                         break;
 
@@ -2871,6 +2873,8 @@ int main(int argc, char** argv) {
                                            partial-tick render interpolation */
                                         player_snapshot_prev();
                                         player_update(PHYSICS_STEP_TIME, 1);
+                                        if(hud_active == &hud_ingame)
+                                                aimtrainer_tick(PHYSICS_STEP_TIME);
                                         grenade_update(PHYSICS_STEP_TIME);
                                 }
                         }

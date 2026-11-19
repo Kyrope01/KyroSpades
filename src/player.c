@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include "aimtrainer.h"
 #include "demo.h"
 #include <float.h>
 #include <math.h>
@@ -927,7 +928,8 @@ void player_update(float dt, int locked) {
 	for(int k = 0; k < PLAYERS_MAX; k++) {
 		if(players[k].connected) {
 			if(locked) {
-				player_move(&players[k], dt, k);
+				if(!aimtrainer_active())
+					player_move(&players[k], dt, k);
 			} else {
 				if(k != local_player_id) {
 					if(!smoothing_ready) {
