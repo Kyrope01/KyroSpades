@@ -1645,22 +1645,24 @@ void display() {
 
                                 if(postproc.shader) {
                                         // derive final shader factors on CPU once per frame
-                                        float e = 1.0F + settings.exposure / 100.0F;
-                                        float ct = 1.0F + settings.contrast / 100.0F;
+                                        /* Don't stack KyroSpades' legacy grade on top of ZeroSpades'. */
+                                        const bool use_cc = settings.color_correction != 0;
+                                        float e = use_cc ? 1.0F : 1.0F + settings.exposure / 100.0F;
+                                        float ct = use_cc ? 1.0F : 1.0F + settings.contrast / 100.0F;
                                         glx_use_program(postproc.shader);
-                                        glUniform1f(postproc.uni_pp_sat, 1.0F + settings.saturation / 100.0F); // pp_sat
+                                        glUniform1f(postproc.uni_pp_sat, use_cc ? 1.0F : 1.0F + settings.saturation / 100.0F); // pp_sat
                                         glUniform1f(postproc.uni_pp_scale, e * ct);                            // pp_scale
                                         glUniform1f(postproc.uni_pp_bias, 0.5F * (1.0F - ct));                  // pp_bias
                                         glUniform1f(postproc.uni_pp_vig, (settings.vignette / 100.0F) * 4.0F); // pp_vig
                                         glUniform1f(postproc.uni_pp_ca_strength,
                                                     settings.chromatic_aberration ? settings.chromatic_aberration_strength * 0.01F : 0.0F);
-                                        if(settings.color_correction) {
+                                        if(use_cc) {
                                                 float tint[3];
                                                 color_correction_tint(cc_smoothed_fog, fog_color, tint);
                                                 glUniform3f(postproc.uni_pp_cc_tint, tint[0], tint[1], tint[2]);
                                         }
                                         glUniform1f(postproc.uni_pp_cc_mode,
-                                                    settings.color_correction ? (postproc.hdr ? 2.0F : 1.0F) : 0.0F);
+                                                    use_cc ? (postproc.hdr ? 2.0F : 1.0F) : 0.0F);
                                         glUniform2f(postproc.uni_pp_texel, 1.0F / settings.window_width, 1.0F / settings.window_height);
                                         glUniform1f(postproc.uni_pp_dmg, damagefx_vignette()); // pp_dmg
                                         glUniform1f(postproc.uni_pp_outlines,
@@ -2565,8 +2567,8 @@ int main(int argc, char** argv) {
         settings.object_outline_thickness = 0.7F; /* kept for anyone who turns outlines back on */
         settings.chromatic_aberration = 0; /* off by default; user can enable it */
         settings.chromatic_aberration_strength = 1.5F;
-        /* Color correction is opt-in. */
-        settings.color_correction = 0;
+        /* Use the ZeroSpades grade by default. */
+        settings.color_correction = 1;
         settings.hdr_rendering = 0;
         settings.dynamic_lights = 1;
         settings.all_player_flashlights = 0; /* Opt-in: never alter remote visuals on upgrade. */

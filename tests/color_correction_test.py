@@ -7,7 +7,10 @@ root = Path(__file__).resolve().parents[1]
 main = (root / 'src/main.c').read_text()
 assert main.count('COLOR_CORRECTION_GLSL') == 2
 assert main.count('colorCorrect(c);') == 2
-assert 'settings.color_correction ? (postproc.hdr ? 2.0F : 1.0F) : 0.0F' in main
+assert 'use_cc ? (postproc.hdr ? 2.0F : 1.0F) : 0.0F' in main
+assert 'use_cc ? 1.0F : 1.0F + settings.saturation' in main
+assert 'use_cc ? 1.0F : 1.0F + settings.exposure' in main
+assert 'use_cc ? 1.0F : 1.0F + settings.contrast' in main
 assert 'settings.color_correction' not in (root / 'src/map.c').read_text()
 
 with TemporaryDirectory() as directory:
@@ -26,8 +29,8 @@ int main(void) {
     smoothed[0] = -1.F;
     color_correction_tint(smoothed, (float[]){.4F, .4F, .4F}, tint);
     assert(tint[0] == 1.F && tint[1] == 1.F && tint[2] == 1.F);
-    assert(strstr(COLOR_CORRECTION_GLSL, "hdr ? 0.8 : 0.85"));
-    assert(strstr(COLOR_CORRECTION_GLSL, "hdr ? 0.1 : 0.7"));
+    assert(strstr(COLOR_CORRECTION_GLSL, "hdr ? 0.9 : 1.0"));
+    assert(strstr(COLOR_CORRECTION_GLSL, "hdr ? 0.0 : 0.3"));
 }
 ''')
     exe = src.with_suffix('')
