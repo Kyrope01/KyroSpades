@@ -1905,39 +1905,47 @@ static void hud_colorpicker_render(void) {
         glColor3f(1.0F, 1.0F, 1.0F);
 }
 
-/* A small, filtered alpha map gives the loading screen soft, folded light
+/* A low-resolution alpha map gives the loading screen square, folded light
    instead of straight bands. Texture color is supplied by the UI accent. */
 static struct texture join_glow;
 enum { JOIN_GLOW_SIZE = 128 };
 
 static float hud_join_glow_fold(float along, float depth, float time, float phase) {
         float u = along + 0.12F * sinf(depth * 17.0F + along * 6.0F - time + phase);
-        float wave = 0.16F + 0.074F * sinf(u * 15.0F + time + phase)
-                           + 0.039F * sinf(u * 29.0F - time * 0.64F + phase);
+        float wave = 0.052F + 0.026F * sinf(u * 15.0F + time + phase)
+                           + 0.014F * sinf(u * 29.0F - time * 0.64F + phase);
         float d = depth - wave;
-        float soft = fmaxf(0.0F, fminf(1.0F, 0.5F - d * 5.6F));
-        float ridge = fmaxf(0.0F, 1.0F - fabsf(d) * 48.0F);
+        float soft = fmaxf(0.0F, fminf(1.0F, 0.5F - d * 22.0F));
+        float ridge = fmaxf(0.0F, 1.0F - fabsf(d) * 95.0F);
         return 0.23F * soft * soft + 0.19F * ridge * ridge;
 }
 
 static void hud_join_edge_glow(void) {
         if(settings.ui_reduced_motion)
                 return;
-        static int previous_frame = -2;
+        const int w = settings.window_width, h = settings.window_height;
+        if(w <= 0 || h <= 0)
+                return;
+        static int previous_frame = -2, previous_w, previous_h;
+        /* Crop the square texture rather than stretching its texels. */
+        const float cell = (float)max(w, h) / JOIN_GLOW_SIZE;
+        const float short_side = (float)min(w, h);
         static unsigned char pixels[JOIN_GLOW_SIZE * JOIN_GLOW_SIZE * 4];
         const int frame = (int)(window_time() * 24.0F);
         glx_batch2d_flush();
-        if(!join_glow.texture_id || frame != previous_frame) {
+        if(!join_glow.texture_id || frame != previous_frame || w != previous_w || h != previous_h) {
                 float time = frame * (0.58F / 24.0F);
                 float pulse = 1.0F + 0.09F * sinf(time * 3.2F);
                 for(int j = 0; j < JOIN_GLOW_SIZE; ++j) {
-                        float v = (j + 0.5F) / JOIN_GLOW_SIZE;
+                        float y = fminf(h, (j + 0.5F) * cell);
+                        float v = y / h;
                         for(int i = 0; i < JOIN_GLOW_SIZE; ++i) {
-                                float u = (i + 0.5F) / JOIN_GLOW_SIZE;
-                                float light = hud_join_glow_fold(u, v, time, 0.0F);
-                                light = fmaxf(light, 0.54F * hud_join_glow_fold(1.0F - u, 1.0F - v, time, 3.0F));
-                                light = fmaxf(light, 0.72F * hud_join_glow_fold(v, u, time, 1.0F));
-                                light = fmaxf(light, 0.68F * hud_join_glow_fold(1.0F - v, 1.0F - u, time, 4.0F));
+                                float x = fminf(w, (i + 0.5F) * cell);
+                                float u = x / w;
+                                float light = hud_join_glow_fold(u, y / short_side, time, 0.0F);
+                                light = fmaxf(light, 0.54F * hud_join_glow_fold(1.0F - u, (h - y) / short_side, time, 3.0F));
+                                light = fmaxf(light, 0.72F * hud_join_glow_fold(v, x / short_side, time, 1.0F));
+                                light = fmaxf(light, 0.68F * hud_join_glow_fold(1.0F - v, (w - x) / short_side, time, 4.0F));
                                 unsigned char* pixel = &pixels[(j * JOIN_GLOW_SIZE + i) * 4];
                                 pixel[0] = pixel[1] = pixel[2] = 255;
                                 pixel[3] = (unsigned char)(255.0F * light * pulse);
@@ -1951,8 +1959,8 @@ static void hud_join_edge_glow(void) {
                         glBindTexture(GL_TEXTURE_2D, join_glow.texture_id);
                         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, JOIN_GLOW_SIZE, JOIN_GLOW_SIZE,
                                      0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
-                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
                         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
                         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
                 } else {
@@ -1961,13 +1969,21 @@ static void hud_join_edge_glow(void) {
                                         GL_RGBA, GL_UNSIGNED_BYTE, pixels);
                 }
                 previous_frame = frame;
+                previous_w = w;
+                previous_h = h;
         }
         mu_Color accent = mu_accent_color(1.0F, 255);
         GLboolean blended = glIsEnabled(GL_BLEND);
         glColor4ub(accent.r, accent.g, accent.b, 255);
-        texture_draw(&join_glow, 0, settings.window_height, settings.window_width, settings.window_height);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        texture_draw_sector(&join_glow, 0, h, w, h, 0.0F, 0.0F,
+                            w / (cell * JOIN_GLOW_SIZE), h / (cell * JOIN_GLOW_SIZE));
+        glBindTexture(GL_TEXTURE_2D, 0);
         if(blended)
                 glEnable(GL_BLEND);
+        else
+                glDisable(GL_BLEND);
 }
 
 static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
