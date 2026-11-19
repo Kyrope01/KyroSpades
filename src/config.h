@@ -85,6 +85,7 @@ extern struct RENDER_OPTIONS {
         float spectator_acceleration;
         float spectator_fog_distance;
         int iron_sight;
+        int hide_weapon_model_during_ads;
         int disable_raw_input;
         int ui_spacing;
         int ui_padding;

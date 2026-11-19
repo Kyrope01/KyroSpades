@@ -1428,6 +1428,15 @@ void display() {
                                         if(camera_mode == CAMERAMODE_FPS)
                                                 glDepthRange(0.0F, 0.05F);
                                         matrix_push(matrix_projection);
+                                        /* Zoom the world, not the weapon and hands. A narrow ADS
+                                           frustum can otherwise crop the whole viewmodel. */
+                                        if(camera_mode == CAMERAMODE_FPS && !settings.iron_sight
+                                           && camera_ads_progress > 0.0F) {
+                                                matrix_identity(matrix_projection);
+                                                matrix_perspective(matrix_projection, camera_viewmodel_fov(),
+                                                        (float)settings.window_width / settings.window_height, 0.1F,
+                                                        settings.render_distance + CHUNK_SIZE * 4.0F);
+                                        }
                                         matrix_translate(matrix_projection, 0.0F, -0.25F, 0.0F);
                                         matrix_upload_p();
 #ifdef GLX_PROGRAMMABLE
@@ -2660,7 +2669,6 @@ int main(int argc, char** argv) {
         log_info("Game started!");
         log_info("KyroSpades %s %s", KYROSPADES_VERSION, BS_VER_INFO);
 
-        settings.iron_sight = 1;
         settings.replay_enabled = -1;
 
         /* ── Command line ─────────────────────────────────────────────────────

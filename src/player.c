@@ -1790,17 +1790,12 @@ void player_render(struct Player* p, int id) {
 		render_fpv = 0;
 	}
 
-	// Determine if arms should be rendered
-	// Arms are always rendered for other players, but for local player in FPV mode,
-	// it depends on the player_arms setting and whether ADS is active
-	int render_arms = 1;
-	if(id == local_player_id && camera_mode == CAMERAMODE_FPS) {
-		render_arms = settings.player_arms;
-		// Hide arms when ADS is active (RMB pressed while holding gun)
-		if(p->held_item == TOOL_GUN && p->input.buttons.rmb) {
-			render_arms = 0;
-		}
-	}
+	int local_fpv = render_fpv && id == local_player_id && camera_mode == CAMERAMODE_FPS;
+	/* The iron-sight image replaces the viewmodel. With it off, hiding is optional. */
+	int hide_ads_viewmodel = local_fpv && p->held_item == TOOL_GUN
+		&& (settings.iron_sight ? camera_ads_scope_progress > 0.0F
+		    : settings.hide_weapon_model_during_ads && camera_ads_progress > 0.0F);
+	int render_arms = !hide_ads_viewmodel && (!local_fpv || settings.player_arms);
 
 	// Render body parts (head, torso, legs) only when render_body is true
 	// In FPV mode with player_arms setting enabled, only arms will be rendered (see below)
@@ -1934,7 +1929,8 @@ void player_render(struct Player* p, int id) {
 		os_raise_state = os_lerp_smooth(os_raise_state, raiseTarget, dt, 0.0005f);
 		/* Crouching takes priority over a stale sprint input (common with the
 		   touch joystick), so it must not suppress the ADS animation. */
-		float aimTarget = (p->held_item == TOOL_GUN && p->input.buttons.rmb
+		float aimTarget = ((!local_fpv || settings.iron_sight)
+			&& p->held_item == TOOL_GUN && p->input.buttons.rmb
 			&& (!p->input.keys.sprint || p->input.keys.crouch)) ? 1.0f : 0.0f;
 		os_aim_state = aimTarget;
 		os_aim_smooth = os_lerp_smooth(os_aim_smooth, os_aim_state, dt, 0.0008f);
@@ -2094,8 +2090,7 @@ void player_render(struct Player* p, int id) {
 			kv6_render(&model_block, p->team);
 			break;
 		case TOOL_GUN:
-			// Don't render gun model for local player in FPV when ADS is active (RMB pressed)
-			if(!(render_fpv && id == local_player_id && p->input.buttons.rmb)) {
+			if(!hide_ads_viewmodel) {
 				switch(p->weapon) {
 					case WEAPON_RIFLE: kv6_render(&model_semi, p->team); break;
 					case WEAPON_SMG: kv6_render(&model_smg, p->team); break;

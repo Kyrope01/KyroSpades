@@ -68,6 +68,8 @@ void camera_hit_mask(struct Camera_HitType* hit, int exclude_player, float x, fl
 					 float ray_y, float ray_z, float range);
 
 float camera_fov_scaled(float dt);
+/* Unzoomed FOV from the current camera_fov_scaled() update. */
+float camera_viewmodel_fov(void);
 
 /* ADS (aim down sights) transition, 0 = hip, 1 = fully aimed, already
    smoothstepped.  Animates both into and out of ADS over 150 ms when the

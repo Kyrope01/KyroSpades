@@ -360,6 +360,7 @@ void config_save() {
         config_setf("client", "spectator_acceleration", settings.spectator_acceleration);
         config_setf("client", "spectator_fog_distance", settings.spectator_fog_distance);
         config_seti("client", "iron_sight", settings.iron_sight);
+        config_seti("client", "hide_weapon_model_during_ads", settings.hide_weapon_model_during_ads);
         config_seti("client", "disable_raw_input", settings.disable_raw_input);
         config_seti("client", "ui_spacing", settings.ui_spacing);
         config_seti("client", "ui_padding", settings.ui_padding);
@@ -547,6 +548,7 @@ IMPORT_SETTING(settings.camera_movement, camera_movement, atoi(value));
                 IMPORT_SETTING(settings.spectator_acceleration, spectator_acceleration, max(10.0F, min(200.0F, atof(value))));
                 IMPORT_SETTING(settings.spectator_fog_distance, spectator_fog_distance, max(5.f, min(512.f, atof(value))));
                 IMPORT_SETTING(settings.iron_sight, iron_sight, atoi(value));
+                IMPORT_SETTING(settings.hide_weapon_model_during_ads, hide_weapon_model_during_ads, atoi(value) != 0);
                 IMPORT_SETTING(settings.disable_raw_input, disable_raw_input, atoi(value));
                 IMPORT_SETTING(settings.ui_spacing, ui_spacing, atoi(value));
                 IMPORT_SETTING(settings.ui_padding, ui_padding, atoi(value));
@@ -1790,6 +1792,16 @@ void config_reload() {
                                  .max = 1,
                                  .help = "Use weapon-specific iron sights instead of a dot",
                                  .name = "Iron sight",
+                                 .category = "Weapon Settings",
+                         });
+        list_add(&config_settings,
+                         &(struct config_setting) {
+                                 .value = &settings_tmp.hide_weapon_model_during_ads,
+                                 .type = CONFIG_TYPE_INT,
+                                 .min = 0,
+                                 .max = 1,
+                                 .help = "Hide the first-person weapon and hands while aiming, even without the iron sight overlay",
+                                 .name = "Hide weapon model during ADS",
                                  .category = "Weapon Settings",
                          });
         list_add(&config_settings,
