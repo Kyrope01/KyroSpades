@@ -1905,85 +1905,40 @@ static void hud_colorpicker_render(void) {
         glColor3f(1.0F, 1.0F, 1.0F);
 }
 
-/* A low-resolution alpha map gives the loading screen square, folded light
-   instead of straight bands. Texture color is supplied by the UI accent. */
-static struct texture join_glow;
-enum { JOIN_GLOW_SIZE = 128 };
-
-static float hud_join_glow_fold(float along, float depth, float time, float phase) {
-        float u = along + 0.12F * sinf(depth * 17.0F + along * 6.0F - time + phase);
-        float wave = 0.052F + 0.026F * sinf(u * 15.0F + time + phase)
-                           + 0.014F * sinf(u * 29.0F - time * 0.64F + phase);
-        float d = depth - wave;
-        float soft = fmaxf(0.0F, fminf(1.0F, 0.5F - d * 22.0F));
-        float ridge = fmaxf(0.0F, 1.0F - fabsf(d) * 95.0F);
-        return 0.23F * soft * soft + 0.19F * ridge * ridge;
-}
-
-static void hud_join_edge_glow(void) {
-        if(settings.ui_reduced_motion)
-                return;
-        const int w = settings.window_width, h = settings.window_height;
-        if(w <= 0 || h <= 0)
-                return;
-        static int previous_frame = -2, previous_w, previous_h;
-        /* Crop the square texture rather than stretching its texels. */
-        const float cell = (float)max(w, h) / JOIN_GLOW_SIZE;
-        const float short_side = (float)min(w, h);
-        static unsigned char pixels[JOIN_GLOW_SIZE * JOIN_GLOW_SIZE * 4];
-        const int frame = (int)(window_time() * 24.0F);
-        glx_batch2d_flush();
-        if(!join_glow.texture_id || frame != previous_frame || w != previous_w || h != previous_h) {
-                float time = frame * (0.58F / 24.0F);
-                float pulse = 1.0F + 0.09F * sinf(time * 3.2F);
-                for(int j = 0; j < JOIN_GLOW_SIZE; ++j) {
-                        float y = fminf(h, (j + 0.5F) * cell);
-                        float v = y / h;
-                        for(int i = 0; i < JOIN_GLOW_SIZE; ++i) {
-                                float x = fminf(w, (i + 0.5F) * cell);
-                                float u = x / w;
-                                float light = hud_join_glow_fold(u, y / short_side, time, 0.0F);
-                                light = fmaxf(light, 0.54F * hud_join_glow_fold(1.0F - u, (h - y) / short_side, time, 3.0F));
-                                light = fmaxf(light, 0.72F * hud_join_glow_fold(v, x / short_side, time, 1.0F));
-                                light = fmaxf(light, 0.68F * hud_join_glow_fold(1.0F - v, (w - x) / short_side, time, 4.0F));
-                                unsigned char* pixel = &pixels[(j * JOIN_GLOW_SIZE + i) * 4];
-                                pixel[0] = pixel[1] = pixel[2] = 255;
-                                pixel[3] = (unsigned char)(255.0F * light * pulse);
-                        }
-                }
-                if(!join_glow.texture_id) {
-                        glGenTextures(1, &join_glow.texture_id);
-                        if(!join_glow.texture_id)
-                                return;
-                        join_glow.width = join_glow.height = JOIN_GLOW_SIZE;
-                        glBindTexture(GL_TEXTURE_2D, join_glow.texture_id);
-                        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, JOIN_GLOW_SIZE, JOIN_GLOW_SIZE,
-                                     0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
-                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-                } else {
-                        glBindTexture(GL_TEXTURE_2D, join_glow.texture_id);
-                        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, JOIN_GLOW_SIZE, JOIN_GLOW_SIZE,
-                                        GL_RGBA, GL_UNSIGNED_BYTE, pixels);
-                }
-                previous_frame = frame;
-                previous_w = w;
-                previous_h = h;
+/* The sweep only highlights the completed portion; it never fakes progress. */
+static void hud_join_loading_bar(float height, float progress) {
+        float width = settings.window_width;
+        float fill = width * fmaxf(0.0F, fminf(1.0F, progress));
+        bool reduced = settings.ui_reduced_motion;
+        mu_Color accent = reduced ? mu_color(settings.ui_accent_r, settings.ui_accent_g, settings.ui_accent_b, 255)
+                                  : mu_accent_color(1.0F, 255);
+        bool batched = glx_batch2d_enabled();
+        glx_batch2d_enable(true);
+        glColor3ub(46, 46, 46);
+        glx_draw_quad_2d(0.0F, height, width, height);
+        if(fill > 0.0F) {
+                glColor3ub(accent.r, accent.g, accent.b);
+                glx_draw_quad_2d(0.0F, height, fill, height);
         }
-        mu_Color accent = mu_accent_color(1.0F, 255);
-        GLboolean blended = glIsEnabled(GL_BLEND);
-        glColor4ub(accent.r, accent.g, accent.b, 255);
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        texture_draw_sector(&join_glow, 0, h, w, h, 0.0F, 0.0F,
-                            w / (cell * JOIN_GLOW_SIZE), h / (cell * JOIN_GLOW_SIZE));
-        glBindTexture(GL_TEXTURE_2D, 0);
-        if(blended)
-                glEnable(GL_BLEND);
-        else
-                glDisable(GL_BLEND);
+        if(!reduced && fill > 0.0F) {
+                enum { SEGMENTS = 24 };
+                float span = fmaxf(32.0F, width * 0.16F);
+                float sweep = -span + fmodf(window_time(), 1.65F) / 1.65F * (width + span);
+                for(int i = 0; i < SEGMENTS; ++i) {
+                        float x0 = fmaxf(0.0F, sweep + span * i / SEGMENTS);
+                        float x1 = fminf(fill, sweep + span * (i + 1) / SEGMENTS);
+                        if(x1 <= x0)
+                                continue;
+                        float crest = sinf(3.14159265F * (i + 0.5F) / SEGMENTS);
+                        float light = 0.38F * crest * crest;
+                        glColor3ub(accent.r + (255 - accent.r) * light,
+                                   accent.g + (255 - accent.g) * light,
+                                   accent.b + (255 - accent.b) * light);
+                        glx_draw_quad_2d(x0, height, x1 - x0, height);
+                }
+        }
+        glx_batch2d_flush();
+        glx_batch2d_enable(batched);
 }
 
 static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
@@ -2117,7 +2072,6 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
 
         if(network_map_transfer || daytime_weather_awaiting_sky()) {
                 hud_common_render(ctx);
-                hud_join_edge_glow();
                 glColor3ub(255, 255, 255);
 
                 texture_draw(&texture_splash_icon,
@@ -2130,8 +2084,7 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                 float p = (compressed_chunk_data_estimate > 0) ?
                         ((float)compressed_chunk_data_offset / (float)compressed_chunk_data_estimate) :
                         0.0F;
-                glColor3ub(68, 68, 68);
-                texture_draw(&texture_loader, 0, texture_loader.height, settings.window_width, texture_loader.height);
+                float bar_height = fmaxf(8.0F, roundf(8.0F * scalef));
 
                 glColor3ub(255, 255, 255);
                 texture_draw(&texture_splash,
@@ -2140,15 +2093,7 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                          settings.window_height * 4.0F / 3.0F * 0.7F,
                          settings.window_height * 0.7F);
 
-                mu_Color color = mu_accent_color(1.F, 255);
-                glColor3ub(color.r, color.g, color.b);
-                texture_draw(
-                        &texture_loader,
-                        0,
-                        texture_loader.height,
-                        fmin(1.F, p) * settings.window_width,
-                        texture_white.height
-                );
+                hud_join_loading_bar(bar_height, network_map_transfer ? p : 1.0F);
 
                 glColor3f(1.0F, 1.0F, 1.0F);
                 char str[128];
@@ -2158,7 +2103,7 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                 else
                         sprintf(str, "Loading Map %iKB/%iKB", compressed_chunk_data_offset / 1024,
                                         compressed_chunk_data_estimate / 1024);
-                font_render(4.F, texture_loader.height + 16.F + 4.F, 16, str);
+                font_render(4.F, bar_height + 16.F + 4.F, 16, str);
 
                 font_select(FONT_FIXEDSYS);
         } else {
@@ -5018,8 +4963,6 @@ static void hud_serverlist_clear_news(void) {
 }
 
 void hud_deinit(void) {
-        if(join_glow.texture_id)
-                texture_delete(&join_glow);
         if(request_news) http_release(request_news);
         if(request_serverlist) http_release(request_serverlist);
 #ifdef JENKINS_BUILD

@@ -74,7 +74,6 @@ struct texture texture_zoom_smg;
 struct texture texture_zoom_shotgun;
 
 struct texture texture_white;
-struct texture texture_loader;
 struct texture texture_target;
 struct texture texture_indicator;
 
@@ -978,7 +977,6 @@ void texture_init() {
         texture_create(&texture_zoom_shotgun, "png/shotgun.png");
 
         texture_create(&texture_white, "png/white.png");
-        texture_create(&texture_loader, "png/splashloader.png");
         texture_create(&texture_target, "png/target.png");
         texture_create(&texture_indicator, "png/indicator.png");
 

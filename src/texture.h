@@ -79,7 +79,6 @@ extern struct texture texture_zoom_smg;
 extern struct texture texture_zoom_shotgun;
 
 extern struct texture texture_white;
-extern struct texture texture_loader;
 extern struct texture texture_target;
 extern struct texture texture_indicator;
 
