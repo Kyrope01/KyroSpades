@@ -59,16 +59,11 @@ float fog_color[4] = {0.5F, 0.9098F, 1.0F, 1.0F};
 float sun_dir[3] = {-0.5F, 0.8F, -0.3F};
 
 void fog_color_render(float out[3]) {
-        /* When filmic tone mapping is enabled, ACES lifts midtones and can
-           make distant fog read brighter than intended.  Darken the fog
-           color by 10% at render time so the visible fog stays at the same
-           perceived brightness the user picked in the color picker. */
         /* The server's fog color is the daylight sky. Scale only its render
            value, not fog_color itself (used by the color picker and packets). */
         /* Sky brightness already lives in the stored fog colour. Multiplying
            by its derived daylight level here would darken dusk twice. */
-        float scale = (settings.filmic_tonemapping ? 0.9F : 1.0F)
-                      * settings.sunlight_intensity * 0.01F
+        float scale = settings.sunlight_intensity * 0.01F
                       * daytime_weather_sunlight();
         out[0] = fog_color[0] * scale;
         out[1] = fog_color[1] * scale;

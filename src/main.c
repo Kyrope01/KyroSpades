@@ -33,6 +33,7 @@
 #include <math.h>
 #include <limits.h>
 
+#include "color_correction.h"
 #include "aimtrainer.h"
 #include "lodepng/lodepng.h"
 #include "common.h"
@@ -110,9 +111,10 @@ static struct {
         int uni_pp_bias;
         int uni_pp_vig;
         /* New post-proc uniforms: chromatic aberration strength,
-           filmic tone-mapping flag */
+           ZeroSpades color correction */
         int uni_pp_ca_strength;
-        int uni_pp_filmic;
+        int uni_pp_cc_mode;
+        int uni_pp_cc_tint;
         int uni_pp_texel;
         int uni_pp_dmg; /* damage feedback: red edge vignette (0..1) */
         int uni_pp_outlines;
@@ -587,6 +589,9 @@ static void hud_emit_surface_strip(void* user, float x, float y, float w, float 
 }
 
 void display() {
+        static float cc_smoothed_fog[3] = {-1.0F, -1.0F, -1.0F};
+        if(!settings.color_correction || !hud_active || !hud_active->render_world || network_map_transfer)
+                cc_smoothed_fog[0] = -1.0F;
         /* Apply pending window changes (fullscreen, vsync, size) every frame.
            drawScene() is skipped in the menus when not connected, so this must
            not live there or settings only take effect once in-game. */
@@ -614,7 +619,7 @@ void display() {
                                   || settings.saturation < -0.5F || settings.saturation > 0.5F
                                   || settings.contrast < -0.5F || settings.contrast > 0.5F
                                   || settings.vignette > 0.5F
-                                  || settings.lens_flare || settings.chromatic_aberration || settings.filmic_tonemapping
+                                  || settings.lens_flare || settings.chromatic_aberration || settings.color_correction
                                   || hdr_postproc || outlines_postproc
                                   || damagefx_vignette() > 0.003F));
         int desired_hdr = postprocess_hdr_supported()
@@ -845,7 +850,6 @@ void display() {
                                                 "uniform float pp_bias;\n"
                                                 "uniform float pp_vig;\n"
                                                 "uniform float pp_ca_strength;\n"
-                                                "uniform float pp_filmic;\n"
                                                 "uniform vec2 pp_texel;\n"
                                                 "uniform float pp_dmg;\n"
                                                 "uniform float pp_outlines;\n"
@@ -855,11 +859,7 @@ void display() {
                                                 "uniform float pp_depth_far;\n"
                                                 "uniform sampler2D depthmap;\n"
                                                 "uniform sampler2D tex;\n"
-                                                "vec3 acesFilm(vec3 x){\n"
-                                                "    const float a=2.51; const float b=0.03;\n"
-                                                "    const float c=2.43; const float d=0.59; const float e=0.14;\n"
-                                                "    return clamp((x*(a*x+b))/(x*(c*x+d)+e),0.0,1.0);\n"
-                                                "}\n"
+                                                COLOR_CORRECTION_GLSL
                                                 "void main(){\n"
                                                 "    vec2 uv = v_TexCoord;\n"
                                                 "    vec2 dd = uv - 0.5;\n"
@@ -873,10 +873,10 @@ void display() {
                                                 "    } else {\n"
                                                 "        c = texture2D(tex, uv).rgb;\n"
                                                 "    }\n"
+                                                "    c = colorCorrect(c);\n"
                                                 "    float g = dot(c, vec3(0.299, 0.587, 0.114));\n"
                                                 "    c = mix(vec3(g), c, pp_sat);\n"
                                                 "    c = c * pp_scale + pp_bias;\n"
-                                                "    if(pp_filmic > 0.5) c = acesFilm(c);\n"
                                                 "    c *= clamp(1.0 - pp_vig * r2, 0.0, 1.0);\n"
                                                 "    if(pp_dmg > 0.001){\n"
                                                 "        float dm = smoothstep(0.04, 0.45, r2) * pp_dmg;\n"
@@ -915,7 +915,6 @@ void display() {
                                         "uniform float pp_bias;"
                                         "uniform float pp_vig;"
                                         "uniform float pp_ca_strength;"
-                                        "uniform float pp_filmic;"
                                         "uniform vec2 pp_texel;"
                                         "uniform float pp_dmg;"
                                         "uniform float pp_outlines;"
@@ -925,11 +924,7 @@ void display() {
                                         "uniform float pp_depth_far;"
                                         "uniform sampler2D depthmap;"
                                         "uniform sampler2D tex;"
-                                        "vec3 acesFilm(vec3 x){"
-                                        "const float a=2.51;const float b=0.03;"
-                                        "const float c=2.43;const float d=0.59;const float e=0.14;"
-                                        "return clamp((x*(a*x+b))/(x*(c*x+d)+e),0.0,1.0);"
-                                        "}"
+                                        COLOR_CORRECTION_GLSL
                                         "void main(){"
                                         "vec2 uv=gl_TexCoord[0].xy;"
                                         "vec2 dd=uv-0.5;"
@@ -941,10 +936,10 @@ void display() {
                                         "c.g=texture2D(tex,uv).g;"
                                         "c.b=texture2D(tex,uv-off).b;"
                                         "}else{c=texture2D(tex,uv).rgb;}"
+                                        "c=colorCorrect(c);"
                                         "float g=dot(c,vec3(0.299,0.587,0.114));"
                                         "c=mix(vec3(g),c,pp_sat);"
                                         "c=c*pp_scale+pp_bias;"
-                                        "if(pp_filmic>0.5)c=acesFilm(c);"
                                         "c*=clamp(1.0-pp_vig*r2,0.0,1.0);"
                                         "if(pp_dmg>0.001){float dm=smoothstep(0.04,0.45,r2)*pp_dmg;c=mix(c,vec3(0.55,0.04,0.04),dm*0.22);c+=vec3(0.42,0.03,0.03)*dm;}"
                                         "if(pp_outlines>0.5){float thick=clamp(pp_outline_thickness,0.5,8.0);float radius=max(thick*0.5,1.0);vec2 st=pp_texel*radius;float d=texture2D(depthmap,uv).r;"
@@ -966,7 +961,8 @@ void display() {
                                         postproc.uni_pp_bias = glx_uniform_location(postproc.shader, "pp_bias");
                                         postproc.uni_pp_vig = glx_uniform_location(postproc.shader, "pp_vig");
                                         postproc.uni_pp_ca_strength = glx_uniform_location(postproc.shader, "pp_ca_strength");
-                                        postproc.uni_pp_filmic = glx_uniform_location(postproc.shader, "pp_filmic");
+                                        postproc.uni_pp_cc_mode = glx_uniform_location(postproc.shader, "pp_cc_mode");
+                                        postproc.uni_pp_cc_tint = glx_uniform_location(postproc.shader, "pp_cc_tint");
                                         postproc.uni_pp_texel = glx_uniform_location(postproc.shader, "pp_texel");
                                         postproc.uni_pp_dmg = glx_uniform_location(postproc.shader, "pp_dmg");
                                         postproc.uni_pp_outlines = glx_uniform_location(postproc.shader, "pp_outlines");
@@ -978,7 +974,7 @@ void display() {
                                         GLint scene_sampler = glx_uniform_location(postproc.shader, "tex");
                                         if(postproc.uni_pp_sat < 0 || postproc.uni_pp_scale < 0 || postproc.uni_pp_bias < 0
                                            || postproc.uni_pp_vig < 0 || postproc.uni_pp_ca_strength < 0
-                                           || postproc.uni_pp_filmic < 0
+                                           || postproc.uni_pp_cc_mode < 0 || postproc.uni_pp_cc_tint < 0
                                            || postproc.uni_pp_texel < 0 || postproc.uni_pp_dmg < 0
                                            || postproc.uni_pp_outlines < 0 || postproc.uni_pp_depthmap < 0
                                            || postproc.uni_pp_outline_thickness < 0 || postproc.uni_pp_fog_range < 0
@@ -1252,9 +1248,7 @@ void display() {
                                 float w = (float)settings.window_width;
                                 float horizon = h * 0.5F;
                                 float intensity = settings.sky_gradient_intensity;
-                                /* Use the render-time fog color (darkened 10%
-                                   when filmic is on) so the sky gradient
-                                   horizon matches the actual fog color. */
+                                /* Match the sky gradient horizon to the rendered fog. */
                                 float fc[3];
                                 fog_color_render(fc);
                                 float sun = lighting_sunlight_scale();
@@ -1660,7 +1654,13 @@ void display() {
                                         glUniform1f(postproc.uni_pp_vig, (settings.vignette / 100.0F) * 4.0F); // pp_vig
                                         glUniform1f(postproc.uni_pp_ca_strength,
                                                     settings.chromatic_aberration ? settings.chromatic_aberration_strength * 0.01F : 0.0F);
-                                        glUniform1f(postproc.uni_pp_filmic, settings.filmic_tonemapping ? 1.0F : 0.0F);
+                                        if(settings.color_correction) {
+                                                float tint[3];
+                                                color_correction_tint(cc_smoothed_fog, fog_color, tint);
+                                                glUniform3f(postproc.uni_pp_cc_tint, tint[0], tint[1], tint[2]);
+                                        }
+                                        glUniform1f(postproc.uni_pp_cc_mode,
+                                                    settings.color_correction ? (postproc.hdr ? 2.0F : 1.0F) : 0.0F);
                                         glUniform2f(postproc.uni_pp_texel, 1.0F / settings.window_width, 1.0F / settings.window_height);
                                         glUniform1f(postproc.uni_pp_dmg, damagefx_vignette()); // pp_dmg
                                         glUniform1f(postproc.uni_pp_outlines,
@@ -2409,7 +2409,7 @@ static void main_apply_perf_preset_bs(void) {
         settings.saturation = 0.0F;
         settings.contrast = 0.0F;
         settings.vignette = 0.0F;
-        settings.filmic_tonemapping = 0;
+        settings.color_correction = 0;
         settings.chromatic_aberration = 0;
         settings.object_outlines = 0;
         settings.hdr_rendering = 0;
@@ -2565,8 +2565,8 @@ int main(int argc, char** argv) {
         settings.object_outline_thickness = 0.7F; /* kept for anyone who turns outlines back on */
         settings.chromatic_aberration = 0; /* off by default; user can enable it */
         settings.chromatic_aberration_strength = 1.5F;
-        /* Keep filmic tone mapping opt-in as well. */
-        settings.filmic_tonemapping = 0;
+        /* Color correction is opt-in. */
+        settings.color_correction = 0;
         settings.hdr_rendering = 0;
         settings.dynamic_lights = 1;
         settings.all_player_flashlights = 0; /* Opt-in: never alter remote visuals on upgrade. */

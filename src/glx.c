@@ -1793,7 +1793,7 @@ void glx_draw_gradient_quad_2d(float x, float y, float w, float h, float r1, flo
 /* ── Spherical fog ───────────────────────────────────────────────────────── */
 
 void glx_enable_sphericalfog() {
-        /* Effective fog color (darkened 10% when filmic tone mapping is on). */
+        /* Effective render-time fog color. */
         float fc[3];
         fog_color_render(fc);
 #ifdef OPENGL_CORE

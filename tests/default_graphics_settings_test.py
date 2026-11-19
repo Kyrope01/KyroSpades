@@ -37,11 +37,11 @@ for weapon in ("rifle", "shotgun", "smg"):
 assert "settings.ads_zoom_animation = 0;" in main
 assert "ads_zoom_animation             = 0" in config
 
-assert "settings.filmic_tonemapping = 0;" in main
-assert "settings.filmic_tonemapping = 1;" not in main
+assert "settings.color_correction = 0;" in main
+assert "settings.color_correction = 1;" not in main
 assert "settings.chromatic_aberration = 0;" in main
 assert "settings.chromatic_aberration = 1;" not in main
-assert "filmic_tonemapping             = 0" in config
+assert "color_correction               = 0" in config
 assert "chromatic_aberration           = 0" in config
 
 print("Default graphics settings passed")
