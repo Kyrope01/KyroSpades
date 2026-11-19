@@ -7054,18 +7054,16 @@ static void hud_macros_render(mu_Context* ctx, float scalex, float scaley) {
                 }
                 mu_layout_row(ctx, 1, (int[]) {-1}, -1);
                 mu_begin_panel(ctx, "MacrosList");
-                int width = mu_get_current_container(ctx)->body.w;
+                /* The scrollbar-adjusted body still includes both padding gutters. */
+                int width = mu_get_current_container(ctx)->body.w - 2 * ctx->style->padding;
                 int spacing = ctx->style->spacing;
-                int del_w = (int)(ctx->text_width(ctx->style->font, "x", 0) * 2.0F);
-                int key_w = (int)(ctx->text_width(ctx->style->font, "Unbound", 0) + ctx->style->padding * 2);
-                int col2_total = key_w + del_w;
-                if(col2_total > width * 0.35F) {
-                        col2_total = (int)(width * 0.35F);
-                        key_w = col2_total - del_w;
-                }
-                int col1_w = width - col2_total - spacing * 2;
-                if(col1_w < 1) col1_w = 1;
-                mu_layout_row(ctx, 2, (int[]) {col1_w, col2_total}, 0);
+                int columns_w = max(3, width - 2 * spacing);
+                int trailing_w = max(2, (int)(columns_w * 0.35F));
+                int del_w = min(trailing_w - 1, max(1, ctx->text_width(ctx->style->font, "x", 0) * 2));
+                int key_w = min(trailing_w - del_w,
+                                max(1, ctx->text_width(ctx->style->font, "Unbound", 0) + ctx->style->padding * 2));
+                int col1_w = columns_w - key_w - del_w;
+                mu_layout_row(ctx, 2, (int[]) {col1_w, key_w + spacing + del_w}, 0);
                 mu_button_ex(ctx, "String", 0, MU_OPT_ALIGNCENTER);
                 mu_button_ex(ctx, "Keybind", 0, MU_OPT_ALIGNCENTER);
                 for(int k = 0; k < list_size(&config_macros); k++) {
