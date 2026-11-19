@@ -590,7 +590,12 @@ static void hud_colorpicker_close(int restore_cursor);
 static int pie_attack_suppressed[2];
 static int pie_key_down;
 static float teamplay_last_tick;
+static float join_displayed_progress;
+static double join_progress_time = -1.0;
+
 static void hud_ingame_init() {
+        join_displayed_progress = 0.0F;
+        join_progress_time = -1.0;
         pie_menu_close(false);
         pie_attack_suppressed[0] = pie_attack_suppressed[1] = 0;
         pie_key_down = 0;
@@ -1908,8 +1913,21 @@ static void hud_colorpicker_render(void) {
 /* The sweep only highlights the completed portion; it never fakes progress. */
 static void hud_join_loading_bar(float height, float progress) {
         float width = settings.window_width;
-        float fill = width * fmaxf(0.0F, fminf(1.0F, progress));
+        float target = fmaxf(0.0F, fminf(1.0F, progress));
         bool reduced = settings.ui_reduced_motion;
+        double now = window_time();
+        float dt = join_progress_time < 0.0 ? 0.016F
+                   : fmaxf(0.0F, fminf(0.1F, (float)(now - join_progress_time)));
+        join_progress_time = now;
+        if(reduced || target < join_displayed_progress) {
+                join_displayed_progress = target;
+        } else {
+                /* Same exponential response as the health bar when healing. */
+                join_displayed_progress += (target - join_displayed_progress) * (1.0F - expf(-12.0F * dt));
+                if(target - join_displayed_progress < 0.0005F)
+                        join_displayed_progress = target;
+        }
+        float fill = width * join_displayed_progress;
         mu_Color accent = reduced ? mu_color(settings.ui_accent_r, settings.ui_accent_g, settings.ui_accent_b, 255)
                                   : mu_accent_color(1.0F, 255);
         bool batched = glx_batch2d_enabled();
@@ -1923,7 +1941,7 @@ static void hud_join_loading_bar(float height, float progress) {
         if(!reduced && fill > 0.0F) {
                 enum { SEGMENTS = 24 };
                 float span = fmaxf(32.0F, width * 0.16F);
-                float sweep = -span + fmodf(window_time(), 1.65F) / 1.65F * (width + span);
+                float sweep = -span + fmodf((float)now, 1.65F) / 1.65F * (width + span);
                 for(int i = 0; i < SEGMENTS; ++i) {
                         float x0 = fmaxf(0.0F, sweep + span * i / SEGMENTS);
                         float x1 = fminf(fill, sweep + span * (i + 1) / SEGMENTS);
@@ -2107,6 +2125,8 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
 
                 font_select(FONT_FIXEDSYS);
         } else {
+                join_displayed_progress = 0.0F;
+                join_progress_time = -1.0;
                 if(window_key_down(WINDOW_KEY_HIDEHUD)) {
                         hud_colorpicker_render(); /* still usable with the HUD hidden */
                         return;
