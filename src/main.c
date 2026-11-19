@@ -1766,6 +1766,7 @@ void display() {
                         ctx->style->corner_radius = (int)(4 * us + 0.5F);
                         ctx->time = window_time();
                         ctx->reduced_motion = settings.ui_reduced_motion;
+                        ctx->animation_speed = settings.ui_animation_speed;
                         mu_begin(ctx);
                 }
 

@@ -212,6 +212,7 @@ struct mu_Context {
   int updated_focus;
   int frame;
   float time, press_time;
+  float animation_speed;
   float previous_time, dt;
   float entrance_start, local_start;
   int entrance_active, local_active, reduced_motion, smooth_scroll;

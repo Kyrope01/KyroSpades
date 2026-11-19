@@ -151,6 +151,14 @@ static void paint(void) {
     assert(cmd->text.pos.y == 22 && cmd->text.color.a == 153);
     mu_paint_motion(&ui, 0.10f, 0.02f, 0.16f, 8, 0.6f);
     assert(ui.paint_offset_y == 1 && ui.paint_alpha > 0.9f);
+    float alpha = ui.paint_alpha;
+    ui.animation_speed = 0.1f;
+    mu_paint_motion(&ui, 1.0f, 0.02f, 0.16f, 8, 0.6f);
+    assert(ui.paint_offset_y == 1 && ui.paint_alpha == alpha);
+    ui.time = 1.0f;
+    mu_begin(&ui);
+    assert(ui.entrance_active); /* The normal 250 ms cutoff scales too. */
+    mu_end(&ui);
     mu_input_mousedown(&ui, 15, 20, MU_MOUSE_LEFT);
     assert(!ui.entrance_active && !ui.paint_offset_y && ui.paint_alpha == 1.0f);
     assert(ui.mouse_pressed == MU_MOUSE_LEFT);

@@ -37,7 +37,7 @@
 /* Selected defaults matter for configs written before a setting existed:
    an absent key keeps the value here. */
 struct RENDER_OPTIONS settings = {.sunlight_intensity = 100, .client_key_login = 1,
-                                  .killfeed_distance = 1}, settings_tmp;
+                                  .killfeed_distance = 1, .ui_animation_speed = 1.0F}, settings_tmp;
 /* Settings controls use window-manager points, not drawable pixels. */
 int settings_windowed_width, settings_windowed_height;
 struct list config_keys;
@@ -325,6 +325,7 @@ void config_save() {
         config_setf("client", "mouse_sensitivity", settings.mouse_sensitivity);
         config_seti("client", "show_news", settings.show_news);
         config_seti("client", "ui_reduced_motion", settings.ui_reduced_motion);
+        config_setf("client", "ui_animation_speed", settings.ui_animation_speed);
         config_seti("client", "vol", settings.volume);
         config_seti("client", "show_fps", settings.show_fps);
         config_seti("client", "voxlap_models", settings.voxlap_models);
@@ -508,6 +509,7 @@ static int config_read_key(void* user, const char* section, const char* name, co
                         settings.mouse_sensitivity = 5.0F;
                 IMPORT_SETTING(settings.show_news, show_news, atoi(value));
                 IMPORT_SETTING(settings.ui_reduced_motion, ui_reduced_motion, atoi(value) != 0);
+                IMPORT_SETTING(settings.ui_animation_speed, ui_animation_speed, fminf(1.0F, fmaxf(0.1F, atof(value))));
                 if(!strcmp(name, "vol")) { settings.volume = max(min(atoi(value), 10), 0); sound_volume(settings.volume / 10.0F); }
                 IMPORT_SETTING(settings.show_fps, show_fps, atoi(value));
                 IMPORT_SETTING(settings.voxlap_models, voxlap_models, atoi(value));
@@ -1544,6 +1546,17 @@ void config_reload() {
                                  .max = 1,
                                  .name = "Reduce menu motion",
                                  .help = "Disable menu entrance and button movement, and make wheel scrolling immediate",
+                                 .category = "HUD/UI Settings",
+                         });
+        list_add(&config_settings,
+                         &(struct config_setting) {
+                                 .value = &settings_tmp.ui_animation_speed,
+                                 .type = CONFIG_TYPE_FLOAT,
+                                 .float_min = 0.1F,
+                                 .float_max = 1.0F,
+                                 .slider_format = "%.2fx",
+                                 .name = "Menu animation speed",
+                                 .help = "Speed of menu entrances and button animations; reduced motion overrides this",
                                  .category = "HUD/UI Settings",
                          });
         list_add(&config_settings,

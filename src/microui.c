@@ -134,6 +134,7 @@ static void draw_frame(mu_Context *ctx, mu_Rect rect, int colorid) {
 void mu_init(mu_Context *ctx) {
   memset(ctx, 0, sizeof(*ctx));
   ctx->draw_frame = draw_frame;
+  ctx->animation_speed = 1.0f;
   ctx->_style = default_style;
   ctx->style = &ctx->_style;
   mu_paint_reset(ctx);
@@ -160,7 +161,7 @@ void mu_paint_reset(mu_Context *ctx) {
 void mu_paint_motion(mu_Context *ctx, float age, float delay, float duration,
   float distance, float initial_alpha)
 {
-  float t = ctx->reduced_motion ? 1.0f : mu_clamp((age - delay) / duration, 0.0f, 1.0f);
+  float t = ctx->reduced_motion ? 1.0f : mu_clamp((age * ctx->animation_speed - delay) / duration, 0.0f, 1.0f);
   float remaining = (1.0f - t) * (1.0f - t) * (1.0f - t);
   ctx->paint_offset_y = (int)roundf(distance * remaining);
   ctx->paint_alpha = 1.0f - (1.0f - initial_alpha) * remaining;
@@ -224,8 +225,8 @@ void mu_begin(mu_Context *ctx) {
   ctx->previous_time = ctx->time;
   mu_paint_reset(ctx);
   if (ctx->reduced_motion) { mu_interrupt_motion(ctx); }
-  if (ctx->time - ctx->entrance_start >= 0.25f) { ctx->entrance_active = 0; }
-  if (ctx->time - ctx->local_start >= 0.15f) { ctx->local_active = 0; }
+  if ((ctx->time - ctx->entrance_start) * ctx->animation_speed >= 0.25f) { ctx->entrance_active = 0; }
+  if ((ctx->time - ctx->local_start) * ctx->animation_speed >= 0.15f) { ctx->local_active = 0; }
   ctx->command_list.idx = 0;
   ctx->root_list.idx = 0;
   ctx->scroll_target = NULL;
@@ -971,7 +972,7 @@ int mu_button_ex(mu_Context *ctx, const char *label, int icon, int opt) {
       int held = ctx->focus == id && (ctx->mouse_down & MU_MOUSE_LEFT);
       if (ctx->button_was_held && !held) { ctx->press_time = ctx->time; }
       ctx->button_was_held = held;
-      float elapsed = ctx->time - ctx->press_time;
+      float elapsed = (ctx->time - ctx->press_time) * ctx->animation_speed;
       int depth = (held || elapsed < 0.055f) ? 2 : (elapsed < 0.12f ? 1 : 0);
       r.x += depth / 2;
       r.y += depth;
