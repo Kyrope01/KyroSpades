@@ -4991,6 +4991,9 @@ void hud_process_aimtrainer_request(void) {
         screen_current = SCREEN_NONE;
         window_title("Aim Trainer");
         hud_change(&hud_ingame);
+        chat_add(0, rgb(255, 255, 255),
+                 "Aim Trainer: /easy, /medium, /hard, /pro for practice.\n"
+                 "Timed round: /challenge <easy|medium|hard|pro> (/chalenge also works).");
 }
 
 static void hud_serverlist_init() {
