@@ -64,6 +64,7 @@ extern struct RENDER_OPTIONS {
         int vsync;
         float mouse_sensitivity;
         int show_news;
+        int ui_reduced_motion;
         int show_fps;
         int volume;
         int voxlap_models;

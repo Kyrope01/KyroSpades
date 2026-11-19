@@ -579,6 +579,12 @@ static void profiler_draw_overlay(void) {
         glDisable(GL_BLEND);
 }
 
+static void hud_emit_surface_strip(void* user, float x, int y, float w, int h, mu_Color color) {
+        (void)user;
+        glColor4ub(color.r, color.g, color.b, color.a);
+        glx_draw_quad_2d(x, settings.window_height - y, w, h);
+}
+
 void display() {
         /* Apply pending window changes (fullscreen, vsync, size) every frame.
            drawScene() is skipped in the menus when not connected, so this must
@@ -1748,6 +1754,9 @@ void display() {
                         hud_active->ctx->style->scrollbar_size = (int)(12 * us);
                         hud_active->ctx->style->thumb_size = (int)(8 * us);
 
+                        ctx->style->corner_radius = (int)(4 * us + 0.5F);
+                        ctx->time = window_time();
+                        ctx->reduced_motion = settings.ui_reduced_motion;
                         mu_begin(ctx);
                 }
 
@@ -1757,8 +1766,10 @@ void display() {
                         mu_end(ctx);
                         hud_ime_update();
 
+                        glx_batch2d_flush();
                         glEnable(GL_BLEND);
                         glEnable(GL_SCISSOR_TEST);
+                        glScissor(0, 0, settings.window_width, settings.window_height);
                         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
                         mu_Command* cmd = NULL;
                         while(mu_next_command(ctx, &cmd)) {
@@ -1773,6 +1784,9 @@ void display() {
                                                 glColor4ub(cmd->rect.color.r, cmd->rect.color.g, cmd->rect.color.b, cmd->rect.color.a);
                                                 texture_draw_empty(cmd->rect.rect.x, settings.window_height - cmd->rect.rect.y,
                                                                                    cmd->rect.rect.w, cmd->rect.rect.h);
+                                                break;
+                                        case MU_COMMAND_SURFACE:
+                                                mu_render_surface(&cmd->surface, hud_emit_surface_strip, NULL);
                                                 break;
                                         case MU_COMMAND_ICON:
                                                 glColor4ub(cmd->icon.color.r, cmd->icon.color.g, cmd->icon.color.b, cmd->icon.color.a);
@@ -1799,11 +1813,13 @@ void display() {
 
                                                 break;
                                         case MU_COMMAND_CLIP:
+                                                glx_batch2d_flush();
                                                 glScissor(cmd->clip.rect.x, settings.window_height - (cmd->clip.rect.y + cmd->clip.rect.h),
                                                                   cmd->clip.rect.w, cmd->clip.rect.h);
                                                 break;
                                 }
                         }
+                        glx_batch2d_flush();
                         glDisable(GL_BLEND);
                         glDisable(GL_SCISSOR_TEST);
                 }

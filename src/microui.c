@@ -1,4 +1,3 @@
-
 /*
 ** Copyright (c) 2020 rxi
 **
@@ -21,6 +20,7 @@
 ** IN THE SOFTWARE.
 */
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -70,7 +70,8 @@ static mu_Style default_style = {
     { 40,  40,  40,  255 }, /* MU_COLOR_BASEFOCUS */
     { 43,  43,  43,  255 }, /* MU_COLOR_SCROLLBASE */
     { 30,  30,  30,  255 }  /* MU_COLOR_SCROLLTHUMB */
-  }
+  },
+  4 /* corner radius */
 };
 
 
@@ -117,14 +118,16 @@ static int rect_overlaps_vec2(mu_Rect r, mu_Vec2 p) {
 
 
 static void draw_frame(mu_Context *ctx, mu_Rect rect, int colorid) {
-  mu_draw_rect(ctx, rect, ctx->style->colors[colorid]);
-  if (colorid == MU_COLOR_SCROLLBASE  ||
-      colorid == MU_COLOR_SCROLLTHUMB ||
-      colorid == MU_COLOR_TITLEBG) { return; }
-  /* draw border */
-  if (ctx->style->colors[MU_COLOR_BORDER].a) {
-    mu_draw_box(ctx, expand_rect(rect, 1), ctx->style->colors[MU_COLOR_BORDER]);
+  int radius = ctx->style->corner_radius;
+  mu_Color border = ctx->style->colors[MU_COLOR_BORDER];
+  if (colorid == MU_COLOR_SCROLLBASE || colorid == MU_COLOR_SCROLLTHUMB ||
+      colorid == MU_COLOR_TITLEBG) {
+    border.a = 0;
   }
+  if (colorid == MU_COLOR_WINDOWBG || colorid == MU_COLOR_PANELBG ||
+      colorid == MU_COLOR_TITLEBG) { radius += 2; }
+  mu_draw_surface(ctx, rect, ctx->style->colors[colorid], border, radius,
+    colorid == MU_COLOR_TITLEBG);
 }
 
 
@@ -133,11 +136,85 @@ void mu_init(mu_Context *ctx) {
   ctx->draw_frame = draw_frame;
   ctx->_style = default_style;
   ctx->style = &ctx->_style;
+  mu_paint_reset(ctx);
+}
+
+
+void mu_paint_reset(mu_Context *ctx) {
+  ctx->paint_offset_y = 0;
+  ctx->paint_alpha = 1.0f;
+}
+
+
+void mu_paint_motion(mu_Context *ctx, float age, float delay, float duration,
+  float distance, float initial_alpha)
+{
+  float t = ctx->reduced_motion ? 1.0f : mu_clamp((age - delay) / duration, 0.0f, 1.0f);
+  float remaining = (1.0f - t) * (1.0f - t) * (1.0f - t);
+  ctx->paint_offset_y = (int)roundf(distance * remaining);
+  ctx->paint_alpha = 1.0f - (1.0f - initial_alpha) * remaining;
+}
+
+
+void mu_interrupt_motion(mu_Context *ctx) {
+  ctx->entrance_active = ctx->local_active = 0;
+  mu_paint_reset(ctx);
+}
+
+
+void mu_interrupt_pointer(mu_Context *ctx) {
+  mu_interrupt_motion(ctx);
+  ctx->stop_scroll = 1;
+}
+
+
+void mu_reset_scroll(mu_Container *cnt) {
+  cnt->scroll = mu_vec2(0, 0);
+  cnt->scroll_x = (mu_ScrollAxis){0};
+  cnt->scroll_y = (mu_ScrollAxis){0};
+}
+
+
+static void queue_scroll(mu_ScrollAxis *axis, float delta, int viewport, int direct) {
+  if (!delta) { return; }
+  float pending = axis->target - axis->current;
+  if (direct || delta * pending < 0) { axis->target = axis->current; }
+  axis->target += delta;
+  if (!direct) {
+    axis->target = mu_clamp(axis->target, axis->current - viewport, axis->current + viewport);
+  }
+  axis->target = mu_clamp(axis->target, 0.0f, (float)axis->limit);
+  axis->direct = direct;
+}
+
+
+static void step_scroll(mu_Context *ctx, mu_ScrollAxis *axis, int *scroll, int limit) {
+  /* External jumps (e.g. chat log search) supersede pending wheel movement. */
+  if (*scroll != axis->shown) { axis->current = axis->target = (float)*scroll; }
+  axis->limit = limit;
+  axis->target = mu_clamp(axis->target, 0.0f, (float)limit);
+  axis->current = mu_clamp(axis->current, 0.0f, (float)limit);
+  if ((ctx->stop_scroll || ctx->mouse_pressed || ctx->mouse_down) && !ctx->reduced_motion) {
+    axis->current = axis->target = (float)mu_clamp(*scroll, 0, limit);
+  } else if (axis->direct || ctx->reduced_motion || ctx->dt > 0.25f) {
+    axis->current = axis->target;
+  } else if (axis->current != axis->target) {
+    axis->current += (axis->target - axis->current) * -expm1f(-ctx->dt / 0.045f);
+    if (fabsf(axis->target - axis->current) < 0.5f) { axis->current = axis->target; }
+  }
+  axis->direct = 0;
+  *scroll = axis->shown = (int)roundf(axis->current);
 }
 
 
 void mu_begin(mu_Context *ctx) {
   expect(ctx->text_width && ctx->text_height);
+  ctx->dt = ctx->frame ? mu_max(0.0f, ctx->time - ctx->previous_time) : 0.0f;
+  ctx->previous_time = ctx->time;
+  mu_paint_reset(ctx);
+  if (ctx->reduced_motion) { mu_interrupt_motion(ctx); }
+  if (ctx->time - ctx->entrance_start >= 0.25f) { ctx->entrance_active = 0; }
+  if (ctx->time - ctx->local_start >= 0.15f) { ctx->local_active = 0; }
   ctx->command_list.idx = 0;
   ctx->root_list.idx = 0;
   ctx->scroll_target = NULL;
@@ -165,8 +242,15 @@ void mu_end(mu_Context *ctx) {
 
   /* handle scroll input */
   if (ctx->scroll_target) {
-    ctx->scroll_target->scroll.x += ctx->scroll_delta.x;
-    ctx->scroll_target->scroll.y += ctx->scroll_delta.y;
+    mu_Container *cnt = ctx->scroll_target;
+    if (!ctx->smooth_scroll) {
+      cnt->scroll.x += (int)ctx->scroll_delta_x;
+      cnt->scroll.y += (int)ctx->scroll_delta_y;
+    } else if (!ctx->mouse_pressed && !ctx->mouse_down) {
+      int direct = ctx->scroll_direct || ctx->reduced_motion;
+      queue_scroll(&cnt->scroll_x, ctx->scroll_delta_x, cnt->body.w, direct);
+      queue_scroll(&cnt->scroll_y, ctx->scroll_delta_y, cnt->body.h, direct);
+    }
   }
 
   /* unset focus if focus id was not touched this frame */
@@ -185,7 +269,9 @@ void mu_end(mu_Context *ctx) {
   ctx->key_pressed = 0;
   ctx->input_text[0] = '\0';
   ctx->mouse_pressed = 0;
-  ctx->scroll_delta = mu_vec2(0, 0);
+  ctx->scroll_delta_x = ctx->scroll_delta_y = 0;
+  ctx->scroll_direct = 0;
+  ctx->stop_scroll = 0;
   ctx->last_mouse_pos = ctx->mouse_pos;
 
   /* sort root containers by zindex */
@@ -394,6 +480,7 @@ void mu_input_mousedown(mu_Context *ctx, int x, int y, int btn) {
   mu_input_mousemove(ctx, x, y);
   ctx->mouse_down |= btn;
   ctx->mouse_pressed |= btn;
+  if (btn) { mu_interrupt_pointer(ctx); }
 }
 
 
@@ -403,13 +490,27 @@ void mu_input_mouseup(mu_Context *ctx, int x, int y, int btn) {
 }
 
 
-void mu_input_scroll(mu_Context *ctx, int x, int y) {
-  ctx->scroll_delta.x += x;
-  ctx->scroll_delta.y += y;
+void mu_input_scroll(mu_Context *ctx, float x, float y) {
+  if (!x && !y) { return; }
+  mu_interrupt_motion(ctx);
+  if (!ctx->scroll_direct) {
+    ctx->scroll_delta_x += x;
+    ctx->scroll_delta_y += y;
+  }
+}
+
+
+void mu_input_scroll_direct(mu_Context *ctx, float x, float y) {
+  mu_interrupt_motion(ctx);
+  if (!ctx->scroll_direct) { ctx->scroll_delta_x = ctx->scroll_delta_y = 0; }
+  ctx->scroll_direct = 1;
+  ctx->scroll_delta_x += x;
+  ctx->scroll_delta_y += y;
 }
 
 
 void mu_input_keydown(mu_Context *ctx, int key) {
+  mu_interrupt_motion(ctx);
   ctx->key_pressed |= key;
   ctx->key_down |= key;
 }
@@ -421,6 +522,7 @@ void mu_input_keyup(mu_Context *ctx, int key) {
 
 
 void mu_input_text(mu_Context *ctx, const char *text) {
+  mu_interrupt_motion(ctx);
   int len = strlen(ctx->input_text);
   int room = (int)sizeof(ctx->input_text) - len - 1;
   int size = mu_min(room, (int)strlen(text));
@@ -473,13 +575,111 @@ void mu_set_clip(mu_Context *ctx, mu_Rect rect) {
 }
 
 
+/* Panel clips stay still. A widget's own caret/text clip follows its paint. */
+static mu_Rect paint_clip(mu_Context *ctx) {
+  return ctx->paint_clip_depth == ctx->clip_stack.idx
+    ? ctx->paint_clip : mu_get_clip_rect(ctx);
+}
+
+
+static void push_widget_clip(mu_Context *ctx, mu_Rect rect) {
+  mu_push_clip_rect(ctx, rect);
+  if (ctx->paint_offset_y) {
+    rect.y += ctx->paint_offset_y;
+    ctx->paint_clip = intersect_rects(rect, ctx->clip_stack.items[ctx->clip_stack.idx - 2]);
+    ctx->paint_clip_depth = ctx->clip_stack.idx;
+  }
+}
+
+
+static void pop_widget_clip(mu_Context *ctx) {
+  ctx->paint_clip_depth = 0;
+  mu_pop_clip_rect(ctx);
+}
+
+
+static mu_Color paint_color(mu_Context *ctx, mu_Color color) {
+  color.a = (unsigned char)(color.a * ctx->paint_alpha + 0.5f);
+  return color;
+}
+
+
 void mu_draw_rect(mu_Context *ctx, mu_Rect rect, mu_Color color) {
   mu_Command *cmd;
-  rect = intersect_rects(rect, mu_get_clip_rect(ctx));
+  rect.y += ctx->paint_offset_y;
+  color = paint_color(ctx, color);
+  rect = intersect_rects(rect, paint_clip(ctx));
   if (rect.w > 0 && rect.h > 0) {
     cmd = mu_push_command(ctx, MU_COMMAND_RECT, sizeof(mu_RectCommand));
     cmd->rect.rect = rect;
     cmd->rect.color = color;
+  }
+}
+
+
+void mu_draw_surface(mu_Context *ctx, mu_Rect rect, mu_Color fill,
+  mu_Color border, int radius, int top_only)
+{
+  rect.y += ctx->paint_offset_y;
+  fill = paint_color(ctx, fill);
+  border = paint_color(ctx, border);
+  mu_Rect clip = intersect_rects(rect, paint_clip(ctx));
+  if (clip.w <= 0 || clip.h <= 0 || (!fill.a && !border.a)) { return; }
+  mu_SurfaceCommand *surface = &mu_push_command(ctx, MU_COMMAND_SURFACE,
+    sizeof(mu_SurfaceCommand))->surface;
+  surface->rect = rect;
+  surface->clip = clip;
+  surface->fill = fill;
+  surface->border = border;
+  surface->radius = mu_clamp(radius, 0, mu_min(12, mu_min(rect.w, rect.h) / 2));
+  surface->top_only = top_only;
+}
+
+
+static float corner_inset(int row, int height, int radius, int top_only) {
+  int edge = top_only ? row : mu_min(row, height - 1 - row);
+  if (edge >= radius) { return 0; }
+  float distance = radius - edge - 0.5f;
+  return radius - sqrtf(radius * radius - distance * distance);
+}
+
+
+static void surface_strip(mu_Rect clip,
+  void (*emit)(void *, float, int, float, int, mu_Color), void *user,
+  float left, float right, int y, int h, mu_Color color)
+{
+  left = mu_max(left, clip.x);
+  right = mu_min(right, clip.x + clip.w);
+  if (right > left && color.a) { emit(user, left, y, right - left, h, color); }
+}
+
+
+void mu_render_surface(const mu_SurfaceCommand *s,
+  void (*emit)(void *, float, int, float, int, mu_Color), void *user)
+{
+  mu_Rect r = s->rect, clip = s->clip;
+  int stroke = s->border.a != 0;
+  int cap = mu_max(s->radius, stroke);
+  int middle_end = r.y + r.h - (s->top_only ? stroke : cap);
+  int end = clip.y + clip.h;
+  for (int y = clip.y; y < end;) {
+    int row = y - r.y;
+    int h = row >= cap && y < middle_end ? mu_min(end, middle_end) - y : 1;
+    float inset = corner_inset(row, r.h, s->radius, s->top_only);
+    float left = r.x + inset, right = r.x + r.w - inset;
+    if (!stroke) {
+      surface_strip(clip, emit, user, left, right, y, h, s->fill);
+    } else if (row == 0 || row == r.h - 1 || r.w <= 2) {
+      surface_strip(clip, emit, user, left, right, y, h, s->border);
+    } else {
+      float inner = 1 + corner_inset(row - 1, r.h - 2,
+        mu_max(0, s->radius - 1), s->top_only);
+      float a = r.x + inner, b = r.x + r.w - inner;
+      surface_strip(clip, emit, user, left, a, y, h, s->border);
+      surface_strip(clip, emit, user, a, b, y, h, s->fill);
+      surface_strip(clip, emit, user, b, right, y, h, s->border);
+    }
+    y += h;
   }
 }
 
@@ -500,14 +700,15 @@ void mu_draw_text(mu_Context *ctx, mu_Font font, const char *str, int len,
     pos.x, pos.y, ctx->text_width(font, str, len), ctx->text_height(font));
   int clipped = mu_check_clip(ctx, rect);
   if (clipped == MU_CLIP_ALL ) { return; }
-  if (clipped == MU_CLIP_PART) { mu_set_clip(ctx, mu_get_clip_rect(ctx)); }
+  if (clipped == MU_CLIP_PART) { mu_set_clip(ctx, paint_clip(ctx)); }
   /* add command */
   if (len < 0) { len = strlen(str); }
   cmd = mu_push_command(ctx, MU_COMMAND_TEXT, sizeof(mu_TextCommand) + len);
   memcpy(cmd->text.str, str, len);
   cmd->text.str[len] = '\0';
+  pos.y += ctx->paint_offset_y;
   cmd->text.pos = pos;
-  cmd->text.color = color;
+  cmd->text.color = paint_color(ctx, color);
   cmd->text.font = font;
   /* reset clipping if it was set */
   if (clipped) { mu_set_clip(ctx, unclipped_rect); }
@@ -519,12 +720,13 @@ void mu_draw_icon(mu_Context *ctx, int id, mu_Rect rect, mu_Color color) {
   /* do clip command if the rect isn't fully contained within the cliprect */
   int clipped = mu_check_clip(ctx, rect);
   if (clipped == MU_CLIP_ALL ) { return; }
-  if (clipped == MU_CLIP_PART) { mu_set_clip(ctx, mu_get_clip_rect(ctx)); }
+  if (clipped == MU_CLIP_PART) { mu_set_clip(ctx, paint_clip(ctx)); }
   /* do icon command */
   cmd = mu_push_command(ctx, MU_COMMAND_ICON, sizeof(mu_IconCommand));
   cmd->icon.id = id;
+  rect.y += ctx->paint_offset_y;
   cmd->icon.rect = rect;
-  cmd->icon.color = color;
+  cmd->icon.color = paint_color(ctx, color);
   /* reset clipping if it was set */
   if (clipped) { mu_set_clip(ctx, unclipped_rect); }
 }
@@ -665,7 +867,7 @@ void mu_draw_control_text(mu_Context *ctx, const char *str, mu_Rect rect,
   mu_Vec2 pos;
   mu_Font font = ctx->style->font;
   int tw = ctx->text_width(font, str, -1);
-  mu_push_clip_rect(ctx, rect);
+  push_widget_clip(ctx, rect);
   pos.y = rect.y + (rect.h - ctx->text_height(font)) / 2;
   if (opt & MU_OPT_ALIGNCENTER) {
     pos.x = rect.x + (rect.w - tw) / 2;
@@ -675,7 +877,7 @@ void mu_draw_control_text(mu_Context *ctx, const char *str, mu_Rect rect,
     pos.x = rect.x + ctx->style->padding;
   }
   mu_draw_text(ctx, font, str, -1, pos, ctx->style->colors[colorid]);
-  mu_pop_clip_rect(ctx);
+  pop_widget_clip(ctx);
 }
 
 
@@ -691,7 +893,7 @@ void mu_update_control(mu_Context *ctx, mu_Id id, mu_Rect rect, int opt) {
 
   if (ctx->focus == id) { ctx->updated_focus = 1; }
   if (opt & MU_OPT_NOINTERACT) { return; }
-  if (mouseover && !ctx->mouse_down) { ctx->hover = id; }
+  if (mouseover && (!ctx->mouse_down || ctx->mouse_pressed)) { ctx->hover = id; }
 
   if (ctx->focus == id) {
     if (ctx->mouse_pressed && !mouseover) { mu_set_focus(ctx, 0); }
@@ -699,11 +901,8 @@ void mu_update_control(mu_Context *ctx, mu_Id id, mu_Rect rect, int opt) {
   }
 
   if (ctx->hover == id) {
-    if (ctx->mouse_pressed) {
-      mu_set_focus(ctx, id);
-    } else if (!mouseover) {
-      ctx->hover = 0;
-    }
+    if (!mouseover) { ctx->hover = 0; }
+    else if (ctx->mouse_pressed) { mu_set_focus(ctx, id); }
   }
 }
 
@@ -749,7 +948,25 @@ int mu_button_ex(mu_Context *ctx, const char *label, int icon, int opt) {
   if (ctx->mouse_pressed == MU_MOUSE_LEFT && ctx->focus == id) {
     res |= MU_RES_SUBMIT;
   }
-  /* draw */
+  /* Animate only the paint rect; layout, clipping and input use the original. */
+  if (!ctx->reduced_motion && !(opt & (MU_OPT_NOFRAME | MU_OPT_NOINTERACT))) {
+    if (res & MU_RES_SUBMIT) {
+      ctx->pressed_button = id;
+      ctx->press_time = ctx->time;
+      ctx->button_was_held = 0;
+    }
+    if (ctx->pressed_button == id && r.w >= 12 && r.h >= 12) {
+      int held = ctx->focus == id && (ctx->mouse_down & MU_MOUSE_LEFT);
+      if (ctx->button_was_held && !held) { ctx->press_time = ctx->time; }
+      ctx->button_was_held = held;
+      float elapsed = ctx->time - ctx->press_time;
+      int depth = (held || elapsed < 0.055f) ? 2 : (elapsed < 0.12f ? 1 : 0);
+      r.x += depth / 2;
+      r.y += depth;
+      r.w -= 2 * (depth / 2);
+      r.h -= depth;
+    }
+  }
   mu_draw_control_frame(ctx, id, r, MU_COLOR_BUTTON, opt);
   if (label) { mu_draw_control_text(ctx, label, r, MU_COLOR_TEXT, opt); }
   if (icon) { mu_draw_icon(ctx, icon, r, ctx->style->colors[MU_COLOR_TEXT]); }
@@ -990,7 +1207,7 @@ int mu_textbox_raw(mu_Context *ctx, char *buf, int bufsz, mu_Id id, mu_Rect r,
     if (totalw < available) { ctx->textbox_scroll = 0; }
     textx = r.x + ctx->style->padding - ctx->textbox_scroll;
 
-    mu_push_clip_rect(ctx, r);
+    push_widget_clip(ctx, r);
     if (ctx->textbox_anchor != ctx->textbox_cursor) {
       int lo = mu_min(ctx->textbox_anchor, ctx->textbox_cursor);
       int hi = mu_max(ctx->textbox_anchor, ctx->textbox_cursor);
@@ -1003,7 +1220,7 @@ int mu_textbox_raw(mu_Context *ctx, char *buf, int bufsz, mu_Id id, mu_Rect r,
     }
     mu_draw_text(ctx, font, buf, -1, mu_vec2(textx, texty), color);
     mu_draw_rect(ctx, mu_rect(textx + cursorw, texty, 1, texth), color);
-    mu_pop_clip_rect(ctx);
+    pop_widget_clip(ctx);
   } else {
     mu_draw_control_text(ctx, buf, r, MU_COLOR_TEXT, opt);
   }
@@ -1179,8 +1396,10 @@ void mu_end_treenode(mu_Context *ctx) {
 #define scrollbar(ctx, cnt, b, cs, x, y, w, h)                              \
   do {                                                                      \
     /* only add scrollbar if content size is larger than body */            \
-    int maxscroll = cs.y - b->h;                                            \
+    int maxscroll = mu_max(0, cs.y - b->h);                                  \
                                                                             \
+    if (ctx->smooth_scroll)                                                \
+      step_scroll(ctx, &cnt->scroll_##y, &cnt->scroll.y, b->h > 0 ? maxscroll : 0); \
     if (maxscroll > 0 && b->h > 0) {                                        \
       mu_Rect base, thumb;                                                  \
       mu_Id id = mu_get_id(ctx, "!scrollbar" #y, 11);                       \
@@ -1198,11 +1417,15 @@ void mu_end_treenode(mu_Context *ctx) {
       }                                                                     \
       /* clamp scroll to limits */                                          \
       cnt->scroll.y = mu_clamp(cnt->scroll.y, 0, maxscroll);                \
+      if (ctx->smooth_scroll && ctx->focus == id && ctx->mouse_down == MU_MOUSE_LEFT) { \
+        cnt->scroll_##y.current = cnt->scroll_##y.target = cnt->scroll.y;    \
+        cnt->scroll_##y.shown = cnt->scroll.y;                              \
+      }                                                                    \
                                                                             \
       /* draw base and thumb */                                             \
       ctx->draw_frame(ctx, base, MU_COLOR_SCROLLBASE);                      \
       thumb = base;                                                         \
-      thumb.h = mu_max(ctx->style->thumb_size, base.h * b->h / cs.y);       \
+      thumb.h = mu_min(base.h, mu_max(ctx->style->thumb_size, base.h * b->h / cs.y)); \
       thumb.y += cnt->scroll.y * (base.h - thumb.h) / maxscroll;            \
       ctx->draw_frame(ctx, thumb, MU_COLOR_SCROLLTHUMB);                    \
                                                                             \

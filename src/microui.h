@@ -41,6 +41,7 @@ enum {
   MU_COMMAND_RECT,
   MU_COMMAND_TEXT,
   MU_COMMAND_ICON,
+  MU_COMMAND_SURFACE,
   MU_COMMAND_MAX
 };
 
@@ -132,12 +133,20 @@ typedef struct { mu_BaseCommand base; mu_Rect rect; mu_Color color; } mu_RectCom
 typedef struct { mu_BaseCommand base; mu_Font font; mu_Vec2 pos; mu_Color color; char str[1]; } mu_TextCommand;
 typedef struct { mu_BaseCommand base; mu_Rect rect; int id; mu_Color color; } mu_IconCommand;
 
+typedef struct {
+  mu_BaseCommand base;
+  mu_Rect rect, clip;
+  mu_Color fill, border;
+  int radius, top_only;
+} mu_SurfaceCommand;
+
 typedef union {
   int type;
   mu_BaseCommand base;
   mu_JumpCommand jump;
   mu_ClipCommand clip;
   mu_RectCommand rect;
+  mu_SurfaceCommand surface;
   mu_TextCommand text;
   mu_IconCommand icon;
 } mu_Command;
@@ -157,11 +166,17 @@ typedef struct {
 } mu_Layout;
 
 typedef struct {
+  float current, target;
+  int shown, limit, direct;
+} mu_ScrollAxis;
+
+typedef struct {
   mu_Command *head, *tail;
   mu_Rect rect;
   mu_Rect body;
   mu_Vec2 content_size;
   mu_Vec2 scroll;
+  mu_ScrollAxis scroll_x, scroll_y;
   int zindex;
   int open;
 } mu_Container;
@@ -176,6 +191,7 @@ typedef struct {
   int scrollbar_size;
   int thumb_size;
   mu_Color colors[MU_COLOR_MAX];
+  int corner_radius;
 } mu_Style;
 
 struct mu_Context {
@@ -195,6 +211,17 @@ struct mu_Context {
   int last_zindex;
   int updated_focus;
   int frame;
+  float time, press_time;
+  float previous_time, dt;
+  float entrance_start, local_start;
+  int entrance_active, local_active, reduced_motion, smooth_scroll;
+  int stop_scroll;
+  mu_Id local_id;
+  int paint_offset_y, paint_clip_depth;
+  float paint_alpha;
+  mu_Rect paint_clip;
+  mu_Id pressed_button;
+  int button_was_held;
   mu_Container *hover_root;
   mu_Container *next_hover_root;
   mu_Container *scroll_target;
@@ -220,7 +247,8 @@ struct mu_Context {
   mu_Vec2 mouse_pos;
   mu_Vec2 last_mouse_pos;
   mu_Vec2 mouse_delta;
-  mu_Vec2 scroll_delta;
+  float scroll_delta_x, scroll_delta_y;
+  int scroll_direct;
   int mouse_down;
   int mouse_pressed;
   int hover_is_draggable;
@@ -257,7 +285,14 @@ void mu_pool_update(mu_Context *ctx, mu_PoolItem *items, int idx);
 void mu_input_mousemove(mu_Context *ctx, int x, int y);
 void mu_input_mousedown(mu_Context *ctx, int x, int y, int btn);
 void mu_input_mouseup(mu_Context *ctx, int x, int y, int btn);
-void mu_input_scroll(mu_Context *ctx, int x, int y);
+void mu_input_scroll(mu_Context *ctx, float x, float y);
+void mu_input_scroll_direct(mu_Context *ctx, float x, float y);
+void mu_interrupt_motion(mu_Context *ctx);
+void mu_interrupt_pointer(mu_Context *ctx);
+void mu_reset_scroll(mu_Container *cnt);
+void mu_paint_motion(mu_Context *ctx, float age, float delay, float duration,
+  float distance, float initial_alpha);
+void mu_paint_reset(mu_Context *ctx);
 void mu_input_keydown(mu_Context *ctx, int key);
 void mu_input_keyup(mu_Context *ctx, int key);
 void mu_input_text(mu_Context *ctx, const char *text);
@@ -265,6 +300,11 @@ void mu_input_text(mu_Context *ctx, const char *text);
 mu_Command* mu_push_command(mu_Context *ctx, int type, int size);
 int mu_next_command(mu_Context *ctx, mu_Command **cmd);
 void mu_set_clip(mu_Context *ctx, mu_Rect rect);
+void mu_draw_surface(mu_Context *ctx, mu_Rect rect, mu_Color fill,
+  mu_Color border, int radius, int top_only);
+void mu_render_surface(const mu_SurfaceCommand *surface,
+  void (*emit)(void *user, float x, int y, float width, int height, mu_Color color),
+  void *user);
 void mu_draw_rect(mu_Context *ctx, mu_Rect rect, mu_Color color);
 void mu_draw_box(mu_Context *ctx, mu_Rect rect, mu_Color color);
 void mu_draw_text(mu_Context *ctx, mu_Font font, const char *str, int len, mu_Vec2 pos, mu_Color color);

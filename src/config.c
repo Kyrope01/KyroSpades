@@ -324,6 +324,7 @@ void config_save() {
         config_seti("client", "vsync", settings.vsync);
         config_setf("client", "mouse_sensitivity", settings.mouse_sensitivity);
         config_seti("client", "show_news", settings.show_news);
+        config_seti("client", "ui_reduced_motion", settings.ui_reduced_motion);
         config_seti("client", "vol", settings.volume);
         config_seti("client", "show_fps", settings.show_fps);
         config_seti("client", "voxlap_models", settings.voxlap_models);
@@ -505,6 +506,7 @@ static int config_read_key(void* user, const char* section, const char* name, co
                 if(settings.mouse_sensitivity > 0.0F && settings.mouse_sensitivity < 0.01F)
                         settings.mouse_sensitivity = 5.0F;
                 IMPORT_SETTING(settings.show_news, show_news, atoi(value));
+                IMPORT_SETTING(settings.ui_reduced_motion, ui_reduced_motion, atoi(value) != 0);
                 if(!strcmp(name, "vol")) { settings.volume = max(min(atoi(value), 10), 0); sound_volume(settings.volume / 10.0F); }
                 IMPORT_SETTING(settings.show_fps, show_fps, atoi(value));
                 IMPORT_SETTING(settings.voxlap_models, voxlap_models, atoi(value));
@@ -1530,6 +1532,16 @@ void config_reload() {
                                  .max = sizeof(settings.ui_language) - 1,
                                  .name = "UI Language",
                                  .help = "Locale reported to servers (e.g. en_US, de_DE)",
+                                 .category = "HUD/UI Settings",
+                         });
+        list_add(&config_settings,
+                         &(struct config_setting) {
+                                 .value = &settings_tmp.ui_reduced_motion,
+                                 .type = CONFIG_TYPE_INT,
+                                 .min = 0,
+                                 .max = 1,
+                                 .name = "Reduce menu motion",
+                                 .help = "Disable menu entrance and button movement, and make wheel scrolling immediate",
                                  .category = "HUD/UI Settings",
                          });
         list_add(&config_settings,
