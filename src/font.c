@@ -51,7 +51,7 @@ static const struct { int first; int count; } font_ranges[] = {
 };
 #define FONT_RANGE_COUNT ((int)(sizeof(font_ranges) / sizeof(font_ranges[0])))
 
-static short* font_vertex_buffer;
+static float* font_vertex_buffer;
 /* Normalised [0,1] texture coordinates. They used to be fixed point shorts
    scaled by 8192 with a matching GL_TEXTURE matrix; that matrix is per-context
    global state, so leaving it installed silently divided the texture
@@ -79,7 +79,7 @@ struct font_backed_data {
 };
 
 void font_init() {
-	font_vertex_buffer = malloc(2048 * 8 * sizeof(short));
+	font_vertex_buffer = malloc(2048 * 8 * sizeof(float));
 	CHECK_ALLOCATION_ERROR(font_vertex_buffer)
 	font_coords_buffer = malloc(2048 * 8 * sizeof(float));
 	CHECK_ALLOCATION_ERROR(font_coords_buffer)
@@ -269,7 +269,7 @@ void font_render(float x, float y, float h, char* text) {
 		if(cp == 0) break;
 		if(cp == '\n') { x2 = x; y2 += h; continue; }
 
-		/* The vertex/coord buffers hold 2048*8 shorts and we write 12 per glyph.
+		/* The vertex/coord buffers hold 2048*8 components and we write 12 per glyph.
 		   Without this guard, a long string (more likely on a wide landscape
 		   surface where text wraps less) overruns the buffer and segfaults the
 		   render thread (SEGV_ACCERR). Stop emitting glyphs before that happens. */
@@ -337,12 +337,12 @@ void font_render(float x, float y, float h, char* text) {
 		if(!font_stream_vbo)
 			glGenBuffers(1, &font_stream_vbo);
 		glBindBuffer(GL_ARRAY_BUFFER, font_stream_vbo);
-		size_t vertex_bytes = (size_t)k * sizeof(GLshort);
+		size_t vertex_bytes = (size_t)k * sizeof(float);
 		size_t coord_bytes = (size_t)k * sizeof(float);
 		glBufferData(GL_ARRAY_BUFFER, vertex_bytes + coord_bytes, NULL, GL_STREAM_DRAW);
 		glBufferSubData(GL_ARRAY_BUFFER, 0, vertex_bytes, font_vertex_buffer);
 		glBufferSubData(GL_ARRAY_BUFFER, vertex_bytes, coord_bytes, font_coords_buffer);
-		glVertexAttribPointer(0, 2, GL_SHORT, GL_FALSE, 0, (void*)0);
+		glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, (void*)0);
 		glEnableVertexAttribArray(0);
 		glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 0, (void*)vertex_bytes);
 		glEnableVertexAttribArray(2);
@@ -372,7 +372,7 @@ void font_render(float x, float y, float h, char* text) {
 
 	glEnableClientState(GL_VERTEX_ARRAY);
 	glEnableClientState(GL_TEXTURE_COORD_ARRAY);
-	glVertexPointer(2, GL_SHORT, 0, font_vertex_buffer);
+	glVertexPointer(2, GL_FLOAT, 0, font_vertex_buffer);
 	glTexCoordPointer(2, GL_FLOAT, 0, font_coords_buffer);
 	glDrawArrays(GL_TRIANGLES, 0, k / 2);
 	glDisableClientState(GL_TEXTURE_COORD_ARRAY);

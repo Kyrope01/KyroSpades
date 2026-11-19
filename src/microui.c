@@ -134,7 +134,6 @@ static void draw_frame(mu_Context *ctx, mu_Rect rect, int colorid) {
 void mu_init(mu_Context *ctx) {
   memset(ctx, 0, sizeof(*ctx));
   ctx->draw_frame = draw_frame;
-  ctx->animation_speed = 1.0f;
   ctx->_style = default_style;
   ctx->style = &ctx->_style;
   mu_paint_reset(ctx);
@@ -152,6 +151,8 @@ void mu_init_keep_treenodes(mu_Context *ctx) {
 }
 
 
+#define MU_ANIMATION_SPEED 0.55f
+
 void mu_paint_reset(mu_Context *ctx) {
   ctx->paint_offset_y = 0;
   ctx->paint_alpha = 1.0f;
@@ -161,9 +162,9 @@ void mu_paint_reset(mu_Context *ctx) {
 void mu_paint_motion(mu_Context *ctx, float age, float delay, float duration,
   float distance, float initial_alpha)
 {
-  float t = ctx->reduced_motion ? 1.0f : mu_clamp((age * ctx->animation_speed - delay) / duration, 0.0f, 1.0f);
+  float t = ctx->reduced_motion ? 1.0f : mu_clamp((age * MU_ANIMATION_SPEED - delay) / duration, 0.0f, 1.0f);
   float remaining = (1.0f - t) * (1.0f - t) * (1.0f - t);
-  ctx->paint_offset_y = (int)roundf(distance * remaining);
+  ctx->paint_offset_y = distance * remaining;
   ctx->paint_alpha = 1.0f - (1.0f - initial_alpha) * remaining;
 }
 
@@ -225,8 +226,8 @@ void mu_begin(mu_Context *ctx) {
   ctx->previous_time = ctx->time;
   mu_paint_reset(ctx);
   if (ctx->reduced_motion) { mu_interrupt_motion(ctx); }
-  if ((ctx->time - ctx->entrance_start) * ctx->animation_speed >= 0.25f) { ctx->entrance_active = 0; }
-  if ((ctx->time - ctx->local_start) * ctx->animation_speed >= 0.15f) { ctx->local_active = 0; }
+  if ((ctx->time - ctx->entrance_start) * MU_ANIMATION_SPEED >= 0.25f) { ctx->entrance_active = 0; }
+  if ((ctx->time - ctx->local_start) * MU_ANIMATION_SPEED >= 0.15f) { ctx->local_active = 0; }
   ctx->command_list.idx = 0;
   ctx->root_list.idx = 0;
   ctx->scroll_target = NULL;
@@ -598,7 +599,7 @@ static mu_Rect paint_clip(mu_Context *ctx) {
 static void push_widget_clip(mu_Context *ctx, mu_Rect rect) {
   mu_push_clip_rect(ctx, rect);
   if (ctx->paint_offset_y) {
-    rect.y += ctx->paint_offset_y;
+    rect.y += (int)roundf(ctx->paint_offset_y);
     ctx->paint_clip = intersect_rects(rect, ctx->clip_stack.items[ctx->clip_stack.idx - 2]);
     ctx->paint_clip_depth = ctx->clip_stack.idx;
   }
@@ -619,7 +620,10 @@ static mu_Color paint_color(mu_Context *ctx, mu_Color color) {
 
 void mu_draw_rect(mu_Context *ctx, mu_Rect rect, mu_Color color) {
   mu_Command *cmd;
-  rect.y += ctx->paint_offset_y;
+  if (ctx->paint_offset_y) {
+    mu_draw_surface(ctx, rect, color, mu_color(0, 0, 0, 0), 0, 0);
+    return;
+  }
   color = paint_color(ctx, color);
   rect = intersect_rects(rect, paint_clip(ctx));
   if (rect.w > 0 && rect.h > 0) {
@@ -633,11 +637,13 @@ void mu_draw_rect(mu_Context *ctx, mu_Rect rect, mu_Color color) {
 void mu_draw_surface(mu_Context *ctx, mu_Rect rect, mu_Color fill,
   mu_Color border, int radius, int top_only)
 {
-  rect.y += ctx->paint_offset_y;
   fill = paint_color(ctx, fill);
   border = paint_color(ctx, border);
-  mu_Rect clip = intersect_rects(rect, paint_clip(ctx));
-  if (clip.w <= 0 || clip.h <= 0 || (!fill.a && !border.a)) { return; }
+  mu_Rect clip = paint_clip(ctx);
+  float y = rect.y + ctx->paint_offset_y;
+  if (rect.w <= 0 || rect.h <= 0 || clip.w <= 0 || clip.h <= 0 ||
+      y >= clip.y + clip.h || y + rect.h <= clip.y ||
+      rect.x >= clip.x + clip.w || rect.x + rect.w <= clip.x || (!fill.a && !border.a)) { return; }
   mu_SurfaceCommand *surface = &mu_push_command(ctx, MU_COMMAND_SURFACE,
     sizeof(mu_SurfaceCommand))->surface;
   surface->rect = rect;
@@ -646,6 +652,7 @@ void mu_draw_surface(mu_Context *ctx, mu_Rect rect, mu_Color fill,
   surface->border = border;
   surface->radius = mu_clamp(radius, 0, mu_min(12, mu_min(rect.w, rect.h) / 2));
   surface->top_only = top_only;
+  surface->offset_y = ctx->paint_offset_y;
 }
 
 
@@ -657,40 +664,43 @@ static float corner_inset(int row, int height, int radius, int top_only) {
 }
 
 
-static void surface_strip(mu_Rect clip,
-  void (*emit)(void *, float, int, float, int, mu_Color), void *user,
+static void surface_strip(mu_Rect clip, float offset_y,
+  void (*emit)(void *, float, float, float, float, mu_Color), void *user,
   float left, float right, int y, int h, mu_Color color)
 {
   left = mu_max(left, clip.x);
   right = mu_min(right, clip.x + clip.w);
-  if (right > left && color.a) { emit(user, left, y, right - left, h, color); }
+  float top = mu_max(clip.y, y + offset_y);
+  float bottom = mu_min(clip.y + clip.h, y + offset_y + h);
+  if (right > left && bottom > top && color.a) { emit(user, left, top, right - left, bottom - top, color); }
 }
 
 
 void mu_render_surface(const mu_SurfaceCommand *s,
-  void (*emit)(void *, float, int, float, int, mu_Color), void *user)
+  void (*emit)(void *, float, float, float, float, mu_Color), void *user)
 {
   mu_Rect r = s->rect, clip = s->clip;
   int stroke = s->border.a != 0;
   int cap = mu_max(s->radius, stroke);
   int middle_end = r.y + r.h - (s->top_only ? stroke : cap);
-  int end = clip.y + clip.h;
-  for (int y = clip.y; y < end;) {
+  int start = mu_max(r.y, (int)floorf(clip.y - s->offset_y));
+  int end = mu_min(r.y + r.h, (int)ceilf(clip.y + clip.h - s->offset_y));
+  for (int y = start; y < end;) {
     int row = y - r.y;
     int h = row >= cap && y < middle_end ? mu_min(end, middle_end) - y : 1;
     float inset = corner_inset(row, r.h, s->radius, s->top_only);
     float left = r.x + inset, right = r.x + r.w - inset;
     if (!stroke) {
-      surface_strip(clip, emit, user, left, right, y, h, s->fill);
+      surface_strip(clip, s->offset_y, emit, user, left, right, y, h, s->fill);
     } else if (row == 0 || row == r.h - 1 || r.w <= 2) {
-      surface_strip(clip, emit, user, left, right, y, h, s->border);
+      surface_strip(clip, s->offset_y, emit, user, left, right, y, h, s->border);
     } else {
       float inner = 1 + corner_inset(row - 1, r.h - 2,
         mu_max(0, s->radius - 1), s->top_only);
       float a = r.x + inner, b = r.x + r.w - inner;
-      surface_strip(clip, emit, user, left, a, y, h, s->border);
-      surface_strip(clip, emit, user, a, b, y, h, s->fill);
-      surface_strip(clip, emit, user, b, right, y, h, s->border);
+      surface_strip(clip, s->offset_y, emit, user, left, a, y, h, s->border);
+      surface_strip(clip, s->offset_y, emit, user, a, b, y, h, s->fill);
+      surface_strip(clip, s->offset_y, emit, user, b, right, y, h, s->border);
     }
     y += h;
   }
@@ -719,7 +729,7 @@ void mu_draw_text(mu_Context *ctx, mu_Font font, const char *str, int len,
   cmd = mu_push_command(ctx, MU_COMMAND_TEXT, sizeof(mu_TextCommand) + len);
   memcpy(cmd->text.str, str, len);
   cmd->text.str[len] = '\0';
-  pos.y += ctx->paint_offset_y;
+  cmd->text.offset_y = ctx->paint_offset_y;
   cmd->text.pos = pos;
   cmd->text.color = paint_color(ctx, color);
   cmd->text.font = font;
@@ -737,7 +747,7 @@ void mu_draw_icon(mu_Context *ctx, int id, mu_Rect rect, mu_Color color) {
   /* do icon command */
   cmd = mu_push_command(ctx, MU_COMMAND_ICON, sizeof(mu_IconCommand));
   cmd->icon.id = id;
-  rect.y += ctx->paint_offset_y;
+  cmd->icon.offset_y = ctx->paint_offset_y;
   cmd->icon.rect = rect;
   cmd->icon.color = paint_color(ctx, color);
   /* reset clipping if it was set */
@@ -962,6 +972,7 @@ int mu_button_ex(mu_Context *ctx, const char *label, int icon, int opt) {
     res |= MU_RES_SUBMIT;
   }
   /* Animate only the paint rect; layout, clipping and input use the original. */
+  float previous_offset = ctx->paint_offset_y;
   if (!ctx->reduced_motion && !(opt & (MU_OPT_NOFRAME | MU_OPT_NOINTERACT))) {
     if (res & MU_RES_SUBMIT) {
       ctx->pressed_button = id;
@@ -972,17 +983,15 @@ int mu_button_ex(mu_Context *ctx, const char *label, int icon, int opt) {
       int held = ctx->focus == id && (ctx->mouse_down & MU_MOUSE_LEFT);
       if (ctx->button_was_held && !held) { ctx->press_time = ctx->time; }
       ctx->button_was_held = held;
-      float elapsed = (ctx->time - ctx->press_time) * ctx->animation_speed;
-      int depth = (held || elapsed < 0.055f) ? 2 : (elapsed < 0.12f ? 1 : 0);
-      r.x += depth / 2;
-      r.y += depth;
-      r.w -= 2 * (depth / 2);
-      r.h -= depth;
+      float elapsed = (ctx->time - ctx->press_time) * MU_ANIMATION_SPEED;
+      float remaining = 1.0f - mu_clamp((elapsed - 0.025f) / 0.095f, 0.0f, 1.0f);
+      ctx->paint_offset_y += held ? 2.0f : 2.0f * remaining * remaining;
     }
   }
   mu_draw_control_frame(ctx, id, r, MU_COLOR_BUTTON, opt);
   if (label) { mu_draw_control_text(ctx, label, r, MU_COLOR_TEXT, opt); }
   if (icon) { mu_draw_icon(ctx, icon, r, ctx->style->colors[MU_COLOR_TEXT]); }
+  ctx->paint_offset_y = previous_offset;
   return res;
 }
 

@@ -579,7 +579,7 @@ static void profiler_draw_overlay(void) {
         glDisable(GL_BLEND);
 }
 
-static void hud_emit_surface_strip(void* user, float x, int y, float w, int h, mu_Color color) {
+static void hud_emit_surface_strip(void* user, float x, float y, float w, float h, mu_Color color) {
         (void)user;
         glColor4ub(color.r, color.g, color.b, color.a);
         glx_draw_quad_2d(x, settings.window_height - y, w, h);
@@ -1766,7 +1766,6 @@ void display() {
                         ctx->style->corner_radius = (int)(4 * us + 0.5F);
                         ctx->time = window_time();
                         ctx->reduced_motion = settings.ui_reduced_motion;
-                        ctx->animation_speed = settings.ui_animation_speed;
                         mu_begin(ctx);
                 }
 
@@ -1786,7 +1785,7 @@ void display() {
                                 switch(cmd->type) {
                                         case MU_COMMAND_TEXT:
                                                 glColor4ub(cmd->text.color.r, cmd->text.color.g, cmd->text.color.b, cmd->text.color.a);
-                                                font_render(cmd->text.pos.x, settings.window_height - cmd->text.pos.y,
+                                                font_render(cmd->text.pos.x, settings.window_height - cmd->text.pos.y - cmd->text.offset_y,
                                                                         ctx->text_height(cmd->text.font), cmd->text.str);
                                                 glEnable(GL_BLEND);
                                                 break;
@@ -1807,7 +1806,7 @@ void display() {
                                                         texture_flag_offset(cmd->icon.id - HUD_FLAG_INDEX_START, &u, &v);
 
                                                         texture_draw_sector(&texture_ui_flags, cmd->icon.rect.x,
-                                                                                                settings.window_height - cmd->icon.rect.y - size * 0.167F, size,
+                                                                                                settings.window_height - cmd->icon.rect.y - cmd->icon.offset_y - size * 0.167F, size,
                                                                                                 size * 0.667F, u, v, 18.0F / 256.0F, 12.0F / 256.0F);
                                                         glEnable(GL_BLEND);
                                                 } else if(hud_active->ui_images) {
@@ -1815,7 +1814,7 @@ void display() {
                                                         struct texture* img = hud_active->ui_images(cmd->icon.id, &resize);
 
                                                         if(img) {
-                                                                texture_draw(img, cmd->icon.rect.x, settings.window_height - cmd->icon.rect.y,
+                                                                texture_draw(img, cmd->icon.rect.x, settings.window_height - cmd->icon.rect.y - cmd->icon.offset_y,
                                                                                          resize ? size : cmd->icon.rect.w, resize ? size : cmd->icon.rect.h);
                                                                 glEnable(GL_BLEND);
                                                         }

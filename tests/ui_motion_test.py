@@ -143,19 +143,17 @@ static void paint(void) {
     mu_end(&ui);
     mu_Command *cmd = NULL;
     assert(mu_next_command(&ui, &cmd) && cmd->type == MU_COMMAND_SURFACE);
-    assert(cmd->surface.rect.y == 27 && cmd->surface.clip.y == 27);
-    assert(cmd->surface.clip.h == 4 && cmd->surface.fill.a == 120);
+    assert(cmd->surface.rect.y == 20 && cmd->surface.offset_y == 7 && cmd->surface.clip.y == 10);
+    assert(cmd->surface.clip.h == 21 && cmd->surface.fill.a == 120);
     assert(mu_next_command(&ui, &cmd) && cmd->type == MU_COMMAND_CLIP);
     assert(cmd->clip.rect.y == 22 && cmd->clip.rect.h == 9);
     assert(mu_next_command(&ui, &cmd) && cmd->type == MU_COMMAND_TEXT);
-    assert(cmd->text.pos.y == 22 && cmd->text.color.a == 153);
-    mu_paint_motion(&ui, 0.10f, 0.02f, 0.16f, 8, 0.6f);
-    assert(ui.paint_offset_y == 1 && ui.paint_alpha > 0.9f);
-    float alpha = ui.paint_alpha;
-    ui.animation_speed = 0.1f;
-    mu_paint_motion(&ui, 1.0f, 0.02f, 0.16f, 8, 0.6f);
-    assert(ui.paint_offset_y == 1 && ui.paint_alpha == alpha);
-    ui.time = 1.0f;
+    assert(cmd->text.pos.y == 15 && cmd->text.offset_y == 7 && cmd->text.color.a == 153);
+    mu_paint_motion(&ui, 0.10f / 0.55f, 0.02f, 0.16f, 8, 0.6f);
+    assert(ui.paint_offset_y > 0.99f && ui.paint_offset_y < 1.01f && ui.paint_alpha > 0.9f);
+    mu_paint_motion(&ui, 0.20f, 0.02f, 0.16f, 8, 0.6f);
+    assert(ui.paint_offset_y > 0 && ui.paint_offset_y < 1);
+    ui.time = 0.30f;
     mu_begin(&ui);
     assert(ui.entrance_active); /* The normal 250 ms cutoff scales too. */
     mu_end(&ui);

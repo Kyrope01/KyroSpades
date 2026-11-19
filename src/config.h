@@ -65,7 +65,6 @@ extern struct RENDER_OPTIONS {
         float mouse_sensitivity;
         int show_news;
         int ui_reduced_motion;
-        float ui_animation_speed;
         int show_fps;
         int volume;
         int voxlap_models;
@@ -209,7 +208,6 @@ struct config_setting {
         float float_min;
         float float_max;
         int numeric_input; /* use a numeric entry rather than a slider */
-        const char* slider_format; /* optional format for floating-point sliders */
         char name[48];
         char help[128];
         char category[32];

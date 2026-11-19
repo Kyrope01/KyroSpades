@@ -6080,10 +6080,7 @@ static void render_setting_row(mu_Context* ctx, struct config_setting* a, int wi
                                 float maximum = a->numeric_input ? a->float_max : (float)a->max;
                                 *(float*)a->value = max(minimum, min(maximum, *(float*)a->value));
                         } else {
-                                int has_float_range = a->float_max > a->float_min;
-                                mu_slider_ex(ctx, a->value, has_float_range ? a->float_min : a->min,
-                                             has_float_range ? a->float_max : a->max, 0,
-                                             a->slider_format ? a->slider_format : MU_SLIDER_FMT, MU_OPT_ALIGNCENTER);
+                                mu_slider(ctx, a->value, a->min, a->max);
                         }
                         break;
         }

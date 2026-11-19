@@ -18,7 +18,7 @@ static int width(mu_Font f, const char *s, int n) {
 }
 static int height(mu_Font f) { (void)f; return 10; }
 
-static void strip(void *data, float x, int y, float w, int h, mu_Color color) {
+static void strip(void *data, float x, float y, float w, float h, mu_Color color) {
     mu_Rect *clip = data;
     assert(x >= clip->x && x + w <= clip->x + clip->w);
     assert(y >= clip->y && y + h <= clip->y + clip->h);
@@ -50,6 +50,7 @@ static void shape(int w, int h, int top_only, mu_Rect clip) {
     assert(!mu_next_command(&ui, &cmd));
 }
 
+static float button_offset;
 static mu_Rect button_frame(float time, int options, int submit) {
     ui.time = time;
     mu_begin(&ui);
@@ -62,7 +63,10 @@ static mu_Rect button_frame(float time, int options, int submit) {
     mu_Command *cmd = NULL;
     mu_Rect result = mu_rect(0, 0, 0, 0);
     while (mu_next_command(&ui, &cmd))
-        if (cmd->type == MU_COMMAND_SURFACE) result = cmd->surface.rect;
+        if (cmd->type == MU_COMMAND_SURFACE) {
+            result = cmd->surface.rect;
+            button_offset = cmd->surface.offset_y;
+        }
     return result;
 }
 
@@ -87,14 +91,16 @@ int main(void) {
     /* Click at the top-left pixel, which the pressed paint rect won't cover. */
     mu_input_mousedown(&ui, rest.x, rest.y, MU_MOUSE_LEFT);
     mu_Rect pressed = button_frame(0.02f, 0, 1);
-    assert(pressed.y == rest.y + 2 && pressed.w == rest.w - 2);
-    assert(button_frame(0.5f, 0, 0).y == pressed.y);
+    assert(pressed.y == rest.y && pressed.w == rest.w && button_offset == 2);
+    assert(button_frame(0.5f, 0, 0).y == pressed.y && button_offset == 2);
     mu_input_mouseup(&ui, rest.x, rest.y, MU_MOUSE_LEFT);
-    assert(button_frame(0.52f, 0, 0).y == pressed.y);
-    assert(button_frame(0.58f, 0, 0).y == rest.y + 1);
-    assert(button_frame(0.64f, 0, 0).y == rest.y);
+    assert(button_frame(0.52f, 0, 0).y == pressed.y && button_offset == 2);
+    button_frame(0.62f, 0, 0);
+    assert(button_offset > 0 && button_offset < 1 && button_offset != (int)button_offset);
+    button_frame(0.75f, 0, 0);
+    assert(button_offset == 0);
     mu_input_mousedown(&ui, rest.x, rest.y, MU_MOUSE_LEFT);
-    assert(button_frame(0.65f, MU_OPT_NOFRAME, 1).w == 0);
+    assert(button_frame(0.76f, MU_OPT_NOFRAME, 1).w == 0);
     assert(ui.press_time == 0.52f); /* flat cells do not restart the animation */
 }
 '''

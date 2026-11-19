@@ -130,14 +130,15 @@ typedef struct { int type, size; } mu_BaseCommand;
 typedef struct { mu_BaseCommand base; void *dst; } mu_JumpCommand;
 typedef struct { mu_BaseCommand base; mu_Rect rect; } mu_ClipCommand;
 typedef struct { mu_BaseCommand base; mu_Rect rect; mu_Color color; } mu_RectCommand;
-typedef struct { mu_BaseCommand base; mu_Font font; mu_Vec2 pos; mu_Color color; char str[1]; } mu_TextCommand;
-typedef struct { mu_BaseCommand base; mu_Rect rect; int id; mu_Color color; } mu_IconCommand;
+typedef struct { mu_BaseCommand base; mu_Font font; mu_Vec2 pos; float offset_y; mu_Color color; char str[1]; } mu_TextCommand;
+typedef struct { mu_BaseCommand base; mu_Rect rect; int id; float offset_y; mu_Color color; } mu_IconCommand;
 
 typedef struct {
   mu_BaseCommand base;
   mu_Rect rect, clip;
   mu_Color fill, border;
   int radius, top_only;
+  float offset_y;
 } mu_SurfaceCommand;
 
 typedef union {
@@ -212,13 +213,13 @@ struct mu_Context {
   int updated_focus;
   int frame;
   float time, press_time;
-  float animation_speed;
   float previous_time, dt;
   float entrance_start, local_start;
   int entrance_active, local_active, reduced_motion, smooth_scroll;
   int stop_scroll;
   mu_Id local_id;
-  int paint_offset_y, paint_clip_depth;
+  float paint_offset_y;
+  int paint_clip_depth;
   float paint_alpha;
   mu_Rect paint_clip;
   mu_Id pressed_button;
@@ -305,7 +306,7 @@ void mu_set_clip(mu_Context *ctx, mu_Rect rect);
 void mu_draw_surface(mu_Context *ctx, mu_Rect rect, mu_Color fill,
   mu_Color border, int radius, int top_only);
 void mu_render_surface(const mu_SurfaceCommand *surface,
-  void (*emit)(void *user, float x, int y, float width, int height, mu_Color color),
+  void (*emit)(void *user, float x, float y, float width, float height, mu_Color color),
   void *user);
 void mu_draw_rect(mu_Context *ctx, mu_Rect rect, mu_Color color);
 void mu_draw_box(mu_Context *ctx, mu_Rect rect, mu_Color color);
