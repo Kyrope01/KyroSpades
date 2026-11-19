@@ -131,7 +131,6 @@ extern struct RENDER_OPTIONS {
         int   chromatic_aberration;           /* 0 = off, 1 = on */
         float chromatic_aberration_strength;  /* 0..10 — pixel offset at screen edge */
         int   color_correction;               /* 0 = off, 1 = ZeroSpades grade */
-        int   hdr_rendering;                   /* floating-point scene target on OpenGL Core */
         int dynamic_lights;                   /* forward point lights and terrain material shading */
         int all_player_flashlights;           /* locally show lamps for living remote players */
         int flash_lights;                     /* muzzle-flash and grenade-explosion point lights */

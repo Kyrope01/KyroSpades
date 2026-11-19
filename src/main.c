@@ -103,8 +103,6 @@ static struct {
         unsigned int depth_tex;
         int w;
         int h;
-        int hdr;
-        int hdr_requested;
         int target_failed;
         int uni_pp_sat;
         int uni_pp_scale;
@@ -113,7 +111,7 @@ static struct {
         /* New post-proc uniforms: chromatic aberration strength,
            ZeroSpades color correction */
         int uni_pp_ca_strength;
-        int uni_pp_cc_mode;
+        int uni_pp_cc_enabled;
         int uni_pp_texel;
         int uni_pp_dmg; /* damage feedback: red edge vignette (0..1) */
         int uni_pp_outlines;
@@ -184,8 +182,6 @@ static void postproc_release_targets(void) {
         postproc.flare_tex = 0;
         postproc.w = 0;
         postproc.h = 0;
-        postproc.hdr = 0;
-        postproc.hdr_requested = 0;
         postproc.target_failed = 0;
         postproc.flare_applied = 0;
 }
@@ -598,9 +594,7 @@ void display() {
            always land exactly on 0 (touch precision), and a visually-nil
            post-process pass would otherwise keep running. */
         /* damagefx_vignette() keeps the pass alive for the ~1 s the damage
-           vignette fades out, even when every other post-process is off. HDR
-           alone must not force a no-op pass on non-Core or 2.1 fallback paths. */
-        int hdr_postproc = settings.hdr_rendering && postprocess_hdr_supported();
+           vignette fades out, even when every other post-process is off. */
         float outline_fog_range = camera_mode == CAMERAMODE_SPECTATOR
                 ? settings.spectator_fog_distance : settings.render_distance;
         if(outline_fog_range < 1.0F)
@@ -616,15 +610,12 @@ void display() {
                                   || settings.contrast < -0.5F || settings.contrast > 0.5F
                                   || settings.vignette > 0.5F
                                   || settings.lens_flare || settings.chromatic_aberration || settings.color_correction
-                                  || hdr_postproc || outlines_postproc
+                                  || outlines_postproc
                                   || damagefx_vignette() > 0.003F));
-        int desired_hdr = postprocess_hdr_supported()
-                && settings.hdr_rendering;
         if(needs_postproc && postproc.target_failed) {
                 if(postproc.w == settings.window_width && postproc.h == settings.window_height
-                   && postproc.hdr_requested == desired_hdr) {
                         /* Do not hammer a driver with the same failed allocation
-                           every frame. Resize or a mode change permits one retry. */
+                           every frame. Resizing permits one retry. */
                         needs_postproc = 0;
                 } else {
                         postproc_release_targets();
@@ -666,26 +657,17 @@ void display() {
 #endif
 
                 if(needs_postproc) {
-                        if(postproc.texture && (postproc.w != settings.window_width || postproc.h != settings.window_height
-                                                || postproc.hdr_requested != desired_hdr))
+                        if(postproc.texture && (postproc.w != settings.window_width || postproc.h != settings.window_height))
                                 postproc_release_targets();
 
-                        GLint scene_internal_format = GL_RGBA;
-                        GLenum scene_pixel_type = GL_UNSIGNED_BYTE;
-#ifdef OPENGL_CORE
-                        if(desired_hdr) {
-                                scene_internal_format = GL_RGBA16F;
-                                scene_pixel_type = GL_FLOAT;
-                        }
-#endif
+                        const GLint scene_internal_format = GL_RGBA;
+                        const GLenum scene_pixel_type = GL_UNSIGNED_BYTE;
                         if(!postproc.texture) {
                                 glGenTextures(1, &postproc.texture);
                                 glBindTexture(GL_TEXTURE_2D, postproc.texture);
                                 glTexImage2D(GL_TEXTURE_2D, 0, scene_internal_format,
                                              settings.window_width, settings.window_height, 0,
                                              GL_RGBA, scene_pixel_type, NULL);
-                                postproc.hdr = desired_hdr;
-                                postproc.hdr_requested = desired_hdr;
                                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
                                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
                                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -728,31 +710,6 @@ void display() {
                                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
                                 glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, postproc.depth_tex, 0);
                                 GLenum scene_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-#ifdef OPENGL_CORE
-                                if(scene_status != GL_FRAMEBUFFER_COMPLETE && desired_hdr) {
-                                        /* Some nominally Core drivers expose float textures but
-                                           cannot render to them. Retry the exact same pipeline with
-                                           RGBA8 rather than dropping the entire post-process pass. */
-                                        log_warn("HDR scene target is incomplete (0x%x); retrying with the compatibility target",
-                                                 scene_status);
-                                        glDeleteTextures(1, &postproc.texture);
-                                        glGenTextures(1, &postproc.texture);
-                                        glBindTexture(GL_TEXTURE_2D, postproc.texture);
-                                        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
-                                                     settings.window_width, settings.window_height, 0,
-                                                     GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-                                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-                                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-                                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-                                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-                                        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-                                                               GL_TEXTURE_2D, postproc.texture, 0);
-                                        postproc.hdr = 0;
-                                        scene_internal_format = GL_RGBA;
-                                        scene_pixel_type = GL_UNSIGNED_BYTE;
-                                        scene_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-                                }
-#endif
                                 if(scene_status != GL_FRAMEBUFFER_COMPLETE) {
                                         log_error("Post-process framebuffer is incomplete (0x%x); rendering without post-processing",
                                                   scene_status);
@@ -770,15 +727,6 @@ void display() {
                                 glBindRenderbuffer(GL_RENDERBUFFER, 0);
 #endif
                         }
-
-#ifdef OPENGL_CORE
-                        /* Follow the format that actually succeeded, which may
-                           be RGBA8 after the guarded HDR allocation fallback. */
-                        if(!postproc.hdr) {
-                                scene_internal_format = GL_RGBA;
-                                scene_pixel_type = GL_UNSIGNED_BYTE;
-                        }
-#endif
 
                         /* Window MSAA does not cover an off-screen scene. Render
                            into a matching multisampled target when available,
@@ -957,7 +905,7 @@ void display() {
                                         postproc.uni_pp_bias = glx_uniform_location(postproc.shader, "pp_bias");
                                         postproc.uni_pp_vig = glx_uniform_location(postproc.shader, "pp_vig");
                                         postproc.uni_pp_ca_strength = glx_uniform_location(postproc.shader, "pp_ca_strength");
-                                        postproc.uni_pp_cc_mode = glx_uniform_location(postproc.shader, "pp_cc_mode");
+                                        postproc.uni_pp_cc_enabled = glx_uniform_location(postproc.shader, "pp_cc_enabled");
                                         postproc.uni_pp_texel = glx_uniform_location(postproc.shader, "pp_texel");
                                         postproc.uni_pp_dmg = glx_uniform_location(postproc.shader, "pp_dmg");
                                         postproc.uni_pp_outlines = glx_uniform_location(postproc.shader, "pp_outlines");
@@ -969,7 +917,7 @@ void display() {
                                         GLint scene_sampler = glx_uniform_location(postproc.shader, "tex");
                                         if(postproc.uni_pp_sat < 0 || postproc.uni_pp_scale < 0 || postproc.uni_pp_bias < 0
                                            || postproc.uni_pp_vig < 0 || postproc.uni_pp_ca_strength < 0
-                                           || postproc.uni_pp_cc_mode < 0
+                                           || postproc.uni_pp_cc_enabled < 0
                                            || postproc.uni_pp_texel < 0 || postproc.uni_pp_dmg < 0
                                            || postproc.uni_pp_outlines < 0 || postproc.uni_pp_depthmap < 0
                                            || postproc.uni_pp_outline_thickness < 0 || postproc.uni_pp_fog_range < 0
@@ -1651,8 +1599,8 @@ void display() {
                                         glUniform1f(postproc.uni_pp_vig, (settings.vignette / 100.0F) * 4.0F); // pp_vig
                                         glUniform1f(postproc.uni_pp_ca_strength,
                                                     settings.chromatic_aberration ? settings.chromatic_aberration_strength * 0.01F : 0.0F);
-                                        glUniform1f(postproc.uni_pp_cc_mode,
-                                                    use_cc ? (postproc.hdr ? 2.0F : 1.0F) : 0.0F);
+                                        glUniform1f(postproc.uni_pp_cc_enabled,
+                                                    use_cc ? 1.0F : 0.0F);
                                         glUniform2f(postproc.uni_pp_texel, 1.0F / settings.window_width, 1.0F / settings.window_height);
                                         glUniform1f(postproc.uni_pp_dmg, damagefx_vignette()); // pp_dmg
                                         glUniform1f(postproc.uni_pp_outlines,
@@ -2404,7 +2352,6 @@ static void main_apply_perf_preset_bs(void) {
         settings.color_correction = 0;
         settings.chromatic_aberration = 0;
         settings.object_outlines = 0;
-        settings.hdr_rendering = 0;
         settings.lens_flare = 0;
         settings.sky_gradient = 0;
         settings.sky_clouds = 0;
@@ -2559,7 +2506,6 @@ int main(int argc, char** argv) {
         settings.chromatic_aberration_strength = 1.5F;
         /* Use the ZeroSpades grade by default. */
         settings.color_correction = 1;
-        settings.hdr_rendering = 0;
         settings.dynamic_lights = 1;
         settings.all_player_flashlights = 0; /* Opt-in: never alter remote visuals on upgrade. */
         settings.flash_lights = 1;

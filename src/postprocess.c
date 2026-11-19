@@ -111,7 +111,7 @@ unsigned int postprocess_msaa_configure(int requested_samples, int width, int he
                                           GL_RENDERBUFFER, scene_msaa.depth_rb);
 
                 /* Some drivers expose a high global limit but support fewer
-                   samples for RGBA16F. Retry lower counts before falling back. */
+                   samples for a particular format. Retry lower counts before falling back. */
                 for(int samples = candidate; samples >= 2; samples--) {
                         glBindRenderbuffer(GL_RENDERBUFFER, scene_msaa.color_rb);
                         glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples, format, width, height);
@@ -179,14 +179,6 @@ void postprocess_msaa_resolve(unsigned int resolve_fbo) {
 void postprocess_msaa_reset(void) {}
 
 #endif
-
-bool postprocess_hdr_supported(void) {
-#ifdef OPENGL_CORE
-        return glx_version != 0 && glx_version_at_least(3, 3);
-#else
-        return false;
-#endif
-}
 
 void postprocess_deinit(void) {
         postprocess_msaa_reset();

@@ -1016,10 +1016,6 @@ void lighting_prepare_frame(double now, float view_x, float view_y, float view_z
                            hue. Do not amplify a negotiated server's light with
                            the legacy flashlight or dynamic-light multipliers. */
                         source.intensity = flashlight_ext_negotiated() ? 1.0F : 1.5F;
-#ifdef OPENGL_CORE
-                        if(!flashlight_ext_negotiated() && settings.hdr_rendering)
-                                source.intensity = 3.0F;
-#endif
                         source.spotlight = true;
                         if(!(fabsf(source.position[0]) < 1.0e6F)
                            || !(fabsf(source.position[1]) < 1.0e6F)
@@ -1084,10 +1080,6 @@ static void lighting_build_uniform_arrays(float* position_radius, float* color_i
                 float age = fmaxf((float)(now - flashlight.turned_on), 0.0F);
                 float fade = 1.0F - expf(-age * 5.0F);
                 float brightness = flashlight_ext_negotiated() ? 1.0F : 1.5F;
-#ifdef OPENGL_CORE
-                if(!flashlight_ext_negotiated() && settings.hdr_rendering)
-                        brightness = 3.0F;
-#endif
                 position_radius[i * 4 + 0] = flashlight.position[0];
                 position_radius[i * 4 + 1] = flashlight.position[1];
                 position_radius[i * 4 + 2] = flashlight.position[2];

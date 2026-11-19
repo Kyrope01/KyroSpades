@@ -16,7 +16,7 @@ pre=r'''
 #define LIGHTING_SHADER_LIGHTS 4
 #define LIGHTING_FLASH_CAPACITY 32
 #define LIGHTING_SUBMISSION_CAPACITY 64
-struct {float dynamic_light_intensity;int hdr_rendering;} settings;
+struct {float dynamic_light_intensity;} settings;
 unsigned char local_player_id;
 float sun_dir[3]={1,2,2};
 double current_time=10;int time_calls,dark_calls,negotiated=1,supported=1;

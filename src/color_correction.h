@@ -11,17 +11,10 @@
 
 /* Shared verbatim by the Core/GLES and legacy GLSL programs. */
 #define COLOR_CORRECTION_GLSL \
-        "uniform float pp_cc_mode;\n" \
+        "uniform float pp_cc_enabled;\n" \
         "vec3 colorCorrect(vec3 c) {\n" \
-        "    if(pp_cc_mode < 0.5) return c;\n" \
-        "    bool hdr = pp_cc_mode > 1.5;\n" \
-        "    if(hdr) c = pow(max(c, vec3(0.0)), vec3(1.0 / 2.2));\n" \
-        "    c = mix(vec3(dot(c, vec3(1.0 / 3.0))), c, hdr ? 0.9 : 1.0);\n" \
-        "    if(hdr) {\n" \
-        "        vec3 x = c * c * 0.8;\n" \
-        "        c = sqrt(clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0));\n" \
-        "    }\n" \
-        "    return mix(c, smoothstep(0.0, 1.0, c), hdr ? 0.0 : 0.3);\n" \
+        "    if(pp_cc_enabled < 0.5) return c;\n" \
+        "    return mix(c, smoothstep(0.0, 1.0, c), 0.3);\n" \
         "}\n"
 
 #endif

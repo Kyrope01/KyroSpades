@@ -8,7 +8,7 @@ main = (root / 'src/main.c').read_text()
 assert main.count('COLOR_CORRECTION_GLSL') == 2
 assert 'pp_cc_tint' not in main
 assert main.count('colorCorrect(c);') == 2
-assert 'use_cc ? (postproc.hdr ? 2.0F : 1.0F) : 0.0F' in main
+assert 'use_cc ? 1.0F : 0.0F' in main
 assert 'use_cc ? 1.0F : 1.0F + settings.saturation' in main
 assert 'use_cc ? 1.0F : 1.0F + settings.exposure' in main
 assert 'use_cc ? 1.0F : 1.0F + settings.contrast' in main
@@ -22,8 +22,7 @@ with TemporaryDirectory() as directory:
 #include "color_correction.h"
 int main(void) {
     assert(!strstr(COLOR_CORRECTION_GLSL, "pp_cc_tint"));
-    assert(strstr(COLOR_CORRECTION_GLSL, "hdr ? 0.9 : 1.0"));
-    assert(strstr(COLOR_CORRECTION_GLSL, "hdr ? 0.0 : 0.3"));
+    assert(strstr(COLOR_CORRECTION_GLSL, "smoothstep(0.0, 1.0, c), 0.3"));
 }
 ''')
     exe = src.with_suffix('')
