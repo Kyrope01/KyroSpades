@@ -87,7 +87,7 @@ void weapon_update() {
 		}
 	} else {
 		if(screen_current == SCREEN_NONE && window_time() - players[local_player_id].item_disabled >= 0.5F) {
-			if(players[local_player_id].input.buttons.lmb && players[local_player_id].held_item == TOOL_GUN
+			if(aimtrainer_can_fire() && players[local_player_id].input.buttons.lmb && players[local_player_id].held_item == TOOL_GUN
 			   && local_player_ammo > 0 && window_time() - weapon_last_shot >= delay) {
 				weapon_shoot();
 				if(!aimtrainer_active())
@@ -280,6 +280,8 @@ int weapon_can_reload() {
 }
 
 void weapon_shoot() {
+	if(!aimtrainer_can_fire())
+		return;
 	// see this for reference:
 	// https://pastebin.com/raw/TMjKSTXG
 	// http://paste.quacknet.org/view/a3ea2743
@@ -295,6 +297,7 @@ void weapon_shoot() {
 		players[local_player_id].orientation_smooth = players[local_player_id].orientation;
 	}
 
+	bool trainer_hit = false;
 	for(int i = 0; i < ((players[local_player_id].weapon == WEAPON_SHOTGUN) ? 8 : 1); i++) {
 		float o[3] = {players[local_player_id].orientation.x, players[local_player_id].orientation.y,
 					  players[local_player_id].orientation.z};
@@ -337,7 +340,8 @@ void weapon_shoot() {
 				particle_create(0x0000FF, hit_x, hit_y, hit_z, 3.5F, 1.0F, 8, 0.1F, 0.4F);
 
 				if(aimtrainer_active()) {
-					aimtrainer_hit(hit.player_id);
+					aimtrainer_damage(hit.player_id, weapon_get_damage(players[local_player_id].weapon, hit.player_section));
+					trainer_hit = true;
 					break;
 				}
 
@@ -383,6 +387,8 @@ void weapon_shoot() {
 				   players[local_player_id].physics.eye.y + player_height(&players[local_player_id]),
 				   players[local_player_id].physics.eye.z, o[0], o[1], o[2]);
 	}
+
+	aimtrainer_record_shot(trainer_hit);
 
 	double horiz_recoil, vert_recoil;
 	weapon_recoil(players[local_player_id].weapon, &horiz_recoil, &vert_recoil);

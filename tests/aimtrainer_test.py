@@ -17,7 +17,7 @@ stubs = r'''
 #include "aimtrainer.h"
 #include "libvxl.h"
 #define WATER_LEVEL 1.0F
-#define PLAYERS_MAX 32
+#define PLAYERS_MAX 64
 enum { TEAM_1, TEAM_2, TOOL_GUN, TOOL_SPADE, WEAPON_RIFLE, GAMEMODE_TC, CAMERAMODE_FPS, CAMERAMODE_SPECTATOR };
 struct GameState {
     struct Team { char name[11]; unsigned char red, green, blue; } team_1, team_2;
@@ -30,6 +30,7 @@ struct Player {
     struct Orientation orientation, orientation_smooth;
     struct { struct Position eye, velocity; int airborne; float lastclimb; } physics;
     struct { float feet_started_cycle; bool feet_cylce; } sound;
+    struct { struct { bool sprint, crouch; } keys; } input;
     int team, held_item, connected, alive, weapon, items_show;
     float item_disabled, item_showup;
     char name[32];
@@ -39,7 +40,15 @@ int camera_mode, network_connected, button_map[3], rebuilds;
 float camera_x, camera_y, camera_z, camera_rot_x, camera_rot_y;
 float camera_crosshair_rot_x, camera_crosshair_rot_y, camera_muzzle_rot_x, camera_muzzle_rot_y;
 float fog_color[4] = {.1F,.2F,.3F,1};
-float now;
+double now;
+static char message_log[200];
+static unsigned rgb(int r, int g, int b) { return (r << 16) | (g << 8) | b; }
+static void chat_add(int channel, unsigned color, const char* message) {
+    (void)channel; (void)color; snprintf(message_log, sizeof(message_log), "%s", message);
+}
+static void chat_showpopup(const char* message, float duration, unsigned color) {
+    (void)message; (void)duration; (void)color;
+}
 struct { float render_distance; char name[32]; } settings = {128, "Player"};
 static void player_reset(struct Player* p) { memset(p, 0, sizeof(*p)); }
 static void player_init(void) { memset(players, 0, sizeof(players)); }
@@ -78,7 +87,7 @@ int main(void) {
             assert(libvxl_map_issolid(&map, c+x, c+z, 63));
             assert(!libvxl_map_issolid(&map, c+x, c+z, top-1));
         }
-    for(int id = 1; id <= AIMTRAINER_TARGETS; ++id) {
+    for(int id = 1; id <= 16; ++id) {
         struct Player* p = &players[id];
         assert(p->alive && p->connected && p->team == TEAM_2 && p->held_item == TOOL_SPADE);
         float x = p->pos.x - camera_x, z = p->pos.z - camera_z;
@@ -87,12 +96,15 @@ int main(void) {
         assert(p->pos.x == p->prev_pos.x);
     }
     const struct Position spot = players[0].pos;
-    aimtrainer_hit(0);
+    aimtrainer_damage(0, 100);
     assert(players[0].alive);
-    aimtrainer_hit(1);
+    aimtrainer_damage(1, 49);
+    aimtrainer_damage(1, 49);
+    assert(players[1].alive);
+    aimtrainer_damage(1, 33);
     assert(!players[1].alive && !players[1].connected);
     bool fell = false, drowned = false;
-    for(int tick = 0; tick < 2600; ++tick) {
+    for(int tick = 0; tick < 1100; ++tick) {
         now += 1.F/60.F;
         aimtrainer_tick(1.F/60.F);
         assert(players[0].pos.x == spot.x && players[0].pos.y == spot.y && players[0].pos.z == spot.z);
@@ -107,6 +119,53 @@ int main(void) {
         }
     }
     assert(fell && drowned && players[2].alive);
+    assert(aimtrainer_command("/medium") && players[25].alive && !players[26].alive);
+    assert(players[25].input.keys.sprint);
+    float prior = hypotf(players[25].pos.x - camera_x, players[25].pos.z - camera_z);
+    aimtrainer_tick(1.F/60.F);
+    float after = hypotf(players[25].pos.x - camera_x, players[25].pos.z - camera_z);
+    assert(fabsf((prior - after) * 60.F - 10.4F) < .01F);
+    assert(aimtrainer_command("/hard") && players[30].alive && !players[31].alive);
+    assert(aimtrainer_command("/challenge") && strstr(message_log, "Usage:"));
+    assert(aimtrainer_command("/challenge pro") && players[40].alive);
+    assert(!aimtrainer_can_fire());
+    aimtrainer_damage(1, 100);
+    assert(players[1].alive);
+    assert(aimtrainer_command("/easy") && players[40].alive);
+    now = challenge.start - 0.01;
+    aimtrainer_update_clock();
+    assert(!aimtrainer_can_fire());
+    now = challenge.start;
+    aimtrainer_update_clock();
+    assert(aimtrainer_can_fire());
+    for(int id = 1; id <= 5; ++id) {
+        aimtrainer_damage(id, 100);
+        aimtrainer_record_shot(true);
+    }
+    assert(challenge.points == 12);
+    aimtrainer_record_shot(false);
+    assert(challenge.streak == 0);
+    place_player(&players[6], center + 4, WATER_LEVEL + STANDING_CLEARANCE, center);
+    aimtrainer_tick(1.F/60.F);
+    assert(challenge.points == 11 && challenge.kills == 5);
+    now = challenge.finish;
+    aimtrainer_update_clock();
+    assert(strstr(message_log, "5 kills") && strstr(message_log, "83.3%") && strstr(message_log, "16.5 points"));
+    assert(!aimtrainer_status(message_log, sizeof(message_log)));
+    bool strafed = false, crouched = false, jumped = false;
+    for(int tick = 0; tick < 180; ++tick) {
+        now += 1.F/60.F;
+        aimtrainer_tick(1.F/60.F);
+        for(int id = 1; id <= 40; ++id) {
+            struct Player* p = &players[id];
+            strafed |= fabsf(p->physics.velocity.x * p->orientation.z -
+                             p->physics.velocity.z * p->orientation.x) > .05F;
+            crouched |= p->input.keys.crouch;
+            jumped |= p->physics.airborne && p->pos.y > standing_y;
+        }
+    }
+    assert(strafed && crouched && jumped);
+    assert(aimtrainer_command("/easy") && players[16].alive && !players[17].alive);
     aimtrainer_stop();
     assert(!aimtrainer_active() && !players[1].connected && gamestate.team_1.red == 11 && fog_color[0] == .1F);
     libvxl_free(&map);

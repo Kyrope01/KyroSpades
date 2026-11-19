@@ -2670,15 +2670,16 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                         }
                                 }
 
-                                char count[4];
-                                sprintf(count, "%u", team1_alive);
+                                char count[16];
+                                snprintf(count, sizeof(count), "%u", team1_alive);
 
                                 font_select(FONT_FANTASY);
                                 glColor3ub(gamestate.team_1.red, gamestate.team_1.green, gamestate.team_1.blue);
                                 // helmet and text
                                 texture_draw_empty(settings.window_width - 8.F - 32.F, gmi_y + 32.F, 32.F, 16.F);
                                 glColor3ub(255, 255, 255);
-                                hud_font_render(settings.window_width - 8.F - 32.F - 30.F, gmi_y + 28.F, 30.F, count, .4F);
+                                hud_font_render(settings.window_width - 8.F - 32.F - 5.F - font_length(30.F, count),
+                                                gmi_y + 28.F, 30.F, count, .4F);
 
                                 // skin
                                 glColor3ub(222, 200, 141);
@@ -2694,13 +2695,14 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 // team 2
                                 gmi_y += 40.F;
 
-                                sprintf(count, "%u", team2_alive);
+                                snprintf(count, sizeof(count), "%u", team2_alive);
                                 font_select(FONT_FANTASY);
                                 glColor3ub(gamestate.team_2.red, gamestate.team_2.green, gamestate.team_2.blue);
                                 // helmet and text
                                 texture_draw_empty(settings.window_width - 8.F - 32.F, gmi_y + 32.F, 32.F, 16.F);
                                 glColor3ub(255, 255, 255);
-                                hud_font_render(settings.window_width - 8.F - 32.F - 30.F, gmi_y + 28.F, 30.F, count, .4F);
+                                hud_font_render(settings.window_width - 8.F - 32.F - 5.F - font_length(30.F, count),
+                                                gmi_y + 28.F, 30.F, count, .4F);
 
                                 // skin
                                 glColor3ub(222, 200, 141);
@@ -2713,6 +2715,14 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 // shadow
                                 texture_draw_empty(settings.window_width - 8.F - 32.F, gmi_y, 32.F, 2.F);
                         }
+                }
+
+                char trainer_status[96];
+                if(aimtrainer_status(trainer_status, sizeof(trainer_status))) {
+                        font_select(FONT_FIXEDSYS);
+                        glColor3ub(255, 255, 255);
+                        hud_font_render_centered(settings.window_width * 0.5F,
+                                                 settings.window_height - 24.F, 20.F, trainer_status, 0.8F);
                 }
 
                 if(camera_mode == CAMERAMODE_SPECTATOR && spec_color_palette_time > window_time()) {
@@ -4488,8 +4498,9 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
                                 if(key == WINDOW_KEY_ENTER && strlen(chat[0][0]) > 0) {
                                         for(size_t i = 0; chat[0][0][i]; i++)
                                                 if(chat[0][0][i] == '\n') chat[0][0][i] = ' ';
-                                        network_send_chat((chat_input_mode == CHAT_ALL_INPUT) ? CHAT_ALL : CHAT_TEAM,
-                                                          chat[0][0]);
+                                        if(!aimtrainer_command(chat[0][0]))
+                                                network_send_chat((chat_input_mode == CHAT_ALL_INPUT) ? CHAT_ALL : CHAT_TEAM,
+                                                                  chat[0][0]);
                                         sound_create(SOUND_LOCAL, &sound_chat, 0.0F, 0.0F, 0.0F);
                                         chat_add(2, 0, chat[0][0]);
                                 }

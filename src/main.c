@@ -2834,6 +2834,7 @@ int main(int argc, char** argv) {
                    work from the state polled here. */
                 window_poll();
                 hud_process_aimtrainer_request();
+                aimtrainer_update_clock();
                 if(window_closed())
                         break;
 
