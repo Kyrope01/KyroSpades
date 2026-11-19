@@ -1789,6 +1789,28 @@ static void cp_rect(float x, float y, float w, float h) {
         texture_draw_empty(x, settings.window_height - y, w, h);
 }
 
+static void cp_surface_strip(void* user, float x, float y, float w, float h, mu_Color color) {
+        (void)user;
+        glColor4ub(color.r, color.g, color.b, color.a);
+        glx_draw_quad_2d(x, settings.window_height - y, w, h);
+}
+
+static void cp_surface(float x, float y, float w, float h, float radius, mu_Color fill) {
+        mu_Rect bounds = mu_rect(roundf(x), roundf(y), roundf(w), roundf(h));
+        mu_SurfaceCommand surface = {
+                .rect = bounds, .clip = bounds, .fill = fill,
+                .border = mu_accent_color(0.8F, 255),
+                .radius = min((int)roundf(radius), min(bounds.w, bounds.h) / 2),
+        };
+        GLboolean blended = glIsEnabled(GL_BLEND);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        mu_render_surface(&surface, cp_surface_strip, NULL);
+        glx_batch2d_flush();
+        if(!blended)
+                glDisable(GL_BLEND);
+}
+
 static void cp_tex(struct texture* t, float x, float y, float w, float h) {
         texture_draw(t, x, settings.window_height - y, w, h);
 }
@@ -1822,12 +1844,8 @@ static void hud_colorpicker_render(void) {
         hud_fixed_texture_modulate();
         glDisable(GL_DEPTH_TEST);
 
-        /* Even neutral-grey backing sized to the picker, with a thin darker
-           border, so the colours stay readable whatever the world behind is. */
-        glColor3ub(0x2E, 0x2E, 0x2E);
-        cp_rect(l.px - 1.0F, l.py - 1.0F, l.pw + 2.0F, l.ph + 2.0F);
-        glColor3ub(0x5A, 0x5A, 0x5A);
-        cp_rect(l.px, l.py, l.pw, l.ph);
+        /* Match the menu's accent-tinted panels without tinting the swatch. */
+        cp_surface(l.px, l.py, l.pw, l.ph, 6.0F * u, mu_accent_color(0.10F, 224));
 
         /* Preview + saturation/value square. */
         glColor3ub(r, g, b);
@@ -1867,13 +1885,9 @@ static void hud_colorpicker_render(void) {
         bool glow_enabled = glowing_blocks_placement_enabled();
         bool glow_hover = mouse_x >= l.glow_x && mouse_x <= l.glow_x + l.glow_w
                 && mouse_y >= l.glow_y && mouse_y <= l.glow_y + l.glow_h;
-        glColor3ub(0x24, 0x24, 0x24);
-        cp_rect(l.glow_x - 1.0F, l.glow_y - 1.0F, l.glow_w + 2.0F, l.glow_h + 2.0F);
-        if(glow_enabled)
-                glColor3ub(glow_hover ? 0x3E : 0x32, glow_hover ? 0xA8 : 0x90, glow_hover ? 0x61 : 0x50);
-        else
-                glColor3ub(glow_hover ? 0x87 : 0x70, glow_hover ? 0x4B : 0x3D, glow_hover ? 0x4B : 0x3D);
-        cp_rect(l.glow_x, l.glow_y, l.glow_w, l.glow_h);
+        float glow_tint = glow_hover ? 0.55F : (glow_enabled ? 0.43F : 0.30F);
+        cp_surface(l.glow_x, l.glow_y, l.glow_w, l.glow_h, 4.0F * u,
+                   mu_accent_color(glow_tint, 255));
 
         char glow_label[32];
         snprintf(glow_label, sizeof(glow_label), "Glowing blocks: %s", glow_enabled ? "ON" : "OFF");
@@ -2481,7 +2495,8 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
 
                         /* camera_ads_scope_progress stays > 0 for 150 ms after RMB is
                            released, so the scope shrinks away instead of vanishing. */
-                        if(settings.iron_sight && players[local_id].held_item == TOOL_GUN
+                        if(settings.iron_sight && !cameracontroller_third_person_rendering()
+                           && players[local_id].held_item == TOOL_GUN
                            && camera_ads_scope_progress > 0.0F
                            && players[local_id].alive) {
                                 struct texture* zoom;
@@ -2520,7 +2535,8 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                         settings.window_height * current_zoom_factor * size_scale, (float)(zoom->width - 1) / (float)zoom->width, 0.0F,
                                         1.0F / (float)zoom->width, 1.0F);
                         } else {
-                                if(settings.free_aim && camera_mode == CAMERAMODE_FPS) {
+                                if(settings.free_aim && camera_mode == CAMERAMODE_FPS
+                                   && !cameracontroller_third_person_rendering()) {
                                         float sx, sy;
                                         if(hud_project_aim(camera_crosshair_rot_x, camera_crosshair_rot_y, &sx, &sy)) {
                                                 /* Draw only the actual shot direction.  A second eased
@@ -3800,6 +3816,13 @@ static const char* hud_ingame_completeword(const char* s) {
 }
 
 static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
+        if(key == WINDOW_KEY_CYCLE_PLAYER_CAMERA) {
+                if(action == WINDOW_PRESS && !mods && camera_mode == CAMERAMODE_FPS
+                   && players[local_player_id].alive && !demo_is_playing() && !show_exit && !cp_open
+                   && !pie_menu_opened() && chat_input_mode == CHAT_NO_INPUT && screen_current == SCREEN_NONE)
+                        cameracontroller_cycle_player_view();
+                return;
+        }
         if(key == WINDOW_KEY_TEAM_OVERLAY) {
                 if(action == WINDOW_PRESS && network_connected && network_logged_in
                    && camera_mode == CAMERAMODE_FPS && chat_input_mode == CHAT_NO_INPUT

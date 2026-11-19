@@ -91,6 +91,7 @@ static int config_glfw_to_sdl(int code) {
                 case 71:  return SDLK_g;
                 case 72:  return SDLK_h;
                 case 74:  return SDLK_j;
+                case 75:  return SDLK_k;
                 case 77:  return SDLK_m;
                 case 78:  return SDLK_n;
                 case 80:  return SDLK_p;
@@ -884,6 +885,7 @@ void config_reload() {
         config_register_key(WINDOW_KEY_SELECT4, SDLK_4, NULL, 0, NULL, NULL);
         config_register_key(WINDOW_KEY_HISTORY_PREVIOUS, SDLK_UP, "history_previous", 0, "Previous message", "Chat history");
         config_register_key(WINDOW_KEY_HISTORY_NEXT, SDLK_DOWN, "history_next", 0, "Next message", "Chat history");
+        config_register_key(WINDOW_KEY_CYCLE_PLAYER_CAMERA, SDLK_k, "cycle_player_camera", 0, "Cycle player camera", "Game");
         config_register_key(WINDOW_KEY_SWITCH_CAMERA, SDLK_v, "switch_camera", 0, "Toggle 1st/3rd person view", "Spectator");
         config_register_key(WINDOW_KEY_NEXT_PLAYER, SDLK_p, "next_player", 0, "Next alive player", "Spectator");
         config_register_key(WINDOW_KEY_ROLL_CW, SDLK_e, "roll_cw", 0, "Roll clockwise", "Spectator");
@@ -961,6 +963,7 @@ void config_reload() {
         config_register_key(WINDOW_KEY_SELECT4, GLFW_KEY_4, NULL, 0, NULL, NULL);
         config_register_key(WINDOW_KEY_HISTORY_PREVIOUS, GLFW_KEY_UP, "history_previous", 0, "Previous message", "Chat history");
         config_register_key(WINDOW_KEY_HISTORY_NEXT, GLFW_KEY_DOWN, "history_next", 0, "Next message", "Chat history");
+        config_register_key(WINDOW_KEY_CYCLE_PLAYER_CAMERA, GLFW_KEY_K, "cycle_player_camera", 0, "Cycle player camera", "Game");
         config_register_key(WINDOW_KEY_SWITCH_CAMERA, GLFW_KEY_V, "switch_camera", 0, "Toggle 1st/3rd person view", "Spectator");
         config_register_key(WINDOW_KEY_NEXT_PLAYER, GLFW_KEY_P, "next_player", 0, "Next alive player", "Spectator");
         config_register_key(WINDOW_KEY_ROLL_CW, GLFW_KEY_E, "roll_cw", 0, "Roll clockwise", "Spectator");

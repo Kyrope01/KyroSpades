@@ -1028,6 +1028,11 @@ static void window_dispatch_key(int sym, int action, int mod) {
 				}
 			if(duplicate)
 				continue;
+			/* SDL reports repeats as presses; the camera mode is a one-shot action. */
+			if(results[k] == WINDOW_KEY_CYCLE_PLAYER_CAMERA && action == WINDOW_PRESS
+			   && window_key_down(WINDOW_KEY_CYCLE_PLAYER_CAMERA))
+				continue;
+
 			keys(hud_window, results[k], sym, action, mod);
 
 			if(hud_active->input_keyboard)
