@@ -172,6 +172,14 @@ int main(void) {
 }
 '''
 
+# Trainer hits return before the network hit packet, but must still emit the
+# shared HUD indicator, including on lethal hits that remove the bot.
+weapon = (root / 'src/weapon.c').read_text()
+shot = weapon.split('void weapon_shoot() {', 1)[1]
+player_hit = shot.split('case CAMERA_HITTYPE_PLAYER:', 1)[1].split('case CAMERA_HITTYPE_BLOCK:', 1)[0]
+assert player_hit.index('damagenumbers_add(hit.player_id, dmg, hit_x, hit_y, hit_z)') < player_hit.index('if(aimtrainer_active())')
+assert 'aimtrainer_damage(hit.player_id, dmg)' in player_hit
+
 with TemporaryDirectory() as directory:
     test = Path(directory) / 'trainer.c'
     exe = test.with_suffix('')

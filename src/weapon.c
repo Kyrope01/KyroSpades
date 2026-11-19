@@ -339,8 +339,13 @@ void weapon_shoot() {
 				float hit_z = players[hit.player_id].physics.eye.z;
 				particle_create(0x0000FF, hit_x, hit_y, hit_z, 3.5F, 1.0F, 8, 0.1F, 0.4F);
 
+				/* The trainer applies this damage locally. Online, this is only
+				   an estimate; the HUD suppresses it on authoritative servers. */
+				int dmg = weapon_get_damage(players[local_player_id].weapon, hit.player_section);
+				damagenumbers_add(hit.player_id, dmg, hit_x, hit_y, hit_z);
+
 				if(aimtrainer_active()) {
-					aimtrainer_damage(hit.player_id, weapon_get_damage(players[local_player_id].weapon, hit.player_section));
+					aimtrainer_damage(hit.player_id, dmg);
 					trainer_hit = true;
 					break;
 				}
@@ -348,12 +353,6 @@ void weapon_shoot() {
 				/* Blood decal: spatter along the bullet's flight direction so
 				   it lands on whatever surface is behind the victim. */
 				bloodmarks_spatter(hit_x, hit_y, hit_z, o[0] * 12.0F, o[1] * 12.0F, o[2] * 12.0F, true);
-
-				/* Floating damage number: client-side estimate only, purely
-				   cosmetic feedback for the shooter. The server remains
-				   authoritative for actual HP. */
-				int dmg = weapon_get_damage(players[local_player_id].weapon, hit.player_section);
-				damagenumbers_add(hit.player_id, dmg, hit_x, hit_y, hit_z);
 
 				struct PacketHit h;
 				h.player_id = hit.player_id;
