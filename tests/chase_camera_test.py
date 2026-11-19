@@ -56,6 +56,18 @@ int main(void) {
     obstacle=0.25f;
     assert(!cameracontroller_chase_render());
     assert(camera_x==10&&camera_y==5&&camera_z==20);
+    /* Start with a clear boom, then step up a voxel in one frame. */
+    obstacle=-1;chase_fraction=1;chase_height_valid=0;
+    assert(cameracontroller_chase_render());
+    float before_step=eye[1];
+    camera_y+=1;time_now+=0.016f;
+    assert(cameracontroller_chase_render());
+    assert(eye[1]>before_step&&eye[1]<before_step+0.25f);
+    assert(fabsf(target[1]-5)<0.0001f); /* Look target remains anchored to aim. */
+    for(int i=0;i<24;i++) { time_now+=0.016f; assert(cameracontroller_chase_render()); }
+    assert(fabsf(eye[1]-(before_step+1))<0.01f);
+    camera_y+=4;time_now+=0.016f;
+    assert(cameracontroller_chase_render()&&chase_height==camera_y);
     chase_rendering=1;camera_mode=CAMERAMODE_SPECTATOR;
     assert(!cameracontroller_third_person_rendering());
     cameracontroller_cycle_player_view();

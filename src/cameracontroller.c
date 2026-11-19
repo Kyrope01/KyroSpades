@@ -412,12 +412,15 @@ enum player_view_mode {
 static enum player_view_mode player_view;
 static float chase_fraction, chase_time;
 static int chase_rendering;
+static float chase_height;
+static int chase_height_valid;
 
 void cameracontroller_cycle_player_view(void) {
 	player_view = (player_view + 1) % PLAYER_VIEW_COUNT;
 	chase_fraction = 1.0F;
 	chase_time = window_time();
 	chase_rendering = 0;
+	chase_height_valid = 0;
 }
 
 int cameracontroller_third_person_rendering(void) {
@@ -449,14 +452,28 @@ static int cameracontroller_chase_render(void) {
 	float rx = camera_rot_x, ry = camera_rot_y;
 	float fx, fy, fz;
 	camera_vector_from_angles(rx, ry, &fx, &fy, &fz);
-	/* A trailing boom with a slight raised, right-shoulder bias. */
+	float now = window_time();
+	float elapsed = now - chase_time;
+	float dt = fminf(fmaxf(elapsed, 0.0F), 0.1F);
+	chase_time = now;
+
+	/* Auto-climb raises the player by a voxel in one tick. Ease just the
+	   chase eye's height; leave horizontal follow, look input and aim alone. */
+	float height_error = camera_y - chase_height;
+	if(!chase_height_valid || elapsed < 0.0F || elapsed > 0.25F || fabsf(height_error) > 2.5F) {
+		chase_height = camera_y;
+		chase_height_valid = 1;
+	} else {
+		chase_height += height_error * -expm1f(-14.0F * dt);
+		chase_height = fmaxf(camera_y - 1.25F, fminf(camera_y + 1.25F, chase_height));
+	}
+
+	/* Sweep from the real eye to the smoothed destination so height lag
+	   cannot bypass wall or stair collision. */
 	float dx = -fx * 4.5F + cosf(rx) * 0.90F;
-	float dy = -fy * 4.5F + 0.65F;
+	float dy = -fy * 4.5F + 0.65F + (chase_height - camera_y);
 	float dz = -fz * 4.5F - sinf(rx) * 0.90F;
 	float limit = chase_clearance(camera_x, camera_y, camera_z, dx, dy, dz);
-	float now = window_time();
-	float dt = fminf(fmaxf(now - chase_time, 0.0F), 0.1F);
-	chase_time = now;
 	if(limit < chase_fraction)
 		chase_fraction = limit;
 	else
@@ -483,6 +500,8 @@ static int cameracontroller_chase_render(void) {
 }
 
 void cameracontroller_fps_render() {
+	if(!players[local_player_id].alive)
+		chase_height_valid = 0;
 	chase_rendering = player_view == PLAYER_VIEW_CHASE && players[local_player_id].alive
 		&& cameracontroller_chase_render();
 	if(chase_rendering)
