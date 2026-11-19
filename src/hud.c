@@ -1905,6 +1905,45 @@ static void hud_colorpicker_render(void) {
         glColor3f(1.0F, 1.0F, 1.0F);
 }
 
+/* Soft accent light behind the join-screen artwork. The fixed strip count
+   keeps the draw cost independent of resolution. */
+static void hud_join_edge_glow(void) {
+        const float w = settings.window_width, h = settings.window_height;
+        if(w <= 0.0F || h <= 0.0F)
+                return;
+        enum { STRIPS = 24 };
+        const float step = fminf(w, h) * 0.14F / STRIPS;
+        const bool steady = settings.ui_reduced_motion;
+        mu_Color accent = mu_accent_color(1.0F, 255);
+        if(steady) {
+                accent.r = settings.ui_accent_r;
+                accent.g = settings.ui_accent_g;
+                accent.b = settings.ui_accent_b;
+        }
+        float t = window_time();
+        /* Layer two slow waves for an irregular shimmer, never a hard flash. */
+        float strength = steady ? 0.16F : 0.16F + 0.045F * sinf(t * 2.7F) + 0.025F * sinf(t * 5.1F);
+        glx_batch2d_flush();
+        const bool batched = glx_batch2d_enabled();
+        glx_batch2d_enable(true);
+        GLboolean blended = glIsEnabled(GL_BLEND);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        for(int i = 0; i < STRIPS; ++i) {
+                float d = i * step;
+                float fade = 1.0F - (i + 0.5F) / STRIPS;
+                glColor4ub(accent.r, accent.g, accent.b, (unsigned char)(255.0F * strength * fade * fade));
+                glx_draw_quad_2d(d, h - d, w - 2.0F * d, step);
+                glx_draw_quad_2d(d, d + step, w - 2.0F * d, step);
+                glx_draw_quad_2d(d, h - d - step, step, h - 2.0F * (d + step));
+                glx_draw_quad_2d(w - d - step, h - d - step, step, h - 2.0F * (d + step));
+        }
+        glx_batch2d_flush();
+        glx_batch2d_enable(batched);
+        if(!blended)
+                glDisable(GL_BLEND);
+}
+
 static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
         if(local_player_id < 0 || local_player_id >= PLAYERS_MAX)
                 local_player_id = PLAYERS_MAX - 1;
@@ -2036,6 +2075,7 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
 
         if(network_map_transfer || daytime_weather_awaiting_sky()) {
                 hud_common_render(ctx);
+                hud_join_edge_glow();
                 glColor3ub(255, 255, 255);
 
                 texture_draw(&texture_splash_icon,
@@ -6358,7 +6398,7 @@ static void hud_settings_render(mu_Context* ctx, float scalex, float scaley) {
                         ctx->style->colors[MU_COLOR_BORDER] = accent;
                         ctx->style->colors[MU_COLOR_TEXT] = white;
 
-                        int expanded = mu_begin_treenode(ctx, a->subcategory);
+                        int expanded = mu_begin_treenode_ex(ctx, a->subcategory, MU_OPT_EXPANDED);
 
                         ctx->style->colors[MU_COLOR_TEXT] = old_text;
                         ctx->style->colors[MU_COLOR_BORDER] = old_border;

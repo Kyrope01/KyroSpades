@@ -1533,7 +1533,7 @@ void config_reload() {
                                  .type = CONFIG_TYPE_INT,
                                  .min = 0,
                                  .max = 1,
-                                 .name = "Reduce menu motion",
+                                 .name = "Reduce Motion",
                                  .help = "Disable menu entrance and button movement, and make wheel scrolling immediate",
                                  .category = "HUD/UI Settings",
                          });
