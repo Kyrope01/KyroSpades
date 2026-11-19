@@ -114,7 +114,6 @@ static struct {
            ZeroSpades color correction */
         int uni_pp_ca_strength;
         int uni_pp_cc_mode;
-        int uni_pp_cc_tint;
         int uni_pp_texel;
         int uni_pp_dmg; /* damage feedback: red edge vignette (0..1) */
         int uni_pp_outlines;
@@ -589,9 +588,6 @@ static void hud_emit_surface_strip(void* user, float x, float y, float w, float 
 }
 
 void display() {
-        static float cc_smoothed_fog[3] = {-1.0F, -1.0F, -1.0F};
-        if(!settings.color_correction || !hud_active || !hud_active->render_world || network_map_transfer)
-                cc_smoothed_fog[0] = -1.0F;
         /* Apply pending window changes (fullscreen, vsync, size) every frame.
            drawScene() is skipped in the menus when not connected, so this must
            not live there or settings only take effect once in-game. */
@@ -962,7 +958,6 @@ void display() {
                                         postproc.uni_pp_vig = glx_uniform_location(postproc.shader, "pp_vig");
                                         postproc.uni_pp_ca_strength = glx_uniform_location(postproc.shader, "pp_ca_strength");
                                         postproc.uni_pp_cc_mode = glx_uniform_location(postproc.shader, "pp_cc_mode");
-                                        postproc.uni_pp_cc_tint = glx_uniform_location(postproc.shader, "pp_cc_tint");
                                         postproc.uni_pp_texel = glx_uniform_location(postproc.shader, "pp_texel");
                                         postproc.uni_pp_dmg = glx_uniform_location(postproc.shader, "pp_dmg");
                                         postproc.uni_pp_outlines = glx_uniform_location(postproc.shader, "pp_outlines");
@@ -974,7 +969,7 @@ void display() {
                                         GLint scene_sampler = glx_uniform_location(postproc.shader, "tex");
                                         if(postproc.uni_pp_sat < 0 || postproc.uni_pp_scale < 0 || postproc.uni_pp_bias < 0
                                            || postproc.uni_pp_vig < 0 || postproc.uni_pp_ca_strength < 0
-                                           || postproc.uni_pp_cc_mode < 0 || postproc.uni_pp_cc_tint < 0
+                                           || postproc.uni_pp_cc_mode < 0
                                            || postproc.uni_pp_texel < 0 || postproc.uni_pp_dmg < 0
                                            || postproc.uni_pp_outlines < 0 || postproc.uni_pp_depthmap < 0
                                            || postproc.uni_pp_outline_thickness < 0 || postproc.uni_pp_fog_range < 0
@@ -1656,11 +1651,6 @@ void display() {
                                         glUniform1f(postproc.uni_pp_vig, (settings.vignette / 100.0F) * 4.0F); // pp_vig
                                         glUniform1f(postproc.uni_pp_ca_strength,
                                                     settings.chromatic_aberration ? settings.chromatic_aberration_strength * 0.01F : 0.0F);
-                                        if(use_cc) {
-                                                float tint[3];
-                                                color_correction_tint(cc_smoothed_fog, fog_color, tint);
-                                                glUniform3f(postproc.uni_pp_cc_tint, tint[0], tint[1], tint[2]);
-                                        }
                                         glUniform1f(postproc.uni_pp_cc_mode,
                                                     use_cc ? (postproc.hdr ? 2.0F : 1.0F) : 0.0F);
                                         glUniform2f(postproc.uni_pp_texel, 1.0F / settings.window_width, 1.0F / settings.window_height);
