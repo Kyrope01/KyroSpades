@@ -109,7 +109,7 @@ static struct {
         int uni_pp_bias;
         int uni_pp_vig;
         /* New post-proc uniforms: chromatic aberration strength,
-           ZeroSpades color correction */
+           neutral color correction */
         int uni_pp_ca_strength;
         int uni_pp_cc_enabled;
         int uni_pp_texel;
@@ -1588,7 +1588,7 @@ void display() {
 
                                 if(postproc.shader) {
                                         // derive final shader factors on CPU once per frame
-                                        /* Don't stack KyroSpades' legacy grade on top of ZeroSpades'. */
+                                        /* Do not stack manual color adjustments on top of the neutral grade. */
                                         const bool use_cc = settings.color_correction != 0;
                                         float e = use_cc ? 1.0F : 1.0F + settings.exposure / 100.0F;
                                         float ct = use_cc ? 1.0F : 1.0F + settings.contrast / 100.0F;
@@ -2504,7 +2504,7 @@ int main(int argc, char** argv) {
         settings.object_outline_thickness = 0.7F; /* kept for anyone who turns outlines back on */
         settings.chromatic_aberration = 0; /* off by default; user can enable it */
         settings.chromatic_aberration_strength = 1.5F;
-        /* Use the ZeroSpades grade by default. */
+        /* Use the neutral grade by default. */
         settings.color_correction = 1;
         settings.dynamic_lights = 1;
         settings.all_player_flashlights = 0; /* Opt-in: never alter remote visuals on upgrade. */

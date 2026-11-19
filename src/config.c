@@ -1438,7 +1438,7 @@ void config_reload() {
                                  .type = CONFIG_TYPE_INT,
                                  .min = 0,
                                  .max = 1,
-                                 .help = "Use ZeroSpades color grading instead of manual exposure, saturation and contrast",
+                                 .help = "Lift shadows and enrich muted colors without a tint; replaces manual color adjustments",
                                  .name = "Color Correction",
                                  .category = "Visual Effects",
                                  .subcategory = "Post Processing",
