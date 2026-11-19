@@ -1905,43 +1905,69 @@ static void hud_colorpicker_render(void) {
         glColor3f(1.0F, 1.0F, 1.0F);
 }
 
-/* Soft accent light behind the join-screen artwork. The fixed strip count
-   keeps the draw cost independent of resolution. */
+/* A small, filtered alpha map gives the loading screen soft, folded light
+   instead of straight bands. Texture color is supplied by the UI accent. */
+static struct texture join_glow;
+enum { JOIN_GLOW_SIZE = 128 };
+
+static float hud_join_glow_fold(float along, float depth, float time, float phase) {
+        float u = along + 0.12F * sinf(depth * 17.0F + along * 6.0F - time + phase);
+        float wave = 0.16F + 0.074F * sinf(u * 15.0F + time + phase)
+                           + 0.039F * sinf(u * 29.0F - time * 0.64F + phase);
+        float d = depth - wave;
+        float soft = fmaxf(0.0F, fminf(1.0F, 0.5F - d * 5.6F));
+        float ridge = fmaxf(0.0F, 1.0F - fabsf(d) * 48.0F);
+        return 0.23F * soft * soft + 0.19F * ridge * ridge;
+}
+
 static void hud_join_edge_glow(void) {
-        const float w = settings.window_width, h = settings.window_height;
-        if(w <= 0.0F || h <= 0.0F)
-                return;
-        enum { STRIPS = 24 };
-        const float step = fminf(w, h) * 0.14F / STRIPS;
+        static int previous_frame = -2;
+        static unsigned char pixels[JOIN_GLOW_SIZE * JOIN_GLOW_SIZE * 4];
         const bool steady = settings.ui_reduced_motion;
-        mu_Color accent = mu_accent_color(1.0F, 255);
-        if(steady) {
-                accent.r = settings.ui_accent_r;
-                accent.g = settings.ui_accent_g;
-                accent.b = settings.ui_accent_b;
-        }
-        float t = window_time();
-        /* Layer two slow waves for an irregular shimmer, never a hard flash. */
-        float strength = steady ? 0.16F : 0.16F + 0.045F * sinf(t * 2.7F) + 0.025F * sinf(t * 5.1F);
+        const int frame = steady ? -1 : (int)(window_time() * 24.0F);
         glx_batch2d_flush();
-        const bool batched = glx_batch2d_enabled();
-        glx_batch2d_enable(true);
+        if(!join_glow.texture_id || frame != previous_frame) {
+                float time = steady ? 0.0F : frame * (0.58F / 24.0F);
+                float pulse = steady ? 1.0F : 1.0F + 0.09F * sinf(time * 3.2F);
+                for(int j = 0; j < JOIN_GLOW_SIZE; ++j) {
+                        float v = (j + 0.5F) / JOIN_GLOW_SIZE;
+                        for(int i = 0; i < JOIN_GLOW_SIZE; ++i) {
+                                float u = (i + 0.5F) / JOIN_GLOW_SIZE;
+                                float light = hud_join_glow_fold(u, v, time, 0.0F);
+                                light = fmaxf(light, 0.54F * hud_join_glow_fold(1.0F - u, 1.0F - v, time, 3.0F));
+                                light = fmaxf(light, 0.72F * hud_join_glow_fold(v, u, time, 1.0F));
+                                light = fmaxf(light, 0.68F * hud_join_glow_fold(1.0F - v, 1.0F - u, time, 4.0F));
+                                unsigned char* pixel = &pixels[(j * JOIN_GLOW_SIZE + i) * 4];
+                                pixel[0] = pixel[1] = pixel[2] = 255;
+                                pixel[3] = (unsigned char)(255.0F * light * pulse);
+                        }
+                }
+                if(!join_glow.texture_id) {
+                        glGenTextures(1, &join_glow.texture_id);
+                        if(!join_glow.texture_id)
+                                return;
+                        join_glow.width = join_glow.height = JOIN_GLOW_SIZE;
+                        glBindTexture(GL_TEXTURE_2D, join_glow.texture_id);
+                        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, JOIN_GLOW_SIZE, JOIN_GLOW_SIZE,
+                                     0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                } else {
+                        glBindTexture(GL_TEXTURE_2D, join_glow.texture_id);
+                        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, JOIN_GLOW_SIZE, JOIN_GLOW_SIZE,
+                                        GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+                }
+                previous_frame = frame;
+        }
+        mu_Color accent = steady ? mu_color(settings.ui_accent_r, settings.ui_accent_g, settings.ui_accent_b, 255)
+                                 : mu_accent_color(1.0F, 255);
         GLboolean blended = glIsEnabled(GL_BLEND);
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        for(int i = 0; i < STRIPS; ++i) {
-                float d = i * step;
-                float fade = 1.0F - (i + 0.5F) / STRIPS;
-                glColor4ub(accent.r, accent.g, accent.b, (unsigned char)(255.0F * strength * fade * fade));
-                glx_draw_quad_2d(d, h - d, w - 2.0F * d, step);
-                glx_draw_quad_2d(d, d + step, w - 2.0F * d, step);
-                glx_draw_quad_2d(d, h - d - step, step, h - 2.0F * (d + step));
-                glx_draw_quad_2d(w - d - step, h - d - step, step, h - 2.0F * (d + step));
-        }
-        glx_batch2d_flush();
-        glx_batch2d_enable(batched);
-        if(!blended)
-                glDisable(GL_BLEND);
+        glColor4ub(accent.r, accent.g, accent.b, 255);
+        texture_draw(&join_glow, 0, settings.window_height, settings.window_width, settings.window_height);
+        if(blended)
+                glEnable(GL_BLEND);
 }
 
 static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
@@ -4976,6 +5002,8 @@ static void hud_serverlist_clear_news(void) {
 }
 
 void hud_deinit(void) {
+        if(join_glow.texture_id)
+                texture_delete(&join_glow);
         if(request_news) http_release(request_news);
         if(request_serverlist) http_release(request_serverlist);
 #ifdef JENKINS_BUILD
