@@ -1683,12 +1683,19 @@ void glx_draw_quad_2d(float x, float y, float w, float h) {
         }
 #endif
 #else
+        /* Match the batched and GLES triangles: positive-size HUD quads
+           must be CCW even when the world pass leaves back-face culling on. */
+        GLboolean texture_was_enabled = glIsEnabled(GL_TEXTURE_2D);
+        if(texture_was_enabled)
+                glDisable(GL_TEXTURE_2D);
         glBegin(GL_QUADS);
         glVertex2f(x, y);
-        glVertex2f(x + w, y);
-        glVertex2f(x + w, y - h);
         glVertex2f(x, y - h);
+        glVertex2f(x + w, y - h);
+        glVertex2f(x + w, y);
         glEnd();
+        if(texture_was_enabled)
+                glEnable(GL_TEXTURE_2D);
 #endif
 }
 
