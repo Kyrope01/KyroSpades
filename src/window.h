@@ -125,7 +125,6 @@ enum window_keys {
 	   could corrupt button_map, making a keyboard press fire the weapon. */
 	WINDOW_KEY_PIE_MENU,
 	WINDOW_KEY_TEAM_OVERLAY,
-	WINDOW_KEY_CYCLE_PLAYER_CAMERA,
 	WINDOW_KEY_COUNT
 };
 

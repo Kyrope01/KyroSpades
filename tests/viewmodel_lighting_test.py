@@ -6,7 +6,7 @@ player = (root / "src/player.c").read_text()
 model = (root / "src/model.c").read_text()
 
 render = player[player.index("void player_render("):]
-viewmodel_start = render.index("bool unshadowed_viewmodel = id == local_player_id && camera_mode == CAMERAMODE_FPS && !local_chase;")
+viewmodel_start = render.index("bool unshadowed_viewmodel = id == local_player_id && camera_mode == CAMERAMODE_FPS;")
 viewmodel_end = render.index("if(!render_fpv)\n\t\tplayer_render_flashlight_tip(id);", viewmodel_start)
 viewmodel = render[viewmodel_start:viewmodel_end]
 

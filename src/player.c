@@ -1778,12 +1778,11 @@ void player_render(struct Player* p, int id) {
 	float a = (p->physics.velocity.x * fx + p->physics.velocity.z * fy) / 0.25F;
 	float b = (-p->physics.velocity.x * fy + p->physics.velocity.z * fx) / 0.25F;
 
-	int local_chase = id == local_player_id && cameracontroller_third_person_rendering();
-	int render_body = (id != local_player_id || !p->alive || camera_mode != CAMERAMODE_FPS || local_chase)
+	int render_body = (id != local_player_id || !p->alive || camera_mode != CAMERAMODE_FPS)
 		&& !((camera_mode == CAMERAMODE_BODYVIEW || camera_mode == CAMERAMODE_SPECTATOR)
 			 && cameracontroller_bodyview_mode && cameracontroller_bodyview_player == id);
 
-	int render_fpv = (id == local_player_id && camera_mode == CAMERAMODE_FPS && !local_chase)
+	int render_fpv = (id == local_player_id && camera_mode == CAMERAMODE_FPS)
 		|| ((camera_mode == CAMERAMODE_BODYVIEW || camera_mode == CAMERAMODE_SPECTATOR)
 			&& cameracontroller_bodyview_mode && cameracontroller_bodyview_player == id);
 
@@ -1889,12 +1888,12 @@ void player_render(struct Player* p, int id) {
 		}
 	}
 
-	bool unshadowed_viewmodel = id == local_player_id && camera_mode == CAMERAMODE_FPS && !local_chase;
+	bool unshadowed_viewmodel = id == local_player_id && camera_mode == CAMERAMODE_FPS;
 	if(unshadowed_viewmodel)
 		kv6_calclight_viewmodel();
 
 	matrix_push(matrix_model);
-	if(unshadowed_viewmodel) {
+	if(id == local_player_id && camera_mode == CAMERAMODE_FPS) {
 		/* Anchor the first-person viewmodel to the RENDERED camera instead
 		   of the raw simulated eye. camera_x/y/z already contain the
 		   interpolated eye, player_height and every view-only easer

@@ -2496,8 +2496,7 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
 
                         /* camera_ads_scope_progress stays > 0 for 150 ms after RMB is
                            released, so the scope shrinks away instead of vanishing. */
-                        if(settings.iron_sight && !cameracontroller_third_person_rendering()
-                           && players[local_id].held_item == TOOL_GUN
+                        if(settings.iron_sight && players[local_id].held_item == TOOL_GUN
                            && camera_ads_scope_progress > 0.0F
                            && players[local_id].alive) {
                                 struct texture* zoom;
@@ -2536,8 +2535,7 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                         settings.window_height * current_zoom_factor * size_scale, (float)(zoom->width - 1) / (float)zoom->width, 0.0F,
                                         1.0F / (float)zoom->width, 1.0F);
                         } else {
-                                if(settings.free_aim && camera_mode == CAMERAMODE_FPS
-                                   && !cameracontroller_third_person_rendering()) {
+                                if(settings.free_aim && camera_mode == CAMERAMODE_FPS) {
                                         float sx, sy;
                                         if(hud_project_aim(camera_crosshair_rot_x, camera_crosshair_rot_y, &sx, &sy)) {
                                                 /* Draw only the actual shot direction.  A second eased
@@ -3831,13 +3829,6 @@ static const char* hud_ingame_completeword(const char* s) {
 }
 
 static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
-        if(key == WINDOW_KEY_CYCLE_PLAYER_CAMERA) {
-                if(action == WINDOW_PRESS && !mods && camera_mode == CAMERAMODE_FPS
-                   && players[local_player_id].alive && !demo_is_playing() && !show_exit && !cp_open
-                   && !pie_menu_opened() && chat_input_mode == CHAT_NO_INPUT && screen_current == SCREEN_NONE)
-                        cameracontroller_cycle_player_view();
-                return;
-        }
         if(key == WINDOW_KEY_TEAM_OVERLAY) {
                 if(action == WINDOW_PRESS && network_connected && network_logged_in
                    && camera_mode == CAMERAMODE_FPS && chat_input_mode == CHAT_NO_INPUT
