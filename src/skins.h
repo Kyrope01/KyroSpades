@@ -57,6 +57,6 @@ void skins_init(void);
 void skins_scan(void);
 int skins_apply(enum skin_category_type category, int entry, int reload_models);
 void skins_apply_all(int reload_models);
-void skins_render_preview(enum skin_category_type category, int entry, float cx, float cy, float size);
+void skins_render_preview(enum skin_category_type category, int entry, float cx, float cy, float size, float width, float height);
 
 #endif

@@ -436,11 +436,32 @@ void skins_apply_all(int reload_models) {
 	skins_apply(SKIN_TENT, settings.skin_tent, reload_models);
 }
 
-void skins_render_preview(enum skin_category_type category, int entry, float cx, float cy, float size) {
-	if(category < 0 || category >= SKIN_CATEGORIES)
+/* For a centered KV6, render axes are X, Z, Y. Bound the pitched box
+   through the entire yaw rotation so previews never resize while spinning. */
+#define SKINS_PREVIEW_PITCH (-0.524F)
+static float skins_preview_fit(const struct kv6_t* model, float nominal, float width, float height) {
+	float x = model->xsiz * model->scale * 0.5F;
+	float y = model->zsiz * model->scale * 0.5F;
+	float z = model->ysiz * model->scale * 0.5F;
+	float pitch = SKINS_PREVIEW_PITCH * (3.14159265F / 180.0F);
+	float sn = fabsf(sinf(pitch)), cs = fabsf(cosf(pitch));
+	float horizontal = hypotf(x, y * sn + z * cs);
+	float vertical = y * cs + z * sn;
+	/* Keep a margin on every edge, including the orthographic depth planes. */
+	if(horizontal > 0.0F) {
+		nominal = fminf(nominal, width * 0.45F / horizontal);
+		nominal = fminf(nominal, 95.0F / horizontal);
+	}
+	if(vertical > 0.0F)
+		nominal = fminf(nominal, height * 0.45F / vertical);
+	return nominal;
+}
+
+void skins_render_preview(enum skin_category_type category, int entry, float cx, float cy, float size, float width, float height) {
+	if(category < 0 || category >= SKIN_CATEGORIES || width <= 0.0F || height <= 0.0F)
 		return;
 	struct skin_category* cat = &skin_categories[category];
-	if(entry < 0 || entry >= cat->count)
+	if(entry < 0 || entry >= cat->count || !cat->entries[entry].previews)
 		return;
 
 	mat4 saved_proj, saved_view;
@@ -458,12 +479,14 @@ void skins_render_preview(enum skin_category_type category, int entry, float cx,
 		preview_scale *= 0.25F;
 	else if(category == SKIN_TENT)
 		preview_scale *= 0.18F;
+	if(category != SKIN_PLAYER) /* Each visible skin category has one model. */
+		preview_scale = skins_preview_fit(&cat->entries[entry].previews[0], preview_scale, width, height);
 
 	matrix_identity(matrix_model);
 	matrix_translate(matrix_model, cx, cy, 0.0F);
 	matrix_scale(matrix_model, preview_scale, preview_scale, preview_scale);
 	matrix_rotate(matrix_model, window_time() * 20.0F, 0.0F, 1.0F, 0.0F);
-	matrix_rotate(matrix_model, -0.524F, 1.0F, 0.0F, 0.0F);
+	matrix_rotate(matrix_model, SKINS_PREVIEW_PITCH, 1.0F, 0.0F, 0.0F);
 
 	for(int m = 0; m < cat->model_count; m++) {
 		/* skip colored variants and dead body for player */
@@ -482,12 +505,12 @@ void skins_render_preview(enum skin_category_type category, int entry, float cx,
 			};
 			if(m < SKIN_PLAYER_MODEL_COUNT)
 				matrix_translate(matrix_model, offsets[m][0], offsets[m][1], offsets[m][2]);
-		} else if(category == SKIN_INTEL || category == SKIN_TENT) {
-			/* center models using their pivot */
+		} else {
+			/* Center the geometry rather than its arbitrary gameplay pivot. */
 			matrix_translate(matrix_model,
-				-model->xpiv * model->scale,
-				-model->ypiv * model->scale,
-				-model->zpiv * model->scale);
+				(model->xpiv - model->xsiz * 0.5F) * model->scale,
+				(model->zpiv - model->zsiz * 0.5F) * model->scale,
+				(model->ypiv - model->ysiz * 0.5F) * model->scale);
 		}
 
 		matrix_upload();

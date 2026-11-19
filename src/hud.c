@@ -364,7 +364,10 @@ void hud_change(struct hud* new) {
         hud_active = new;
 
         if(hud_active->ctx) {
-                mu_init(hud_active->ctx);
+                if(new == &hud_settings)
+                        mu_init_keep_treenodes(hud_active->ctx);
+                else
+                        mu_init(hud_active->ctx);
                 hud_active->ctx->smooth_scroll = new != &hud_chatlog;
                 hud_active->ctx->entrance_active = entering && !settings.ui_reduced_motion;
                 hud_active->ctx->entrance_start = window_time();
@@ -6034,8 +6037,7 @@ static void render_setting_row(mu_Context* ctx, struct config_setting* a, int wi
                 mu_Rect cell = mu_layout_next(ctx);
                 *lay = saved; /* undo the slot the peek consumed */
 
-                mu_Container* panel = mu_get_current_container(ctx);
-                mu_Rect row_rect = mu_rect(panel->body.x, cell.y, panel->body.w, cell.h);
+                mu_Rect row_rect = mu_rect(lay->body.x, cell.y, lay->body.w, cell.h);
 
                 if(mu_mouse_over(ctx, row_rect)) {
                         /* Dark accent tint (40% of accent color) for the fill,
@@ -6273,8 +6275,17 @@ static void hud_settings_render(mu_Context* ctx, float scalex, float scaley) {
                         if(num_seen >= 32) break;
 
                         hud_settings_row_motion(ctx, motion_row++, 0);
-                        /* Render the dropdown header (highlighted) */
+                        /* A layout column grows with its children and doesn't
+                           introduce a second scrolling container. */
                         mu_layout_row(ctx, 1, (int[]) {-1}, 0);
+                        mu_layout_begin_column(ctx);
+                        mu_Rect section_rect = ctx->last_rect;
+                        mu_Layout* section_layout = &ctx->layout_stack.items[ctx->layout_stack.idx - 1];
+                        int inset = max(2, ctx->style->padding);
+                        section_layout->next_row = 2;
+                        section_layout->body.x += inset;
+                        section_layout->body.w = max(1, section_layout->body.w - 2 * inset);
+                        mu_push_id(ctx, &selected_category, sizeof(selected_category));
 
                         /* Highlight the treenode header with accent color */
                         mu_Color old_border = ctx->style->colors[MU_COLOR_BORDER];
@@ -6306,10 +6317,22 @@ static void hud_settings_render(mu_Context* ctx, float scalex, float scaley) {
                                         if(strcmp(b->subcategory, a->subcategory) != 0)
                                                 continue;
                                         hud_settings_row_motion(ctx, motion_row++, section);
-                                        render_setting_row(ctx, b, width);
+                                        render_setting_row(ctx, b, section_layout->body.w);
                                 }
                                 mu_end_treenode(ctx);
+                                /* Leave space after the final child before the
+                                   following header and draw a quiet outline. */
+                                int tail = max(1, (int)ceilf(8.0F * hud_ui_scale()) - ctx->style->spacing + 1);
+                                section_rect.h = section_layout->next_row + tail;
+                                mu_layout_row(ctx, 1, (int[]) {-1}, tail);
+                                mu_layout_next(ctx);
+                                mu_paint_reset(ctx);
+                                accent.a = 140;
+                                mu_draw_surface(ctx, section_rect, mu_color(0, 0, 0, 0),
+                                                accent, ctx->style->corner_radius, 0);
                         }
+                        mu_pop_id(ctx);
+                        mu_layout_end_column(ctx);
                 }
                 } /* !settings_search_active() */
 
@@ -6373,8 +6396,7 @@ static int skins_selected_entry[SKIN_CATEGORIES] = {0, 0, 0, 0, 0, 0, 0, 0};
    the "models look dim / are behind the background" bug). The cells are
    collected below and drawn by hud_skins_render_overlay(), which main.c runs
    after the last microui command. */
-static int skins_preview_cells_x[256];
-static int skins_preview_cells_y[256];
+static mu_Rect skins_preview_area[256];
 static int skins_preview_cat[256];
 static int skins_preview_ent[256];
 /* Per-preview scissor box in microui coordinates (origin top-left, y down): the
@@ -6551,14 +6573,9 @@ static void hud_skins_render(mu_Context* ctx, float scalex, float scaley) {
                                         mu_draw_control_text(ctx, cat->entries[i].name, name_rect, MU_COLOR_TEXT, MU_OPT_ALIGNCENTER);
                                         ctx->style->colors[MU_COLOR_TEXT] = old_text;
 
-                                        /* The part of the cell above the name strip. The model is
-                                           centred at 40% of its height (y is measured from the top
-                                           here, converted to GL's bottom-left origin below) and is
-                                           sized to fit, so this box is what the preview may use. */
-                                        int model_area_h = r.h - name_overlay_h;
-
-                                        skins_preview_cells_x[skins_preview_cell_count] = r.x + r.w / 2;
-                                        skins_preview_cells_y[skins_preview_cell_count] = settings.window_height - (r.y + model_area_h * 0.4F);
+                                        /* Frame against the full thumbnail, not its scrolled intersection. */
+                                        int model_area_h = max(0, r.h - name_overlay_h);
+                                        skins_preview_area[skins_preview_cell_count] = mu_rect(r.x, r.y, r.w, model_area_h);
                                         skins_preview_cat[skins_preview_cell_count] = skins_selected_category;
                                         skins_preview_ent[skins_preview_cell_count] = i;
                                         /* mu_get_clip_rect() is the Skins panel body (already
@@ -6643,9 +6660,10 @@ static void hud_skins_render_overlay(float scalex, float scaley) {
                    conversion main.c applies to MU_COMMAND_CLIP. */
                 glScissor(c.x, settings.window_height - (c.y + c.h), c.w, c.h);
 
+                mu_Rect area = skins_preview_area[k];
                 skins_render_preview(skins_preview_cat[k], skins_preview_ent[k],
-                        skins_preview_cells_x[k], skins_preview_cells_y[k],
-                        100.0F * scalex);
+                        area.x + area.w * 0.5F, settings.window_height - (area.y + area.h * 0.5F),
+                        100.0F * scalex, area.w, area.h);
         }
 
         glDisable(GL_SCISSOR_TEST);

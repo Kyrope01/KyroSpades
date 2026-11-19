@@ -159,7 +159,46 @@ static void paint(void) {
     assert(ui.paint_offset_y == 0 && ui.paint_alpha == 1.0f);
 }
 
-int main(void) { paint(); scrolling(); }
+static int sections(float time, int click_y) {
+    ui.time = time;
+    if (click_y >= 0) {
+        mu_input_mousedown(&ui, 10, click_y, MU_MOUSE_LEFT);
+        mu_input_mouseup(&ui, 10, click_y, MU_MOUSE_LEFT);
+    }
+    mu_begin(&ui);
+    assert(mu_begin_window_ex(&ui, "Settings", mu_rect(0, 0, 300, 200), PLAIN));
+    int mask = 0;
+    for (int i = 0; i < 3; i++) {
+        mu_push_id(&ui, &i, sizeof(i));
+        if (mu_begin_treenode(&ui, "Same named section")) {
+            mask |= 1 << i;
+            mu_end_treenode(&ui);
+        }
+        mu_pop_id(&ui);
+    }
+    mu_end_window(&ui);
+    mu_end(&ui);
+    return mask;
+}
+
+static void restore_sections(void) {
+    init();
+    assert(sections(0.0f, -1) == 0);
+    sections(0.1f, 10);
+    sections(0.2f, 34);
+    assert(sections(0.3f, -1) == 3);
+    sections(0.4f, 10); /* Explicitly close the first section. */
+    assert(sections(0.5f, -1) == 2);
+    mu_init_keep_treenodes(&ui);
+    assert(!ui.focus && !ui.mouse_down);
+    ui.text_width = width;
+    ui.text_height = height;
+    assert(sections(1.0f, -1) == 2);
+    sections(1.1f, 58);
+    assert(sections(1.2f, -1) == 6); /* A new section must not evict restored ones. */
+}
+
+int main(void) { paint(); scrolling(); restore_sections(); }
 '''
 
 with TemporaryDirectory() as tmp:

@@ -140,6 +140,17 @@ void mu_init(mu_Context *ctx) {
 }
 
 
+/* Reopening a screen resets input, focus and layout, not its disclosure state. */
+void mu_init_keep_treenodes(mu_Context *ctx) {
+  mu_PoolItem nodes[MU_TREENODEPOOL_SIZE];
+  memcpy(nodes, ctx->treenode_pool, sizeof(nodes));
+  mu_init(ctx);
+  for (int i = 0; i < MU_TREENODEPOOL_SIZE; i++) {
+    ctx->treenode_pool[i].id = nodes[i].id;
+  }
+}
+
+
 void mu_paint_reset(mu_Context *ctx) {
   ctx->paint_offset_y = 0;
   ctx->paint_alpha = 1.0f;
@@ -440,6 +451,7 @@ void mu_bring_to_front(mu_Context *ctx, mu_Container *cnt) {
 int mu_pool_init(mu_Context *ctx, mu_PoolItem *items, int len, mu_Id id) {
   int i, n = -1, f = ctx->frame;
   for (i = 0; i < len; i++) {
+    if (!items[i].id) { n = i; break; }
     if (items[i].last_update < f) {
       f = items[i].last_update;
       n = i;

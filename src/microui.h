@@ -264,6 +264,7 @@ mu_Rect mu_rect(int x, int y, int w, int h);
 mu_Color mu_color(int r, int g, int b, int a);
 
 void mu_init(mu_Context *ctx);
+void mu_init_keep_treenodes(mu_Context *ctx);
 void mu_begin(mu_Context *ctx);
 void mu_end(mu_Context *ctx);
 void mu_set_focus(mu_Context *ctx, mu_Id id);
