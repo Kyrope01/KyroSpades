@@ -1028,6 +1028,11 @@ static void window_dispatch_key(int sym, int action, int mod) {
 				}
 			if(duplicate)
 				continue;
+			/* SDL reports repeats as presses; the camera mode is a one-shot action. */
+			if(results[k] == WINDOW_KEY_CYCLE_PLAYER_CAMERA && action == WINDOW_PRESS
+			   && window_key_down(WINDOW_KEY_CYCLE_PLAYER_CAMERA))
+				continue;
+
 			keys(hud_window, results[k], sym, action, mod);
 
 			if(hud_active->input_keyboard)
@@ -1383,6 +1388,12 @@ void window_poll() {
 				break;
 			case SDL_MOUSEWHEEL:
 				if(event.wheel.which == SDL_TOUCH_MOUSEID && hud_active == &hud_ingame) break; /* drop touch-synth only ingame */
+#if SDL_VERSION_ATLEAST(2, 0, 18)
+				if(hud_active->ctx && hud_active->ctx->smooth_scroll) {
+					mouse_scroll(hud_window, event.wheel.preciseX, event.wheel.preciseY);
+					break;
+				}
+#endif
 				mouse_scroll(hud_window, event.wheel.x, event.wheel.y); break;
 			case SDL_MOUSEMOTION: {
 				if(event.motion.which == SDL_TOUCH_MOUSEID && hud_active == &hud_ingame) break; /* drop touch-synth only ingame */
@@ -1445,6 +1456,8 @@ void window_poll() {
 												event.tfinger.dx * settings.window_width,
 												event.tfinger.dy * settings.window_height);
 				} else {
+					if(hud_active->ctx)
+						mu_interrupt_pointer(hud_active->ctx);
 					window_setmouseloc(fx, fy);
 					mouse(hud_window, fx, fy);
 				}
@@ -1570,7 +1583,7 @@ void window_poll() {
 				int holding_widget = hud_active->ctx && hud_active->ctx->mouse_down == MU_MOUSE_LEFT;
 				if(f && f->dragged && !holding_widget) {
 					if(hud_active->ctx)
-						mu_input_scroll(hud_active->ctx, 0, (int)-fdy);
+						mu_input_scroll_direct(hud_active->ctx, 0, -fdy);
 					if(hud_active->input_mousescroll)
 						hud_active->input_mousescroll(fdy / 50.0F);
 				}

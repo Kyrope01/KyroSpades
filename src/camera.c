@@ -103,6 +103,12 @@ void camera_ads_update(float dt) {
 	camera_ads_scope_progress = camera_smoothstep(scope_linear);
 }
 
+static float viewmodel_fov;
+
+float camera_viewmodel_fov(void) {
+	return viewmodel_fov;
+}
+
 float camera_fov_scaled(float dt) {
 	int render_fpv = (camera_mode == CAMERAMODE_FPS)
 		|| ((camera_mode == CAMERAMODE_BODYVIEW || camera_mode == CAMERAMODE_SPECTATOR)
@@ -132,6 +138,7 @@ float camera_fov_scaled(float dt) {
 	current_fov_offset += (target_fov_offset - current_fov_offset) * blend;
 
 	float normal_fov = settings.camera_fov + current_fov_offset;
+	viewmodel_fov = normal_fov;
 	/* camera_ads_progress is > 0 while aiming AND while animating back out
 	   after release, so the zoom-out is as smooth as the zoom-in. */
 	if(render_fpv && local_id >= 0 && local_id < PLAYERS_MAX

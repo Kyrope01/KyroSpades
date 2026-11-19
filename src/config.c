@@ -37,7 +37,7 @@
 /* Selected defaults matter for configs written before a setting existed:
    an absent key keeps the value here. */
 struct RENDER_OPTIONS settings = {.sunlight_intensity = 100, .client_key_login = 1,
-                                  .killfeed_distance = 1}, settings_tmp;
+                                  .killfeed_distance = 1, .iron_sight = 0}, settings_tmp;
 /* Settings controls use window-manager points, not drawable pixels. */
 int settings_windowed_width, settings_windowed_height;
 struct list config_keys;
@@ -91,6 +91,7 @@ static int config_glfw_to_sdl(int code) {
                 case 71:  return SDLK_g;
                 case 72:  return SDLK_h;
                 case 74:  return SDLK_j;
+                case 75:  return SDLK_k;
                 case 77:  return SDLK_m;
                 case 78:  return SDLK_n;
                 case 80:  return SDLK_p;
@@ -324,6 +325,7 @@ void config_save() {
         config_seti("client", "vsync", settings.vsync);
         config_setf("client", "mouse_sensitivity", settings.mouse_sensitivity);
         config_seti("client", "show_news", settings.show_news);
+        config_seti("client", "ui_reduced_motion", settings.ui_reduced_motion);
         config_seti("client", "vol", settings.volume);
         config_seti("client", "show_fps", settings.show_fps);
         config_seti("client", "voxlap_models", settings.voxlap_models);
@@ -358,7 +360,8 @@ void config_save() {
         config_setf("client", "spectator_speed", settings.spectator_speed);
         config_setf("client", "spectator_acceleration", settings.spectator_acceleration);
         config_setf("client", "spectator_fog_distance", settings.spectator_fog_distance);
-        config_seti("client", "iron_sight", settings.iron_sight);
+        config_seti("client", "iron_sight_opt_in", settings.iron_sight);
+        config_seti("client", "hide_weapon_model_during_ads", settings.hide_weapon_model_during_ads);
         config_seti("client", "disable_raw_input", settings.disable_raw_input);
         config_seti("client", "ui_spacing", settings.ui_spacing);
         config_seti("client", "ui_padding", settings.ui_padding);
@@ -505,6 +508,7 @@ static int config_read_key(void* user, const char* section, const char* name, co
                 if(settings.mouse_sensitivity > 0.0F && settings.mouse_sensitivity < 0.01F)
                         settings.mouse_sensitivity = 5.0F;
                 IMPORT_SETTING(settings.show_news, show_news, atoi(value));
+                IMPORT_SETTING(settings.ui_reduced_motion, ui_reduced_motion, atoi(value) != 0);
                 if(!strcmp(name, "vol")) { settings.volume = max(min(atoi(value), 10), 0); sound_volume(settings.volume / 10.0F); }
                 IMPORT_SETTING(settings.show_fps, show_fps, atoi(value));
                 IMPORT_SETTING(settings.voxlap_models, voxlap_models, atoi(value));
@@ -544,7 +548,10 @@ IMPORT_SETTING(settings.camera_movement, camera_movement, atoi(value));
                 IMPORT_SETTING(settings.spectator_speed, spectator_speed, max(0.1F, min(4.F, atof(value))));
                 IMPORT_SETTING(settings.spectator_acceleration, spectator_acceleration, max(10.0F, min(200.0F, atof(value))));
                 IMPORT_SETTING(settings.spectator_fog_distance, spectator_fog_distance, max(5.f, min(512.f, atof(value))));
-                IMPORT_SETTING(settings.iron_sight, iron_sight, atoi(value));
+                /* Old builds automatically saved iron_sight=1 even if the
+                   user never enabled it. Only honor opt-ins saved from now on. */
+                IMPORT_SETTING(settings.iron_sight, iron_sight_opt_in, atoi(value) != 0);
+                IMPORT_SETTING(settings.hide_weapon_model_during_ads, hide_weapon_model_during_ads, atoi(value) != 0);
                 IMPORT_SETTING(settings.disable_raw_input, disable_raw_input, atoi(value));
                 IMPORT_SETTING(settings.ui_spacing, ui_spacing, atoi(value));
                 IMPORT_SETTING(settings.ui_padding, ui_padding, atoi(value));
@@ -878,6 +885,7 @@ void config_reload() {
         config_register_key(WINDOW_KEY_SELECT4, SDLK_4, NULL, 0, NULL, NULL);
         config_register_key(WINDOW_KEY_HISTORY_PREVIOUS, SDLK_UP, "history_previous", 0, "Previous message", "Chat history");
         config_register_key(WINDOW_KEY_HISTORY_NEXT, SDLK_DOWN, "history_next", 0, "Next message", "Chat history");
+        config_register_key(WINDOW_KEY_CYCLE_PLAYER_CAMERA, SDLK_k, "cycle_player_camera", 0, "Cycle player camera", "Game");
         config_register_key(WINDOW_KEY_SWITCH_CAMERA, SDLK_v, "switch_camera", 0, "Toggle 1st/3rd person view", "Spectator");
         config_register_key(WINDOW_KEY_NEXT_PLAYER, SDLK_p, "next_player", 0, "Next alive player", "Spectator");
         config_register_key(WINDOW_KEY_ROLL_CW, SDLK_e, "roll_cw", 0, "Roll clockwise", "Spectator");
@@ -955,6 +963,7 @@ void config_reload() {
         config_register_key(WINDOW_KEY_SELECT4, GLFW_KEY_4, NULL, 0, NULL, NULL);
         config_register_key(WINDOW_KEY_HISTORY_PREVIOUS, GLFW_KEY_UP, "history_previous", 0, "Previous message", "Chat history");
         config_register_key(WINDOW_KEY_HISTORY_NEXT, GLFW_KEY_DOWN, "history_next", 0, "Next message", "Chat history");
+        config_register_key(WINDOW_KEY_CYCLE_PLAYER_CAMERA, GLFW_KEY_K, "cycle_player_camera", 0, "Cycle player camera", "Game");
         config_register_key(WINDOW_KEY_SWITCH_CAMERA, GLFW_KEY_V, "switch_camera", 0, "Toggle 1st/3rd person view", "Spectator");
         config_register_key(WINDOW_KEY_NEXT_PLAYER, GLFW_KEY_P, "next_player", 0, "Next alive player", "Spectator");
         config_register_key(WINDOW_KEY_ROLL_CW, GLFW_KEY_E, "roll_cw", 0, "Roll clockwise", "Spectator");
@@ -1534,6 +1543,16 @@ void config_reload() {
                          });
         list_add(&config_settings,
                          &(struct config_setting) {
+                                 .value = &settings_tmp.ui_reduced_motion,
+                                 .type = CONFIG_TYPE_INT,
+                                 .min = 0,
+                                 .max = 1,
+                                 .name = "Reduce menu motion",
+                                 .help = "Disable menu entrance and button movement, and make wheel scrolling immediate",
+                                 .category = "HUD/UI Settings",
+                         });
+        list_add(&config_settings,
+                         &(struct config_setting) {
                                  .value = &settings_tmp.invert_y,
                                  .type = CONFIG_TYPE_INT,
                                  .min = 0,
@@ -1778,6 +1797,16 @@ void config_reload() {
                                  .max = 1,
                                  .help = "Use weapon-specific iron sights instead of a dot",
                                  .name = "Iron sight",
+                                 .category = "Weapon Settings",
+                         });
+        list_add(&config_settings,
+                         &(struct config_setting) {
+                                 .value = &settings_tmp.hide_weapon_model_during_ads,
+                                 .type = CONFIG_TYPE_INT,
+                                 .min = 0,
+                                 .max = 1,
+                                 .help = "Hide the first-person weapon and hands while aiming, even without the iron sight overlay",
+                                 .name = "Hide weapon model during ADS",
                                  .category = "Weapon Settings",
                          });
         list_add(&config_settings,

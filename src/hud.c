@@ -28,6 +28,7 @@
 #include <ctype.h>
 
 #include "lodepng/lodepng.h"
+#include "aimtrainer.h"
 #include "main.h"
 #include "file.h"
 #include "common.h"
@@ -342,10 +343,10 @@ static void hud_refresh_accent_style(mu_Context* ctx) {
         ctx->style->colors[MU_COLOR_BASE] = mu_accent_color(0.3F, 255);
         ctx->style->colors[MU_COLOR_BORDER] = mu_accent_color(0.8F, 255);
         ctx->style->colors[MU_COLOR_BUTTON] = mu_accent_color(0.3F, 255);
-        ctx->style->colors[MU_COLOR_BUTTONHOVER] = mu_accent_color(0.8F, 255);
-        ctx->style->colors[MU_COLOR_BUTTONFOCUS] = mu_accent_color(1.0F, 255);
+        ctx->style->colors[MU_COLOR_BUTTONHOVER] = mu_accent_color(0.55F, 255);
+        ctx->style->colors[MU_COLOR_BUTTONFOCUS] = mu_accent_color(0.72F, 255);
         ctx->style->colors[MU_COLOR_BASEFOCUS] = mu_accent_color(0.5F, 255);
-        ctx->style->colors[MU_COLOR_BASEHOVER] = mu_accent_color(0.5F, 255);
+        ctx->style->colors[MU_COLOR_BASEHOVER] = mu_accent_color(0.4F, 255);
         ctx->style->colors[MU_COLOR_PANELBG] = mu_accent_color(0.1F, 192);
         ctx->style->colors[MU_COLOR_WINDOWBG] = mu_accent_color(0.1F, 192);
         ctx->style->colors[MU_COLOR_TITLEBG] = mu_accent_color(0.8F, 255);
@@ -356,6 +357,7 @@ static void hud_refresh_accent_style(mu_Context* ctx) {
 static void hud_settings_commit(void);
 
 void hud_change(struct hud* new) {
+        int entering = hud_active != new;
         /* A drag can be interrupted by Escape or navigation before mouse-up. */
         if(hud_active == &hud_settings && new != &hud_settings)
                 hud_settings_commit();
@@ -363,7 +365,13 @@ void hud_change(struct hud* new) {
         hud_active = new;
 
         if(hud_active->ctx) {
-                mu_init(hud_active->ctx);
+                if(new == &hud_settings)
+                        mu_init_keep_treenodes(hud_active->ctx);
+                else
+                        mu_init(hud_active->ctx);
+                hud_active->ctx->smooth_scroll = new != &hud_chatlog;
+                hud_active->ctx->entrance_active = entering && !settings.ui_reduced_motion;
+                hud_active->ctx->entrance_start = window_time();
                 hud_active->ctx->text_width = mu_text_width;
                 hud_active->ctx->text_height = mu_text_height;
                 hud_active->ctx->get_clipboard = window_clipboard;
@@ -373,6 +381,23 @@ void hud_change(struct hud* new) {
 
         if(hud_active->init)
                 hud_active->init();
+}
+
+/* Presentation-only motion. Layout and hit testing always use resting bounds. */
+static void hud_entrance(mu_Context* ctx, float delay, float duration, float travel, float alpha) {
+        if(ctx->entrance_active)
+                mu_paint_motion(ctx, ctx->time - ctx->entrance_start, delay, duration,
+                                travel * hud_ui_scale(), alpha);
+        else
+                mu_paint_reset(ctx);
+}
+
+static void hud_settings_row_motion(mu_Context* ctx, int row, mu_Id section) {
+        if(ctx->local_active && (ctx->local_id == 0 || ctx->local_id == section))
+                mu_paint_motion(ctx, ctx->time - ctx->local_start, 0.0F, 0.135F,
+                                5.0F * hud_ui_scale(), 0.70F);
+        else
+                hud_entrance(ctx, 0.036F + 0.012F * min(row / 2, 4), 0.155F, 8.0F, 0.55F);
 }
 
 /*          HUD_INGAME START           */
@@ -1765,6 +1790,28 @@ static void cp_rect(float x, float y, float w, float h) {
         texture_draw_empty(x, settings.window_height - y, w, h);
 }
 
+static void cp_surface_strip(void* user, float x, float y, float w, float h, mu_Color color) {
+        (void)user;
+        glColor4ub(color.r, color.g, color.b, color.a);
+        glx_draw_quad_2d(x, settings.window_height - y, w, h);
+}
+
+static void cp_surface(float x, float y, float w, float h, float radius, mu_Color fill) {
+        mu_Rect bounds = mu_rect(roundf(x), roundf(y), roundf(w), roundf(h));
+        mu_SurfaceCommand surface = {
+                .rect = bounds, .clip = bounds, .fill = fill,
+                .border = mu_accent_color(0.8F, 255),
+                .radius = min((int)roundf(radius), min(bounds.w, bounds.h) / 2),
+        };
+        GLboolean blended = glIsEnabled(GL_BLEND);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        mu_render_surface(&surface, cp_surface_strip, NULL);
+        glx_batch2d_flush();
+        if(!blended)
+                glDisable(GL_BLEND);
+}
+
 static void cp_tex(struct texture* t, float x, float y, float w, float h) {
         texture_draw(t, x, settings.window_height - y, w, h);
 }
@@ -1798,12 +1845,8 @@ static void hud_colorpicker_render(void) {
         hud_fixed_texture_modulate();
         glDisable(GL_DEPTH_TEST);
 
-        /* Even neutral-grey backing sized to the picker, with a thin darker
-           border, so the colours stay readable whatever the world behind is. */
-        glColor3ub(0x2E, 0x2E, 0x2E);
-        cp_rect(l.px - 1.0F, l.py - 1.0F, l.pw + 2.0F, l.ph + 2.0F);
-        glColor3ub(0x5A, 0x5A, 0x5A);
-        cp_rect(l.px, l.py, l.pw, l.ph);
+        /* Match the menu's accent-tinted panels without tinting the swatch. */
+        cp_surface(l.px, l.py, l.pw, l.ph, 6.0F * u, mu_accent_color(0.10F, 224));
 
         /* Preview + saturation/value square. */
         glColor3ub(r, g, b);
@@ -1843,13 +1886,9 @@ static void hud_colorpicker_render(void) {
         bool glow_enabled = glowing_blocks_placement_enabled();
         bool glow_hover = mouse_x >= l.glow_x && mouse_x <= l.glow_x + l.glow_w
                 && mouse_y >= l.glow_y && mouse_y <= l.glow_y + l.glow_h;
-        glColor3ub(0x24, 0x24, 0x24);
-        cp_rect(l.glow_x - 1.0F, l.glow_y - 1.0F, l.glow_w + 2.0F, l.glow_h + 2.0F);
-        if(glow_enabled)
-                glColor3ub(glow_hover ? 0x3E : 0x32, glow_hover ? 0xA8 : 0x90, glow_hover ? 0x61 : 0x50);
-        else
-                glColor3ub(glow_hover ? 0x87 : 0x70, glow_hover ? 0x4B : 0x3D, glow_hover ? 0x4B : 0x3D);
-        cp_rect(l.glow_x, l.glow_y, l.glow_w, l.glow_h);
+        float glow_tint = glow_hover ? 0.55F : (glow_enabled ? 0.43F : 0.30F);
+        cp_surface(l.glow_x, l.glow_y, l.glow_w, l.glow_h, 4.0F * u,
+                   mu_accent_color(glow_tint, 255));
 
         char glow_label[32];
         snprintf(glow_label, sizeof(glow_label), "Glowing blocks: %s", glow_enabled ? "ON" : "OFF");
@@ -2457,7 +2496,8 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
 
                         /* camera_ads_scope_progress stays > 0 for 150 ms after RMB is
                            released, so the scope shrinks away instead of vanishing. */
-                        if(settings.iron_sight && players[local_id].held_item == TOOL_GUN
+                        if(settings.iron_sight && !cameracontroller_third_person_rendering()
+                           && players[local_id].held_item == TOOL_GUN
                            && camera_ads_scope_progress > 0.0F
                            && players[local_id].alive) {
                                 struct texture* zoom;
@@ -2496,7 +2536,8 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                         settings.window_height * current_zoom_factor * size_scale, (float)(zoom->width - 1) / (float)zoom->width, 0.0F,
                                         1.0F / (float)zoom->width, 1.0F);
                         } else {
-                                if(settings.free_aim && camera_mode == CAMERAMODE_FPS) {
+                                if(settings.free_aim && camera_mode == CAMERAMODE_FPS
+                                   && !cameracontroller_third_person_rendering()) {
                                         float sx, sy;
                                         if(hud_project_aim(camera_crosshair_rot_x, camera_crosshair_rot_y, &sx, &sy)) {
                                                 /* Draw only the actual shot direction.  A second eased
@@ -2560,7 +2601,10 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 case TOOL_GUN: {
                                         int ammo = is_local ? local_player_ammo : players[local_id].ammo;
                                         int ammo_reserve = is_local ? local_player_ammo_reserved : players[local_id].ammo_reserved;
-                                        sprintf(item_mini_str, "%i/%i", ammo, ammo_reserve);
+                                        if(is_local && aimtrainer_active())
+                                                strcpy(item_mini_str, "Unlimited");
+                                        else
+                                                sprintf(item_mini_str, "%i/%i", ammo, ammo_reserve);
                                         switch(players[local_id].weapon) {
                                                 case WEAPON_RIFLE: item_mini = &texture_ammo_semi; break;
                                                 case WEAPON_SMG: item_mini = &texture_ammo_smg; break;
@@ -2626,15 +2670,16 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                         }
                                 }
 
-                                char count[4];
-                                sprintf(count, "%u", team1_alive);
+                                char count[16];
+                                snprintf(count, sizeof(count), "%u", team1_alive);
 
                                 font_select(FONT_FANTASY);
                                 glColor3ub(gamestate.team_1.red, gamestate.team_1.green, gamestate.team_1.blue);
                                 // helmet and text
                                 texture_draw_empty(settings.window_width - 8.F - 32.F, gmi_y + 32.F, 32.F, 16.F);
                                 glColor3ub(255, 255, 255);
-                                hud_font_render(settings.window_width - 8.F - 32.F - 30.F, gmi_y + 28.F, 30.F, count, .4F);
+                                hud_font_render(settings.window_width - 8.F - 32.F - 5.F - font_length(30.F, count),
+                                                gmi_y + 28.F, 30.F, count, .4F);
 
                                 // skin
                                 glColor3ub(222, 200, 141);
@@ -2650,13 +2695,14 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 // team 2
                                 gmi_y += 40.F;
 
-                                sprintf(count, "%u", team2_alive);
+                                snprintf(count, sizeof(count), "%u", team2_alive);
                                 font_select(FONT_FANTASY);
                                 glColor3ub(gamestate.team_2.red, gamestate.team_2.green, gamestate.team_2.blue);
                                 // helmet and text
                                 texture_draw_empty(settings.window_width - 8.F - 32.F, gmi_y + 32.F, 32.F, 16.F);
                                 glColor3ub(255, 255, 255);
-                                hud_font_render(settings.window_width - 8.F - 32.F - 30.F, gmi_y + 28.F, 30.F, count, .4F);
+                                hud_font_render(settings.window_width - 8.F - 32.F - 5.F - font_length(30.F, count),
+                                                gmi_y + 28.F, 30.F, count, .4F);
 
                                 // skin
                                 glColor3ub(222, 200, 141);
@@ -2669,6 +2715,14 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 // shadow
                                 texture_draw_empty(settings.window_width - 8.F - 32.F, gmi_y, 32.F, 2.F);
                         }
+                }
+
+                char trainer_status[96];
+                if(aimtrainer_status(trainer_status, sizeof(trainer_status))) {
+                        font_select(FONT_FIXEDSYS);
+                        glColor3ub(255, 255, 255);
+                        hud_font_render_centered(settings.window_width * 0.5F,
+                                                 settings.window_height - 24.F, 20.F, trainer_status, 0.8F);
                 }
 
                 if(camera_mode == CAMERAMODE_SPECTATOR && spec_color_palette_time > window_time()) {
@@ -3367,6 +3421,7 @@ texture_draw_empty_rotated(settings.window_width - 143 * scalef + tent2_x * map_
 }
 
 static void hud_ingame_scroll(double yoffset) {
+        if(aimtrainer_active()) return;
         if(pie_menu_opened()) return;
         /* While the chat input is open, the scroll wheel pages through the
          * chat history instead of switching weapons. yoffset > 0 scrolls
@@ -3776,6 +3831,13 @@ static const char* hud_ingame_completeword(const char* s) {
 }
 
 static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
+        if(key == WINDOW_KEY_CYCLE_PLAYER_CAMERA) {
+                if(action == WINDOW_PRESS && !mods && camera_mode == CAMERAMODE_FPS
+                   && players[local_player_id].alive && !demo_is_playing() && !show_exit && !cp_open
+                   && !pie_menu_opened() && chat_input_mode == CHAT_NO_INPUT && screen_current == SCREEN_NONE)
+                        cameracontroller_cycle_player_view();
+                return;
+        }
         if(key == WINDOW_KEY_TEAM_OVERLAY) {
                 if(action == WINDOW_PRESS && network_connected && network_logged_in
                    && camera_mode == CAMERAMODE_FPS && chat_input_mode == CHAT_NO_INPUT
@@ -3864,7 +3926,7 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
                                 if(key == WINDOW_KEY_DEMO_SPEED_DOWN) { demo_playback_set_speed(DemoPlaybackState.speed * 0.5f); return; }
                                 if(key == WINDOW_KEY_DEMO_SPEED_UP) { demo_playback_set_speed(DemoPlaybackState.speed * 2.0f); return; }
                         }
-                        if(!network_connected) {
+                        if(!network_connected && !aimtrainer_active()) {
                                 if(key == WINDOW_KEY_F1) {
                                         camera_mode = CAMERAMODE_SELECTION;
                                 }
@@ -3928,7 +3990,7 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
                                || (config_key(WINDOW_KEY_PIE_MENU)
                                    && config_key(WINDOW_KEY_LASTTOOL)->def == config_key(WINDOW_KEY_PIE_MENU)->def)))
                                 return; /* a shared menu binding must not change tools */
-                        if(key == WINDOW_KEY_LASTTOOL) {
+                        if(!aimtrainer_active() && key == WINDOW_KEY_LASTTOOL) {
                                 int tmp = players[local_player_id].held_item;
                                 players[local_player_id].held_item = local_player_lasttool;
                                 local_player_lasttool = tmp;
@@ -4087,7 +4149,7 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
                                 hud_switch_next_player();
                         }
 
-                        if(screen_current == SCREEN_NONE && camera_mode == CAMERAMODE_FPS) {
+                        if(!aimtrainer_active() && screen_current == SCREEN_NONE && camera_mode == CAMERAMODE_FPS) {
                                 unsigned char tool_switch = 0;
                                 switch(key) {
                                         case WINDOW_KEY_TOOL1:
@@ -4134,7 +4196,7 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
                                 }
                         }
 
-                        if(screen_current == SCREEN_NONE) {
+                        if(!aimtrainer_active() && screen_current == SCREEN_NONE) {
                                 if(key == WINDOW_KEY_CHANGETEAM) {
                                         screen_current = SCREEN_TEAM_SELECT;
                                         return;
@@ -4436,8 +4498,9 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
                                 if(key == WINDOW_KEY_ENTER && strlen(chat[0][0]) > 0) {
                                         for(size_t i = 0; chat[0][0][i]; i++)
                                                 if(chat[0][0][i] == '\n') chat[0][0][i] = ' ';
-                                        network_send_chat((chat_input_mode == CHAT_ALL_INPUT) ? CHAT_ALL : CHAT_TEAM,
-                                                          chat[0][0]);
+                                        if(!aimtrainer_command(chat[0][0]))
+                                                network_send_chat((chat_input_mode == CHAT_ALL_INPUT) ? CHAT_ALL : CHAT_TEAM,
+                                                                  chat[0][0]);
                                         sound_create(SOUND_LOCAL, &sound_chat, 0.0F, 0.0F, 0.0F);
                                         chat_add(2, 0, chat[0][0]);
                                 }
@@ -4908,7 +4971,33 @@ static void pinned_save();
 static int pinned_contains(const char* identifier);
 static void pinned_toggle(const char* identifier);
 
+static bool aimtrainer_requested;
+
+void hud_process_aimtrainer_request(void) {
+        if(!aimtrainer_requested)
+                return;
+        aimtrainer_requested = false;
+        if(!aimtrainer_start()) {
+                chat_showpopup("Could not open Aim Trainer", 3.0F, rgb(255, 180, 180));
+                return;
+        }
+        ping_stop();
+        if(request_serverlist) {
+                http_release(request_serverlist);
+                request_serverlist = NULL;
+        }
+        chat_clear(0);
+        show_exit = 0;
+        screen_current = SCREEN_NONE;
+        window_title("Aim Trainer");
+        hud_change(&hud_ingame);
+        chat_add(0, rgb(255, 255, 255),
+                 "Aim Trainer: /easy, /medium, /hard, /pro for practice.\n"
+                 "Timed round: /challenge <easy|medium|hard|pro> (/chalenge also works).");
+}
+
 static void hud_serverlist_init() {
+        aimtrainer_stop();
         ping_stop();
         network_disconnect();
         window_title(NULL);
@@ -5227,8 +5316,15 @@ void hud_common_sidebar(mu_Context* ctx, float scalex, float scaley) {
         }
 #endif
 
-        if(!network_connected)
+        if(!network_connected && !aimtrainer_active()) {
                 hud_nav_button(ctx, &hud_serverlist, "Servers");
+                if(mu_button(ctx, "Aim Trainer"))
+                        aimtrainer_requested = true;
+        }
+        if(aimtrainer_active() && mu_button(ctx, "Resume training")) {
+                show_exit = 0;
+                hud_change(&hud_ingame);
+        }
 
         hud_nav_button(ctx, &hud_settings, "Settings");
         hud_nav_button(ctx, &hud_controls, "Controls");
@@ -5238,7 +5334,7 @@ void hud_common_sidebar(mu_Context* ctx, float scalex, float scaley) {
         hud_nav_button(ctx, &hud_replay, "Replay Settings");
 
 
-        if(!network_connected)
+        if(!network_connected && !aimtrainer_active())
                 hud_nav_button(ctx, &hud_demolist, "Demos");
 
         if(network_connected)
@@ -5252,8 +5348,8 @@ void hud_common_sidebar(mu_Context* ctx, float scalex, float scaley) {
         }
 
         mu_text_color(ctx, 255, 60, 60);
-        if(mu_button(ctx, network_connected ? "Disconnect" : "Exit")) {
-                if(network_connected)
+        if(mu_button(ctx, aimtrainer_active() ? "Leave training" : (network_connected ? "Disconnect" : "Exit"))) {
+                if(network_connected || aimtrainer_active())
                         hud_change(&hud_serverlist);
                 else
                         exit(0);
@@ -5402,7 +5498,9 @@ static void hud_serverlist_render(mu_Context* ctx, float scalex, float scaley) {
 
                 hud_common_sidebar(ctx, scalex, scaley);
 
+                hud_entrance(ctx, 0.0F, 0.160F, 4.0F, 0.75F);
                 mu_begin_panel(ctx, "Content");
+                hud_entrance(ctx, 0.020F, 0.165F, 7.0F, 0.65F);
 
                 mu_layout_row(ctx, 1, (int[]) {-1}, settings.window_height * 0.3F);
 
@@ -5540,12 +5638,11 @@ static void hud_serverlist_render(mu_Context* ctx, float scalex, float scaley) {
                                         mu_Rect cell = mu_layout_next(ctx);
                                         *lay = saved;
                                         mu_Rect band = mu_rect(panel->body.x, cell.y, panel->body.w, cell.h);
-                                        mu_draw_rect(ctx, band,
+                                        mu_draw_surface(ctx, band,
                                                 mu_color(hud_accent_red() * 2 / 5, hud_accent_green() * 2 / 5,
-                                                                 hud_accent_blue() * 2 / 5, 255));
-                                        mu_draw_box(ctx, band,
+                                                                 hud_accent_blue() * 2 / 5, 255),
                                                 mu_color(hud_accent_red(), hud_accent_green(),
-                                                                 hud_accent_blue(), 255));
+                                                                 hud_accent_blue(), 255), ctx->style->corner_radius, 0);
                                 }
 
 
@@ -5632,6 +5729,7 @@ static void hud_serverlist_render(mu_Context* ctx, float scalex, float scaley) {
 
                 mu_end_panel(ctx);
 
+                mu_paint_reset(ctx);
                 mu_end_window(ctx);
         }
 
@@ -5828,7 +5926,7 @@ static void hud_serverlist_touch(void* finger, int action, float x, float y, flo
         /* Drag pans the list; taps fall through to the generic synthetic-mouse path
            which single-clicks like every other menu. */
         if(action == TOUCH_MOVE && hud_serverlist.ctx)
-                mu_input_scroll(hud_serverlist.ctx, 0, (int)(-dy));
+                mu_input_scroll_direct(hud_serverlist.ctx, 0, -dy);
 }
 
 struct hud hud_serverlist = {
@@ -6011,20 +6109,18 @@ static void render_setting_row(mu_Context* ctx, struct config_setting* a, int wi
                 mu_Rect cell = mu_layout_next(ctx);
                 *lay = saved; /* undo the slot the peek consumed */
 
-                mu_Container* panel = mu_get_current_container(ctx);
-                mu_Rect row_rect = mu_rect(panel->body.x, cell.y, panel->body.w, cell.h);
+                mu_Rect row_rect = mu_rect(lay->body.x, cell.y, lay->body.w, cell.h);
 
                 if(mu_mouse_over(ctx, row_rect)) {
                         /* Dark accent tint (40% of accent color) for the fill,
                            full accent for the outline — matches the server
                            list selection style. */
-                        mu_draw_rect(ctx, row_rect,
+                        mu_draw_surface(ctx, row_rect,
                                 mu_color(hud_accent_red() * 2 / 5,
                                                  hud_accent_green() * 2 / 5,
-                                                 hud_accent_blue() * 2 / 5, 255));
-                        mu_draw_box(ctx, row_rect,
+                                                 hud_accent_blue() * 2 / 5, 255),
                                 mu_color(hud_accent_red(), hud_accent_green(),
-                                                 hud_accent_blue(), 255));
+                                                 hud_accent_blue(), 255), ctx->style->corner_radius, 0);
                 }
         }
 
@@ -6096,7 +6192,9 @@ static void hud_settings_render(mu_Context* ctx, float scalex, float scaley) {
 
                 hud_common_sidebar(ctx, scalex, scaley);
 
+                hud_entrance(ctx, 0.0F, 0.160F, 4.0F, 0.75F);
                 mu_begin_panel(ctx, "Content");
+                hud_entrance(ctx, 0.012F, 0.155F, 6.0F, 0.65F);
 
                 /* Keep search outside the scrolling settings panel so it remains
                    visible while browsing results. A search spans every category;
@@ -6107,14 +6205,16 @@ static void hud_settings_render(mu_Context* ctx, float scalex, float scaley) {
                         + ctx->style->padding * 2;
                 mu_layout_row(ctx, 3, (int[]) {search_label_w, -clear_w, -1}, 0);
                 mu_label(ctx, "Search settings:");
-                hud_textbox(ctx, settings_search, sizeof(settings_search), 0);
+                int filter_changed = hud_textbox(ctx, settings_search, sizeof(settings_search), 0) & MU_RES_CHANGE;
                 if(mu_button(ctx, "Clear")) {
+                        filter_changed |= settings_search[0] != '\0';
                         settings_search[0] = '\0';
                         ctx->focus = 0;
                 }
 
                 mu_layout_row(ctx, 2, (int[]) {150, -1}, -1);
 
+                hud_entrance(ctx, 0.024F, 0.160F, 7.0F, 0.60F);
                 mu_begin_panel(ctx, "Categories");
                 mu_layout_row(ctx, 1, (int[]) {-1}, 0);
 
@@ -6130,6 +6230,7 @@ static void hud_settings_render(mu_Context* ctx, float scalex, float scaley) {
                 };
                 int cat_count = sizeof(cat_names) / sizeof(cat_names[0]);
 
+                int previous_category = selected_category;
                 for(int i = 0; i < cat_count; i++) {
                         if(selected_category == i) {
                                 mu_Color old_border = ctx->style->colors[MU_COLOR_BORDER];
@@ -6149,7 +6250,18 @@ static void hud_settings_render(mu_Context* ctx, float scalex, float scaley) {
 
                 mu_end_panel(ctx);
 
+                if(filter_changed || previous_category != selected_category) {
+                        mu_reset_scroll(mu_get_container(ctx, "Settings"));
+                        if(!filter_changed && !settings_search_active() && !ctx->reduced_motion) {
+                                ctx->local_active = 1;
+                                ctx->local_start = ctx->time;
+                                ctx->local_id = 0;
+                        }
+                }
+                hud_entrance(ctx, 0.030F, 0.160F, 4.0F, 0.75F);
                 mu_begin_panel(ctx, "Settings");
+                int motion_row = 0;
+                hud_settings_row_motion(ctx, motion_row++, 0);
 
                 int width = mu_get_current_container(ctx)->body.w;
 
@@ -6189,8 +6301,10 @@ static void hud_settings_render(mu_Context* ctx, float scalex, float scaley) {
                            category or subcategory, for one-tap access. */
                         for(int k = 0; k < list_size(&config_settings); k++) {
                                 struct config_setting* a = list_get(&config_settings, k);
-                                if(!SHOULD_SKIP(a) && settings_search_matches(a))
+                                if(!SHOULD_SKIP(a) && settings_search_matches(a)) {
+                                        hud_settings_row_motion(ctx, motion_row++, 0);
                                         render_setting_row(ctx, a, width);
+                                }
                         }
                 } else {
                 /* Pass 1: settings with no subcategory */
@@ -6200,6 +6314,7 @@ static void hud_settings_render(mu_Context* ctx, float scalex, float scaley) {
                                 continue;
                         if(a->subcategory[0] != 0)
                                 continue; /* skip subcategorized settings — handled in pass 2 */
+                        hud_settings_row_motion(ctx, motion_row++, 0);
                         render_setting_row(ctx, a, width);
                 }
 
@@ -6231,8 +6346,18 @@ static void hud_settings_render(mu_Context* ctx, float scalex, float scaley) {
                         num_seen++;
                         if(num_seen >= 32) break;
 
-                        /* Render the dropdown header (highlighted) */
+                        hud_settings_row_motion(ctx, motion_row++, 0);
+                        /* A layout column grows with its children and doesn't
+                           introduce a second scrolling container. */
                         mu_layout_row(ctx, 1, (int[]) {-1}, 0);
+                        mu_layout_begin_column(ctx);
+                        mu_Rect section_rect = ctx->last_rect;
+                        mu_Layout* section_layout = &ctx->layout_stack.items[ctx->layout_stack.idx - 1];
+                        int inset = max(2, ctx->style->padding);
+                        section_layout->next_row = 2;
+                        section_layout->body.x += inset;
+                        section_layout->body.w = max(1, section_layout->body.w - 2 * inset);
+                        mu_push_id(ctx, &selected_category, sizeof(selected_category));
 
                         /* Highlight the treenode header with accent color */
                         mu_Color old_border = ctx->style->colors[MU_COLOR_BORDER];
@@ -6247,6 +6372,14 @@ static void hud_settings_render(mu_Context* ctx, float scalex, float scaley) {
                         ctx->style->colors[MU_COLOR_TEXT] = old_text;
                         ctx->style->colors[MU_COLOR_BORDER] = old_border;
 
+                        /* The treenode reports its pre-click state this frame. */
+                        mu_Id section = ctx->last_id;
+                        if(!expanded && !ctx->reduced_motion && ctx->mouse_pressed == MU_MOUSE_LEFT
+                           && ctx->focus == section) {
+                                ctx->local_active = 1;
+                                ctx->local_start = ctx->time;
+                                ctx->local_id = section;
+                        }
                         if(expanded) {
                                 /* Render all settings in this subcategory */
                                 for(int j = 0; j < list_size(&config_settings); j++) {
@@ -6255,14 +6388,28 @@ static void hud_settings_render(mu_Context* ctx, float scalex, float scaley) {
                                                 continue;
                                         if(strcmp(b->subcategory, a->subcategory) != 0)
                                                 continue;
-                                        render_setting_row(ctx, b, width);
+                                        hud_settings_row_motion(ctx, motion_row++, section);
+                                        render_setting_row(ctx, b, section_layout->body.w);
                                 }
                                 mu_end_treenode(ctx);
+                                /* Leave space after the final child before the
+                                   following header and draw a quiet outline. */
+                                int tail = max(1, (int)ceilf(8.0F * hud_ui_scale()) - ctx->style->spacing + 1);
+                                section_rect.h = section_layout->next_row + tail;
+                                mu_layout_row(ctx, 1, (int[]) {-1}, tail);
+                                mu_layout_next(ctx);
+                                mu_paint_reset(ctx);
+                                accent.a = 140;
+                                mu_draw_surface(ctx, section_rect, mu_color(0, 0, 0, 0),
+                                                accent, ctx->style->corner_radius, 0);
                         }
+                        mu_pop_id(ctx);
+                        mu_layout_end_column(ctx);
                 }
                 } /* !settings_search_active() */
 
                 #undef SHOULD_SKIP
+                mu_paint_reset(ctx);
 
                 mu_end_panel(ctx);
 
@@ -6288,7 +6435,7 @@ static void hud_settings_touch(void* finger, int action, float x, float y, float
         (void)finger;
         window_setmouseloc(x, y);
         if(action == TOUCH_MOVE && hud_settings.ctx)
-                mu_input_scroll(hud_settings.ctx, 0, (int)(-dy));
+                mu_input_scroll_direct(hud_settings.ctx, 0, -dy);
 }
 
 struct hud hud_settings = {
@@ -6321,8 +6468,7 @@ static int skins_selected_entry[SKIN_CATEGORIES] = {0, 0, 0, 0, 0, 0, 0, 0};
    the "models look dim / are behind the background" bug). The cells are
    collected below and drawn by hud_skins_render_overlay(), which main.c runs
    after the last microui command. */
-static int skins_preview_cells_x[256];
-static int skins_preview_cells_y[256];
+static mu_Rect skins_preview_area[256];
 static int skins_preview_cat[256];
 static int skins_preview_ent[256];
 /* Per-preview scissor box in microui coordinates (origin top-left, y down): the
@@ -6386,7 +6532,9 @@ static void hud_skins_render(mu_Context* ctx, float scalex, float scaley) {
 
                 hud_common_sidebar(ctx, scalex, scaley);
 
+                hud_entrance(ctx, 0.0F, 0.160F, 4.0F, 0.75F);
                 mu_begin_panel(ctx, "Content");
+                hud_entrance(ctx, 0.020F, 0.165F, 7.0F, 0.65F);
 
                 mu_layout_row(ctx, 2, (int[]) {150, -1}, -1);
 
@@ -6413,6 +6561,8 @@ static void hud_skins_render(mu_Context* ctx, float scalex, float scaley) {
 
                 mu_end_panel(ctx);
 
+                /* Preview models are drawn in a separate pass with their own scissors. */
+                mu_paint_reset(ctx);
                 mu_begin_panel(ctx, "Skins");
                 struct skin_category* cat = &skin_categories[skins_selected_category];
 
@@ -6495,14 +6645,9 @@ static void hud_skins_render(mu_Context* ctx, float scalex, float scaley) {
                                         mu_draw_control_text(ctx, cat->entries[i].name, name_rect, MU_COLOR_TEXT, MU_OPT_ALIGNCENTER);
                                         ctx->style->colors[MU_COLOR_TEXT] = old_text;
 
-                                        /* The part of the cell above the name strip. The model is
-                                           centred at 40% of its height (y is measured from the top
-                                           here, converted to GL's bottom-left origin below) and is
-                                           sized to fit, so this box is what the preview may use. */
-                                        int model_area_h = r.h - name_overlay_h;
-
-                                        skins_preview_cells_x[skins_preview_cell_count] = r.x + r.w / 2;
-                                        skins_preview_cells_y[skins_preview_cell_count] = settings.window_height - (r.y + model_area_h * 0.4F);
+                                        /* Frame against the full thumbnail, not its scrolled intersection. */
+                                        int model_area_h = max(0, r.h - name_overlay_h);
+                                        skins_preview_area[skins_preview_cell_count] = mu_rect(r.x, r.y, r.w, model_area_h);
                                         skins_preview_cat[skins_preview_cell_count] = skins_selected_category;
                                         skins_preview_ent[skins_preview_cell_count] = i;
                                         /* mu_get_clip_rect() is the Skins panel body (already
@@ -6587,9 +6732,10 @@ static void hud_skins_render_overlay(float scalex, float scaley) {
                    conversion main.c applies to MU_COMMAND_CLIP. */
                 glScissor(c.x, settings.window_height - (c.y + c.h), c.w, c.h);
 
+                mu_Rect area = skins_preview_area[k];
                 skins_render_preview(skins_preview_cat[k], skins_preview_ent[k],
-                        skins_preview_cells_x[k], skins_preview_cells_y[k],
-                        100.0F * scalex);
+                        area.x + area.w * 0.5F, settings.window_height - (area.y + area.h * 0.5F),
+                        100.0F * scalex, area.w, area.h);
         }
 
         glDisable(GL_SCISSOR_TEST);
@@ -6670,7 +6816,9 @@ static void hud_demolist_render(mu_Context* ctx, float scalex, float scaley) {
                 mu_Container* cnt = mu_get_current_container(ctx);
                 cnt->rect = frame;
                 hud_common_sidebar(ctx, scalex, scaley);
+                hud_entrance(ctx, 0.0F, 0.160F, 4.0F, 0.75F);
                 mu_begin_panel(ctx, "Content");
+                hud_entrance(ctx, 0.020F, 0.165F, 7.0F, 0.65F);
                 int rb = ctx->text_width(ctx->style->font, "Refresh", 0) * 1.6F;
                 mu_layout_row(ctx, 2, (int[]) {-rb, -1}, 0);
                 char count_str[64];
@@ -6726,7 +6874,9 @@ static void hud_demolist_render(mu_Context* ctx, float scalex, float scaley) {
                                 0, MU_OPT_NOFRAME|MU_OPT_ALIGNCENTER|MU_OPT_NOINTERACT);
                 }
                 mu_end_panel(ctx);
-                mu_end_panel(ctx); mu_end_window(ctx);
+                mu_end_panel(ctx);
+                mu_paint_reset(ctx);
+                mu_end_window(ctx);
         }
 
         /* --- Delete confirm dialog --- */
@@ -6815,7 +6965,9 @@ static void hud_controls_render(mu_Context* ctx, float scalex, float scaley) {
 
                 hud_common_sidebar(ctx, scalex, scaley);
 
+                hud_entrance(ctx, 0.0F, 0.160F, 4.0F, 0.75F);
                 mu_begin_panel(ctx, "ControlsContent");
+                hud_entrance(ctx, 0.020F, 0.165F, 7.0F, 0.65F);
 
                 mu_layout_row(ctx, 1, (int[]) {-1}, -1);
 
@@ -6889,6 +7041,7 @@ static void hud_controls_render(mu_Context* ctx, float scalex, float scaley) {
 
                 mu_end_panel(ctx);
 
+                mu_paint_reset(ctx);
                 mu_end_window(ctx);
         }
 }
@@ -6937,7 +7090,7 @@ static void hud_macros_touch(void* finger, int action, float x, float y, float d
         (void)finger;
         window_setmouseloc(x, y);
         if(action == TOUCH_MOVE && hud_macros.ctx)
-                mu_input_scroll(hud_macros.ctx, 0, (int)(-dy));
+                mu_input_scroll_direct(hud_macros.ctx, 0, -dy);
 }
 
 static void hud_macros_keyboard(int key, int action, int mods, int internal) {
@@ -6961,7 +7114,9 @@ static void hud_macros_render(mu_Context* ctx, float scalex, float scaley) {
                 mu_Container* cnt = mu_get_current_container(ctx);
                 cnt->rect = frame;
                 hud_common_sidebar(ctx, scalex, scaley);
+                hud_entrance(ctx, 0.0F, 0.160F, 4.0F, 0.75F);
                 mu_begin_panel(ctx, "Content");
+                hud_entrance(ctx, 0.020F, 0.165F, 7.0F, 0.65F);
                 mu_layout_row(ctx, 1, (int[]) {-1}, 0);
                 if(mu_button(ctx, "+ Add macro")) {
                         struct config_macro new_macro = {0};
@@ -6971,18 +7126,16 @@ static void hud_macros_render(mu_Context* ctx, float scalex, float scaley) {
                 }
                 mu_layout_row(ctx, 1, (int[]) {-1}, -1);
                 mu_begin_panel(ctx, "MacrosList");
-                int width = mu_get_current_container(ctx)->body.w;
+                /* The scrollbar-adjusted body still includes both padding gutters. */
+                int width = mu_get_current_container(ctx)->body.w - 2 * ctx->style->padding;
                 int spacing = ctx->style->spacing;
-                int del_w = (int)(ctx->text_width(ctx->style->font, "x", 0) * 2.0F);
-                int key_w = (int)(ctx->text_width(ctx->style->font, "Unbound", 0) + ctx->style->padding * 2);
-                int col2_total = key_w + del_w;
-                if(col2_total > width * 0.35F) {
-                        col2_total = (int)(width * 0.35F);
-                        key_w = col2_total - del_w;
-                }
-                int col1_w = width - col2_total - spacing * 2;
-                if(col1_w < 1) col1_w = 1;
-                mu_layout_row(ctx, 2, (int[]) {col1_w, col2_total}, 0);
+                int columns_w = max(3, width - 2 * spacing);
+                int trailing_w = max(2, (int)(columns_w * 0.35F));
+                int del_w = min(trailing_w - 1, max(1, ctx->text_width(ctx->style->font, "x", 0) * 2));
+                int key_w = min(trailing_w - del_w,
+                                max(1, ctx->text_width(ctx->style->font, "Unbound", 0) + ctx->style->padding * 2));
+                int col1_w = columns_w - key_w - del_w;
+                mu_layout_row(ctx, 2, (int[]) {col1_w, key_w + spacing + del_w}, 0);
                 mu_button_ex(ctx, "String", 0, MU_OPT_ALIGNCENTER);
                 mu_button_ex(ctx, "Keybind", 0, MU_OPT_ALIGNCENTER);
                 for(int k = 0; k < list_size(&config_macros); k++) {
@@ -7015,6 +7168,7 @@ static void hud_macros_render(mu_Context* ctx, float scalex, float scaley) {
                 }
                 mu_end_panel(ctx);
                 mu_end_panel(ctx);
+                mu_paint_reset(ctx);
                 mu_end_window(ctx);
         }
 }
@@ -7050,7 +7204,9 @@ static void hud_recording_render(mu_Context* ctx, float scalex, float scaley) {
                 mu_Container* cnt = mu_get_current_container(ctx);
                 cnt->rect = frame;
                 hud_common_sidebar(ctx, scalex, scaley);
+                hud_entrance(ctx, 0.0F, 0.160F, 4.0F, 0.75F);
                 mu_begin_panel(ctx, "Content");
+                hud_entrance(ctx, 0.020F, 0.165F, 7.0F, 0.65F);
                 mu_layout_row(ctx, 1, (int[]) {-1}, 0);
 
                 mu_text(ctx, "Video Recording");
@@ -7104,6 +7260,7 @@ static void hud_recording_render(mu_Context* ctx, float scalex, float scaley) {
                 mu_layout_row(ctx, 1, (int[]) {-1}, -1);
 
                 mu_end_panel(ctx);
+                mu_paint_reset(ctx);
                 mu_end_window(ctx);
         }
 }
@@ -7132,7 +7289,9 @@ static void hud_replay_render(mu_Context* ctx, float scalex, float scaley) {
                 mu_Container* cnt = mu_get_current_container(ctx);
                 cnt->rect = frame;
                 hud_common_sidebar(ctx, scalex, scaley);
+                hud_entrance(ctx, 0.0F, 0.160F, 4.0F, 0.75F);
                 mu_begin_panel(ctx, "Content");
+                hud_entrance(ctx, 0.020F, 0.165F, 7.0F, 0.65F);
                 mu_layout_row(ctx, 1, (int[]) {-1}, 0);
 
                 mu_text(ctx, "Replay Settings");
@@ -7183,6 +7342,7 @@ static void hud_replay_render(mu_Context* ctx, float scalex, float scaley) {
 
                 mu_layout_row(ctx, 1, (int[]) {-1}, -1);
                 mu_end_panel(ctx);
+                mu_paint_reset(ctx);
                 mu_end_window(ctx);
         }
 }

@@ -59,7 +59,7 @@ int main(int argc,char**argv){
  settings.camera_fov=90;settings.rifle_ads_fov=70;settings.smg_ads_fov=60;settings.shotgun_ads_fov=40;
  players[0].alive=1;players[0].held_item=TOOL_GUN;players[0].input.buttons.rmb=1;
  camera_ads_update(.016f);assert(camera_ads_progress==1 && camera_ads_scope_progress==1);
- assert(fabsf(camera_fov_scaled(0)-38.590f)<.02f);
+ assert(fabsf(camera_fov_scaled(0)-38.590f)<.02f && camera_viewmodel_fov()==90);
  settings.smg_ads_fov=60;players[0].weapon=WEAPON_SMG;assert(fabsf(camera_fov_scaled(0)-32.204f)<.02f);
  players[0].input.keys.sprint=1;camera_ads_update(.016f);assert(!camera_ads_progress && !camera_ads_scope_progress);
  settings.free_aim=1;settings.free_aim_deadzone_v=30;camera_rot_y=2.5f;camera_crosshair_rot_y=2.5f;

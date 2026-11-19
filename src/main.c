@@ -33,6 +33,7 @@
 #include <math.h>
 #include <limits.h>
 
+#include "aimtrainer.h"
 #include "lodepng/lodepng.h"
 #include "common.h"
 #include "file.h"
@@ -577,6 +578,12 @@ static void profiler_draw_overlay(void) {
 
         glColor4f(saved_color[0], saved_color[1], saved_color[2], saved_color[3]);
         glDisable(GL_BLEND);
+}
+
+static void hud_emit_surface_strip(void* user, float x, float y, float w, float h, mu_Color color) {
+        (void)user;
+        glColor4ub(color.r, color.g, color.b, color.a);
+        glx_draw_quad_2d(x, settings.window_height - y, w, h);
 }
 
 void display() {
@@ -1416,12 +1423,24 @@ void display() {
 				   player models (incl. the FPV gun block above) were not -
 				   that mismatch was the movement judder. */
 				player_render_interpolate_begin();
-				if(hud_active->render_localplayer) {
+				if(hud_active->render_localplayer && cameracontroller_third_person_rendering()) {
+                                        /* The chase avatar uses ordinary world depth and lighting. */
+                                        player_render(&players[local_player_id], local_player_id);
+                                } else if(hud_active->render_localplayer) {
                                         float tmp2 = players[local_player_id].physics.eye.y;
                                         players[local_player_id].physics.eye.y = last_cy;
                                         if(camera_mode == CAMERAMODE_FPS)
                                                 glDepthRange(0.0F, 0.05F);
                                         matrix_push(matrix_projection);
+                                        /* Zoom the world, not the weapon and hands. A narrow ADS
+                                           frustum can otherwise crop the whole viewmodel. */
+                                        if(camera_mode == CAMERAMODE_FPS && !settings.iron_sight
+                                           && camera_ads_progress > 0.0F) {
+                                                matrix_identity(matrix_projection);
+                                                matrix_perspective(matrix_projection, camera_viewmodel_fov(),
+                                                        (float)settings.window_width / settings.window_height, 0.1F,
+                                                        settings.render_distance + CHUNK_SIZE * 4.0F);
+                                        }
                                         matrix_translate(matrix_projection, 0.0F, -0.25F, 0.0F);
                                         matrix_upload_p();
 #ifdef GLX_PROGRAMMABLE
@@ -1748,6 +1767,9 @@ void display() {
                         hud_active->ctx->style->scrollbar_size = (int)(12 * us);
                         hud_active->ctx->style->thumb_size = (int)(8 * us);
 
+                        ctx->style->corner_radius = (int)(4 * us + 0.5F);
+                        ctx->time = window_time();
+                        ctx->reduced_motion = settings.ui_reduced_motion;
                         mu_begin(ctx);
                 }
 
@@ -1757,15 +1779,17 @@ void display() {
                         mu_end(ctx);
                         hud_ime_update();
 
+                        glx_batch2d_flush();
                         glEnable(GL_BLEND);
                         glEnable(GL_SCISSOR_TEST);
+                        glScissor(0, 0, settings.window_width, settings.window_height);
                         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
                         mu_Command* cmd = NULL;
                         while(mu_next_command(ctx, &cmd)) {
                                 switch(cmd->type) {
                                         case MU_COMMAND_TEXT:
                                                 glColor4ub(cmd->text.color.r, cmd->text.color.g, cmd->text.color.b, cmd->text.color.a);
-                                                font_render(cmd->text.pos.x, settings.window_height - cmd->text.pos.y,
+                                                font_render(cmd->text.pos.x, settings.window_height - cmd->text.pos.y - cmd->text.offset_y,
                                                                         ctx->text_height(cmd->text.font), cmd->text.str);
                                                 glEnable(GL_BLEND);
                                                 break;
@@ -1773,6 +1797,9 @@ void display() {
                                                 glColor4ub(cmd->rect.color.r, cmd->rect.color.g, cmd->rect.color.b, cmd->rect.color.a);
                                                 texture_draw_empty(cmd->rect.rect.x, settings.window_height - cmd->rect.rect.y,
                                                                                    cmd->rect.rect.w, cmd->rect.rect.h);
+                                                break;
+                                        case MU_COMMAND_SURFACE:
+                                                mu_render_surface(&cmd->surface, hud_emit_surface_strip, NULL);
                                                 break;
                                         case MU_COMMAND_ICON:
                                                 glColor4ub(cmd->icon.color.r, cmd->icon.color.g, cmd->icon.color.b, cmd->icon.color.a);
@@ -1783,7 +1810,7 @@ void display() {
                                                         texture_flag_offset(cmd->icon.id - HUD_FLAG_INDEX_START, &u, &v);
 
                                                         texture_draw_sector(&texture_ui_flags, cmd->icon.rect.x,
-                                                                                                settings.window_height - cmd->icon.rect.y - size * 0.167F, size,
+                                                                                                settings.window_height - cmd->icon.rect.y - cmd->icon.offset_y - size * 0.167F, size,
                                                                                                 size * 0.667F, u, v, 18.0F / 256.0F, 12.0F / 256.0F);
                                                         glEnable(GL_BLEND);
                                                 } else if(hud_active->ui_images) {
@@ -1791,7 +1818,7 @@ void display() {
                                                         struct texture* img = hud_active->ui_images(cmd->icon.id, &resize);
 
                                                         if(img) {
-                                                                texture_draw(img, cmd->icon.rect.x, settings.window_height - cmd->icon.rect.y,
+                                                                texture_draw(img, cmd->icon.rect.x, settings.window_height - cmd->icon.rect.y - cmd->icon.offset_y,
                                                                                          resize ? size : cmd->icon.rect.w, resize ? size : cmd->icon.rect.h);
                                                                 glEnable(GL_BLEND);
                                                         }
@@ -1799,11 +1826,13 @@ void display() {
 
                                                 break;
                                         case MU_COMMAND_CLIP:
+                                                glx_batch2d_flush();
                                                 glScissor(cmd->clip.rect.x, settings.window_height - (cmd->clip.rect.y + cmd->clip.rect.h),
                                                                   cmd->clip.rect.w, cmd->clip.rect.h);
                                                 break;
                                 }
                         }
+                        glx_batch2d_flush();
                         glDisable(GL_BLEND);
                         glDisable(GL_SCISSOR_TEST);
                 }
@@ -2644,7 +2673,6 @@ int main(int argc, char** argv) {
         log_info("Game started!");
         log_info("KyroSpades %s %s", KYROSPADES_VERSION, BS_VER_INFO);
 
-        settings.iron_sight = 1;
         settings.replay_enabled = -1;
 
         /* ── Command line ─────────────────────────────────────────────────────
@@ -2805,6 +2833,8 @@ int main(int argc, char** argv) {
                    used: network service, physics, camera and display below all
                    work from the state polled here. */
                 window_poll();
+                hud_process_aimtrainer_request();
+                aimtrainer_update_clock();
                 if(window_closed())
                         break;
 
@@ -2844,6 +2874,8 @@ int main(int argc, char** argv) {
                                            partial-tick render interpolation */
                                         player_snapshot_prev();
                                         player_update(PHYSICS_STEP_TIME, 1);
+                                        if(hud_active == &hud_ingame)
+                                                aimtrainer_tick(PHYSICS_STEP_TIME);
                                         grenade_update(PHYSICS_STEP_TIME);
                                 }
                         }

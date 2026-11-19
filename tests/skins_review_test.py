@@ -101,16 +101,17 @@ with tempfile.TemporaryDirectory() as d:
  p=Path(d);(p/'scan.c').write_text(scan_stub+scan+scan_check)
  subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror','-fsanitize=undefined','-fno-sanitize-recover=all',str(p/'scan.c'),'-o',str(p/'scan')],check=True)
  subprocess.run([str(p/'scan')],check=True)
-preview=s[s.index('void skins_render_preview('):s.index('\nvoid skins_init(')]
+preview=s[s.index('#define SKINS_PREVIEW_PITCH'):s.index('\nvoid skins_init(')]
 preview_stub=r'''
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 typedef float mat4[16];mat4 matrix_model,matrix_view,matrix_projection;
 enum skin_category_type {SKIN_PLAYER,SKIN_INTEL,SKIN_TENT,SKIN_RIFLE};
 enum {SKIN_PLAYER_HEAD,SKIN_PLAYER_TORSO,SKIN_PLAYER_TORSO_CROUCH,SKIN_PLAYER_ARMS,SKIN_PLAYER_LEG,SKIN_PLAYER_LEG_CROUCH,SKIN_PLAYER_DEAD,SKIN_PLAYER_MODEL_COUNT};
 #define SKIN_CATEGORIES 4
-struct kv6_t {float xpiv,ypiv,zpiv,scale;};struct skin_entry {struct kv6_t* previews;};
+struct kv6_t {int xsiz,ysiz,zsiz;float xpiv,ypiv,zpiv,scale;};struct skin_entry {struct kv6_t* previews;};
 struct skin_category {int count,model_count;struct skin_entry* entries;} skin_categories[4];
 struct {int window_width,window_height;} settings={800,600};
 float window_time(void){return 1;}
@@ -124,12 +125,30 @@ void matrix_push(float*p){(void)p;}void matrix_pop(float*p){(void)p;}
 int drawn;void kv6_render(struct kv6_t*p,int team){(void)p;(void)team;assert(matrix_view[0]==1);drawn++;}
 '''
 preview_check=r'''
-int main(void){struct kv6_t models[7]={0};struct skin_entry e={models};skin_categories[0]=(struct skin_category){1,7,&e};
- matrix_model[0]=11;matrix_projection[0]=22;matrix_view[0]=33;skins_render_preview(SKIN_PLAYER,0,0,0,1);
+int main(void){
+ struct kv6_t sword={12,3,180,0,0,0,0.05f};
+ struct kv6_t wide={170,40,12,0,0,0,0.05f};
+ struct kv6_t small={4,4,4,0,0,0,0.05f};
+ assert(skins_preview_fit(&small,100,200,200)==100);
+ assert(skins_preview_fit(&sword,100,200,100)<11);
+ assert(skins_preview_fit(&wide,100,100,200)<11);
+ for(int a=0;a<360;a+=5) {
+  float yaw=a*3.14159265f/180, pitch=SKINS_PREVIEW_PITCH*3.14159265f/180;
+  float fit=skins_preview_fit(&sword,100,200,100);
+  for(int x=-1;x<=1;x+=2) for(int y=-1;y<=1;y+=2) for(int z=-1;z<=1;z+=2) {
+   float u=x*sword.xsiz*0.025f,v=y*sword.zsiz*0.025f,w=z*sword.ysiz*0.025f;
+   float pitched_y=v*cosf(pitch)-w*sinf(pitch), pitched_z=v*sinf(pitch)+w*cosf(pitch);
+   assert(fabsf(fit*(u*cosf(yaw)+pitched_z*sinf(yaw)))<=90.001f);
+   assert(fabsf(fit*pitched_y)<=45.001f);
+   assert(fabsf(fit*(-u*sinf(yaw)+pitched_z*cosf(yaw)))<=95.001f);
+  }
+ }
+ struct kv6_t models[7]={0};struct skin_entry e={models};skin_categories[0]=(struct skin_category){1,7,&e};
+ matrix_model[0]=11;matrix_projection[0]=22;matrix_view[0]=33;skins_render_preview(SKIN_PLAYER,0,0,0,1,100,100);
  assert(drawn==4&&matrix_model[0]==11&&matrix_projection[0]==22&&matrix_view[0]==33);
- skins_render_preview(SKIN_PLAYER,7,0,0,1);assert(drawn==4&&matrix_view[0]==33);puts("preview view isolation passed");}
+ skins_render_preview(SKIN_PLAYER,7,0,0,1,100,100);assert(drawn==4&&matrix_view[0]==33);puts("preview view isolation passed");}
 '''
 with tempfile.TemporaryDirectory() as d:
  p=Path(d);(p/'preview.c').write_text(preview_stub+preview+preview_check)
- subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror',str(p/'preview.c'),'-o',str(p/'preview')],check=True)
+ subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror',str(p/'preview.c'),'-lm','-o',str(p/'preview')],check=True)
  subprocess.run([str(p/'preview')],check=True)

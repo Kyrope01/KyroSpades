@@ -180,6 +180,7 @@ download_file_if_it_doesnt_exist(../bsresources.zip http://aos.party/bsresources
 list(APPEND CLIENT_SOURCES aabb.c)
 list(APPEND CLIENT_SOURCES camera.c)
 list(APPEND CLIENT_SOURCES cameracontroller.c)
+list(APPEND CLIENT_SOURCES aimtrainer.c)
 list(APPEND CLIENT_SOURCES chunk.c)
 list(APPEND CLIENT_SOURCES config.c)
 list(APPEND CLIENT_SOURCES dr_wav.c)
