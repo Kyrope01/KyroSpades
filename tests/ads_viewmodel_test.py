@@ -4,6 +4,11 @@ from subprocess import run
 from tempfile import TemporaryDirectory
 
 root = Path(__file__).resolve().parents[1]
+config = (root / 'src/config.c').read_text()
+assert '.iron_sight = 0' in config
+assert 'IMPORT_SETTING(settings.iron_sight, iron_sight,' not in config
+assert 'IMPORT_SETTING(settings.iron_sight, iron_sight_opt_in, atoi(value) != 0)' in config
+assert 'config_seti("client", "iron_sight_opt_in", settings.iron_sight)' in config
 player = (root / 'src/player.c').read_text()
 start = player.index('int local_fpv = render_fpv')
 end = player.index('// Render body parts', start)
