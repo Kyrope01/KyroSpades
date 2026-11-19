@@ -613,7 +613,7 @@ void display() {
                                   || outlines_postproc
                                   || damagefx_vignette() > 0.003F));
         if(needs_postproc && postproc.target_failed) {
-                if(postproc.w == settings.window_width && postproc.h == settings.window_height
+                if(postproc.w == settings.window_width && postproc.h == settings.window_height) {
                         /* Do not hammer a driver with the same failed allocation
                            every frame. Resizing permits one retry. */
                         needs_postproc = 0;
