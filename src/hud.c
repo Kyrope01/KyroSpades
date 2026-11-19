@@ -1921,14 +1921,15 @@ static float hud_join_glow_fold(float along, float depth, float time, float phas
 }
 
 static void hud_join_edge_glow(void) {
+        if(settings.ui_reduced_motion)
+                return;
         static int previous_frame = -2;
         static unsigned char pixels[JOIN_GLOW_SIZE * JOIN_GLOW_SIZE * 4];
-        const bool steady = settings.ui_reduced_motion;
-        const int frame = steady ? -1 : (int)(window_time() * 24.0F);
+        const int frame = (int)(window_time() * 24.0F);
         glx_batch2d_flush();
         if(!join_glow.texture_id || frame != previous_frame) {
-                float time = steady ? 0.0F : frame * (0.58F / 24.0F);
-                float pulse = steady ? 1.0F : 1.0F + 0.09F * sinf(time * 3.2F);
+                float time = frame * (0.58F / 24.0F);
+                float pulse = 1.0F + 0.09F * sinf(time * 3.2F);
                 for(int j = 0; j < JOIN_GLOW_SIZE; ++j) {
                         float v = (j + 0.5F) / JOIN_GLOW_SIZE;
                         for(int i = 0; i < JOIN_GLOW_SIZE; ++i) {
@@ -1961,8 +1962,7 @@ static void hud_join_edge_glow(void) {
                 }
                 previous_frame = frame;
         }
-        mu_Color accent = steady ? mu_color(settings.ui_accent_r, settings.ui_accent_g, settings.ui_accent_b, 255)
-                                 : mu_accent_color(1.0F, 255);
+        mu_Color accent = mu_accent_color(1.0F, 255);
         GLboolean blended = glIsEnabled(GL_BLEND);
         glColor4ub(accent.r, accent.g, accent.b, 255);
         texture_draw(&join_glow, 0, settings.window_height, settings.window_width, settings.window_height);
