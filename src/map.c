@@ -41,7 +41,7 @@
 #include "config.h"
 #include "daytime_weather.h"
 #include "lighting.h"
-#include "aimtrainer.h"
+#include "file.h"
 #include "water.h"
 #include "glowing_blocks.h"
 #include "channel.h"
@@ -864,32 +864,12 @@ void map_vxl_load(void* v, size_t size) {
 }
 
 bool map_load_aimtrainer(void) {
-        /* A final VXL span per column: air above, colored solid below. */
-        const int side = AIMTRAINER_MAP_SIZE;
-        unsigned char* bytes = malloc((size_t)side * side * (AIMTRAINER_GROUND + 2) * 4);
-        if(!bytes)
+        size_t size;
+        unsigned char* data = file_load_sized("maps/shot0560.vxl", &size);
+        if(!data)
                 return false;
-        unsigned char* out = bytes;
-        for(int z = 0; z < side; ++z) {
-                for(int x = 0; x < side; ++x) {
-                        int d = aimtrainer_column_distance(x, z);
-                        bool moat = d > AIMTRAINER_PLATFORM_RADIUS
-                                && d <= AIMTRAINER_PLATFORM_RADIUS + AIMTRAINER_MOAT_WIDTH;
-                        int y = moat ? 0 : AIMTRAINER_GROUND;
-                        *out++ = 0;
-                        *out++ = 63 - y;
-                        *out++ = 63;
-                        *out++ = 0;
-                        for(int level = y; level >= 0; --level) {
-                                *out++ = moat ? 180 : (d == 0 && level == y ? 0 : 50); /* B */
-                                *out++ = moat ? 95 : (d == 0 && level == y ? 0 : 50); /* G */
-                                *out++ = d == 0 && level == y ? 255 : 50; /* R */
-                                *out++ = 127;
-                        }
-                }
-        }
-        bool loaded = map_replace_vxl(bytes, (size_t)(out - bytes));
-        free(bytes);
+        bool loaded = size > 0 && map_replace_vxl(data, size);
+        free(data);
         return loaded;
 }
 

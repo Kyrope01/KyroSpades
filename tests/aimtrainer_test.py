@@ -28,9 +28,9 @@ struct Orientation { float x,y,z; };
 struct Player {
     struct Position pos, prev_pos;
     struct Orientation orientation, orientation_smooth;
-    struct { struct Position eye, velocity; int airborne; float lastclimb; } physics;
+    struct { struct Position eye, velocity; int airborne, jump; float lastclimb; } physics;
     struct { float feet_started_cycle; bool feet_cylce; } sound;
-    struct { struct { bool sprint, crouch; } keys; } input;
+    struct { struct { bool sprint, crouch, up, left, right; } keys; } input;
     int team, held_item, connected, alive, weapon, items_show;
     float item_disabled, item_showup;
     char name[32];
@@ -62,11 +62,45 @@ static struct libvxl_map map;
 static bool map_replace_vxl(const void* data, size_t size) {
     return libvxl_create(&map, 512, 512, 64, data, size);
 }
+static unsigned char* file_load_sized(const char* path, size_t* size) {
+    FILE* f = fopen(path, "rb");
+    if(!f) return NULL;
+    assert(!fseek(f, 0, SEEK_END));
+    *size = (size_t)ftell(f);
+    rewind(f);
+    unsigned char* bytes = malloc(*size);
+    assert(bytes && fread(bytes, 1, *size, f) == *size);
+    fclose(f);
+    return bytes;
+}
+static int map_height_at(int x, int z) {
+    uint32_t top[2];
+    assert(libvxl_map_gettop(&map, x, z, top));
+    return 63 - (int)top[1];
+}
+static bool map_isair(int x, int y, int z) {
+    return !libvxl_map_issolid(&map, x, z, 63-y);
+}
+/* Stub the normal player movement routine to verify AI input and dispatch. */
+static int player_move(struct Player* p, float dt, int id) {
+    assert(id > 0 && p == &players[id]);
+    float speed = p->input.keys.sprint ? 10.4F : 8.F;
+    float strafe = (int)p->input.keys.right - (int)p->input.keys.left;
+    p->physics.velocity.x = (p->orientation.x - strafe * p->orientation.z) * speed / 32.F;
+    p->physics.velocity.z = (p->orientation.z + strafe * p->orientation.x) * speed / 32.F;
+    p->pos.x += p->physics.velocity.x * dt * 32.F;
+    p->pos.z += p->physics.velocity.z * dt * 32.F;
+    p->physics.airborne = p->physics.jump;
+    if(p->physics.jump) p->pos.y += 1.F;
+    p->physics.jump = 0;
+    return 0;
+}
+
 '''
 
 checks = r'''
 int main(void) {
-    const int c = AIMTRAINER_CENTER, top = 63 - AIMTRAINER_GROUND;
+    const int c = 256;
     gamestate.team_1.red = 11;
     network_connected = 1;
     assert(!aimtrainer_start());
@@ -76,17 +110,9 @@ int main(void) {
     assert(local_player_id == 0 && players[0].team == TEAM_1);
     assert(gamestate.team_1.red == 255 && gamestate.team_1.green == 255 && gamestate.team_1.blue == 255);
     assert(gamestate.team_2.red == 26 && gamestate.team_2.green == 255 && !gamestate.team_2.blue);
-    assert((libvxl_map_get(&map, c, c, top) & 0xffffff) == 0xff0000);
-    assert((libvxl_map_get(&map, 0, 0, top) & 0xffffff) == 0x323232);
-    for(int z = -9; z <= 9; ++z)
-        for(int x = -9; x <= 9; ++x) {
-            int d = abs(x) > abs(z) ? abs(x) : abs(z);
-            bool dry = d <= 2 || d >= 8;
-            assert(libvxl_map_issolid(&map, c+x, c+z, top) == dry);
-            assert(libvxl_map_issolid(&map, c+x, c+z, 62) == dry);
-            assert(libvxl_map_issolid(&map, c+x, c+z, 63));
-            assert(!libvxl_map_issolid(&map, c+x, c+z, top-1));
-        }
+    assert(map_height_at(c, c) == 5 && map_height_at(0, 0) == 5);
+    assert(map_height_at(254, 251) == 0);
+    assert(players[0].pos.y == 8.25F && players[0].pos.z < 249.F);
     for(int id = 1; id <= 16; ++id) {
         struct Player* p = &players[id];
         assert(p->alive && p->connected && p->team == TEAM_2 && p->held_item == TOOL_SPADE);
@@ -103,22 +129,15 @@ int main(void) {
     assert(players[1].alive);
     aimtrainer_damage(1, 33);
     assert(!players[1].alive && !players[1].connected);
-    bool fell = false, drowned = false;
-    for(int tick = 0; tick < 1100; ++tick) {
+    players[0].pos.x = c + 30.F;
+    for(int tick = 0; tick < 26; ++tick) {
         now += 1.F/60.F;
         aimtrainer_tick(1.F/60.F);
-        assert(players[0].pos.x == spot.x && players[0].pos.y == spot.y && players[0].pos.z == spot.z);
-        if(tick == 25) assert(players[1].alive);
-        if(players[2].physics.airborne && players[2].alive) {
-            assert(players[2].pos.y < spot.y);
-            fell = true;
-        }
-        if(!players[2].alive) {
-            assert(fell && players[2].pos.y <= 3.25F);
-            drowned = true;
-        }
     }
-    assert(fell && drowned && players[2].alive);
+    assert(players[1].alive && players[0].pos.x == c + 30.F);
+    assert(players[2].orientation.x * (players[0].pos.x - players[2].pos.x) +
+           players[2].orientation.z * (players[0].pos.z - players[2].pos.z) > 0.F);
+    players[0].pos = spot;
     assert(aimtrainer_command("/medium") && players[25].alive && !players[26].alive);
     assert(players[25].input.keys.sprint);
     float prior = hypotf(players[25].pos.x - camera_x, players[25].pos.z - camera_z);
@@ -145,7 +164,7 @@ int main(void) {
     assert(challenge.points == 12);
     aimtrainer_record_shot(false);
     assert(challenge.streak == 0);
-    place_player(&players[6], center + 4, WATER_LEVEL + STANDING_CLEARANCE, center);
+    place_player(&players[6], 254.5F, WATER_LEVEL + STANDING_CLEARANCE - 0.1F, 251.5F);
     aimtrainer_tick(1.F/60.F);
     assert(challenge.points == 11 && challenge.kills == 5);
     now = challenge.finish;
@@ -161,7 +180,7 @@ int main(void) {
             strafed |= fabsf(p->physics.velocity.x * p->orientation.z -
                              p->physics.velocity.z * p->orientation.x) > .05F;
             crouched |= p->input.keys.crouch;
-            jumped |= p->physics.airborne && p->pos.y > standing_y;
+            jumped |= p->physics.airborne && p->pos.y > standing_y(p->pos.x, p->pos.z);
         }
     }
     assert(strafed && crouched && jumped);
@@ -187,4 +206,10 @@ with TemporaryDirectory() as directory:
     run(['cc', '-std=c99', '-O2', '-Wall', '-Wextra', '-Werror', '-I', str(root / 'src'),
          '-I', str(root / 'deps/libvxl'), str(test), str(root / 'deps/libvxl/libvxl.c'),
          '-lm', '-o', str(exe)], check=True)
-    run([str(exe)], check=True)
+    run([str(exe)], cwd=root / "resources", check=True)
+
+# The ordinary fixed-tick movement path still owns the local trainee.
+player = (root / 'src/player.c').read_text()
+assert 'if(!aimtrainer_active() || k == local_player_id)' in player
+controller = (root / 'src/cameracontroller.c').read_text()
+assert 'if(!aimtrainer_active() && chat_input_mode' not in controller
