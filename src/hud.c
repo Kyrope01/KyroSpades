@@ -1961,7 +1961,7 @@ static void hud_join_loading_bar(float height, float progress) {
 
 static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
         if(local_player_id < 0 || local_player_id >= PLAYERS_MAX)
-                local_player_id = PLAYERS_MAX - 1;
+                return; /* no valid local player to render a HUD for */
         // window_mousemode(camera_mode==CAMERAMODE_SELECTION?WINDOW_CURSOR_ENABLED:WINDOW_CURSOR_DISABLED);
 
         /* Fixed-function world/model rendering can leave the texture combiner
@@ -2056,6 +2056,7 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                 for(int k = 0; k < 40; k++) {
                         max = max(max, network_stats[k].ingoing + network_stats[k].outgoing);
                 }
+                if(max == 0) max = 1; /* avoid division by zero when idle */
                 for(int k = 0; k < 40; k++) {
                         float in_h = (float)(network_stats[39 - k].ingoing) / max * 160.0F;
                         float out_h = (float)(network_stats[39 - k].ingoing + network_stats[39 - k].outgoing) / max * 160.0F;
@@ -2501,8 +2502,8 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                         if(window_time() - local_player_death_time <= local_player_respawn_time) {
                                 glColor3f(1.0F, 0.0F, 0.0F);
                                 int cnt = local_player_respawn_time - (int)(window_time() - local_player_death_time);
-                                char coin[16];
-                                sprintf(coin, "INSERT COIN:%i", cnt);
+                                char coin[24];
+                                snprintf(coin, sizeof(coin), "INSERT COIN:%i", cnt);
                                 float coin_height = 53.0F * scalef;
                                 float coin_top = coin_height * (cameracontroller_bodyview_mode ? 2.0F : 1.0F);
                                 if(show_spectating_name)
@@ -3321,7 +3322,7 @@ texture_draw_empty_rotated(settings.window_width - 143 * scalef + tent2_x * map_
                 camera_hit_fromplayer(&hit, local_player_id, 128.0F);
 
                 if(hit.type == CAMERA_HITTYPE_PLAYER
-                   && player_intersection_type >= 0
+                   && player_intersection_type >= 0 && player_intersection_type < 4
                    && (players[local_player_id].team == TEAM_SPECTATOR
                            || players[player_intersection_player].team == players[local_player_id].team)) {
                         font_select(FONT_FIXEDSYS);
@@ -3510,17 +3511,22 @@ static void hud_ingame_scroll(double yoffset) {
                 int h = players[local_player_id].held_item;
                 if(!players[local_player_id].items_show)
                         local_player_lasttool = h;
-                h += (yoffset < 0) ? 1 : -1;
-                if(h < 0)
-                        h = 3;
-                if(h == TOOL_BLOCK && local_player_blocks == 0)
-                        h += (yoffset < 0) ? 1 : -1;
-                if(h == TOOL_GUN && local_player_ammo + local_player_ammo_reserved == 0)
-                        h += (yoffset < 0) ? 1 : -1;
-                if(h == TOOL_GRENADE && local_player_grenades == 0)
-                        h += (yoffset < 0) ? 1 : -1;
-                if(h > 3)
-                        h = 0;
+                int dir = (yoffset < 0) ? 1 : -1;
+                /* Cycle through tools, skipping empty ones. Spade (0) is always
+                   valid, so this loop is guaranteed to terminate. The old code
+                   applied skip adjustments in a single pass without re-clamping
+                   or re-checking emptiness, which could land on an empty tool
+                   or step outside [0,3]. */
+                for(int i = 0; i < 4; i++) {
+                        h += dir;
+                        if(h < 0) h = 3;
+                        if(h > 3) h = 0;
+                        int empty = 0;
+                        if(h == TOOL_BLOCK && local_player_blocks == 0) empty = 1;
+                        if(h == TOOL_GUN && local_player_ammo + local_player_ammo_reserved == 0) empty = 1;
+                        if(h == TOOL_GRENADE && local_player_grenades == 0) empty = 1;
+                        if(!empty) break;
+                }
                 players[local_player_id].held_item = h;
                 sound_create(SOUND_LOCAL, &sound_switch, 0.0F, 0.0F, 0.0F);
                 player_on_held_item_change(players + local_player_id);
@@ -3957,8 +3963,13 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
                 char* space = strrchr(chat[0][0], ' ');
                 char* incomplete = space ? space + 1 : chat[0][0];
                 const char* match = hud_ingame_completeword(incomplete);
-                if(match && strlen(match) + strlen(chat[0][0]) < 128)
-                        strcpy(incomplete, match);
+                if(match) {
+                        size_t remaining = sizeof(chat[0][0]) - (size_t)(incomplete - chat[0][0]) - 1;
+                        size_t mlen = strlen(match);
+                        if(mlen > remaining) mlen = remaining;
+                        memcpy(incomplete, match, mlen);
+                        incomplete[mlen] = '\0';
+                }
         }
 
         if(chat_input_mode == CHAT_NO_INPUT) {
@@ -4098,8 +4109,8 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
                         if((key == WINDOW_KEY_CURSOR_UP || key == WINDOW_KEY_CURSOR_DOWN || key == WINDOW_KEY_CURSOR_LEFT
                                 || key == WINDOW_KEY_CURSOR_RIGHT)
                            && camera_mode == CAMERAMODE_FPS && players[local_player_id].held_item == TOOL_BLOCK) {
-                                int y;
-                                for(y = 0; y < 8; y++) {
+                                int found = 0;
+                                for(int y = 0; y < 8 && !found; y++) {
                                         for(int x = 0; x < 8; x++) {
                                                 if(texture_block_color(x, y) == players[local_player_id].block.packed) {
                                                         switch(key) {
@@ -4126,21 +4137,21 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
                                                         }
                                                         players[local_player_id].block.packed = texture_block_color(x, y);
                                                         network_updateColor();
-                                                        y = 10;
+                                                        found = 1;
                                                         break;
                                                 }
                                         }
                                 }
-                if(y < 10) {
+                if(!found) {
                                 players[local_player_id].block.packed = texture_block_color(3, 0);
                                 network_updateColor();
                         }
                 } else if((key == WINDOW_KEY_CURSOR_UP || key == WINDOW_KEY_CURSOR_DOWN || key == WINDOW_KEY_CURSOR_LEFT
                                    || key == WINDOW_KEY_CURSOR_RIGHT)
                                   && camera_mode == CAMERAMODE_SPECTATOR) {
-                        int py;
+                        int found = 0;
                         unsigned int cur = rgb((int)(fog_color[0] * 255.0F + 0.5F), (int)(fog_color[1] * 255.0F + 0.5F), (int)(fog_color[2] * 255.0F + 0.5F));
-                        for(py = 0; py < 8; py++) {
+                        for(int py = 0; py < 8 && !found; py++) {
                                 for(int px = 0; px < 8; px++) {
                                         if(texture_block_color(px, py) == cur) {
                                                 switch(key) {
@@ -4166,12 +4177,12 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
                                                 fog_color[1] = ((cur >> 8) & 0xFF) / 255.0F;
                                                 fog_color[2] = ((cur >> 16) & 0xFF) / 255.0F;
                                                 spec_color_palette_time = window_time() + 2.0;
-                                                py = 10;
+                                                found = 1;
                                                 break;
                                         }
                                 }
                         }
-                        if(py < 10) {
+                        if(!found) {
                                 cur = texture_block_color(3, 0);
                                 fog_color[0] = (cur & 0xFF) / 255.0F;
                                 fog_color[1] = ((cur >> 8) & 0xFF) / 255.0F;
@@ -4289,7 +4300,8 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
                                                         login.green = players[local_player_id].block.green;
                                                         login.red = players[local_player_id].block.red;
                                                         const char* join_name = anonymous_spectator ? "Anonymous" : settings.name;
-                                                        strcpy(login.name, join_name);
+                                                        strncpy(login.name, join_name, sizeof(login.name) - 1);
+                                                        login.name[sizeof(login.name) - 1] = '\0';
                                                         network_send(PACKET_EXISTINGPLAYER_ID, &login,
                                                                                  sizeof(login) - sizeof(login.name) + strlen(join_name) + 1);
                                                         screen_current = SCREEN_NONE;
@@ -4328,7 +4340,8 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
                                                 login.blue = players[local_player_id].block.blue;
                                                 login.green = players[local_player_id].block.green;
                                                 login.red = players[local_player_id].block.red;
-                                                strcpy(login.name, settings.name);
+                                                strncpy(login.name, settings.name, sizeof(login.name) - 1);
+                                                login.name[sizeof(login.name) - 1] = '\0';
                                                 network_send(PACKET_EXISTINGPLAYER_ID, &login,
                                                                          sizeof(login) - sizeof(login.name) + strlen(settings.name) + 1);
                                         }
@@ -4452,7 +4465,8 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
                                 chat_cursor_to_rowcol(rs, rl, rows, &cr, &cc);
                                 if(cr == 0) {
                                         if(chat_history_pos < 127) {
-                                                strcpy(chat[0][0], chat[2][++chat_history_pos]);
+                                                strncpy(chat[0][0], chat[2][++chat_history_pos], sizeof(chat[0][0]) - 1);
+                                                chat[0][0][sizeof(chat[0][0]) - 1] = '\0';
                                                 chat_cursor = (int)strlen(chat[0][0]);
                                                 chat_sel_clear();
                                         }
@@ -4471,7 +4485,8 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
                                 chat_cursor_to_rowcol(rs, rl, rows, &cr, &cc);
                                 if(cr >= rows - 1) {
                                         if(chat_history_pos > 0) {
-                                                strcpy(chat[0][0], chat[2][--chat_history_pos]);
+                                                strncpy(chat[0][0], chat[2][--chat_history_pos], sizeof(chat[0][0]) - 1);
+                                                chat[0][0][sizeof(chat[0][0]) - 1] = '\0';
                                                 chat_cursor = (int)strlen(chat[0][0]);
                                                 chat_sel_clear();
                                         }
@@ -5176,6 +5191,11 @@ static int hud_serverlist_sort_ping(const void* a, const void* b) {
 static void hud_serverlist_pingupdate(void* e, float time_delta, char* aos) {
         pthread_mutex_lock(&serverlist_lock);
         if(!e) {
+                /* Ping update for an existing entry: bail if the list is empty. */
+                if(!serverlist || server_count <= 0) {
+                        pthread_mutex_unlock(&serverlist_lock);
+                        return;
+                }
                 for(int k = 0; k < server_count; k++)
                         if(!strcmp(serverlist[k].identifier, aos)) {
                                 serverlist[k].ping = ceil(time_delta * 1000.0F);
@@ -5194,7 +5214,8 @@ static void hud_serverlist_pingupdate(void* e, float time_delta, char* aos) {
                 server_count++;
         }
 
-        qsort(serverlist, server_count, sizeof(struct serverlist_entry), hud_serverlist_sort);
+        if(serverlist && server_count > 0)
+                qsort(serverlist, server_count, sizeof(struct serverlist_entry), hud_serverlist_sort);
         pthread_mutex_unlock(&serverlist_lock);
 }
 
@@ -6465,8 +6486,7 @@ static void hud_settings_render(mu_Context* ctx, float scalex, float scaley) {
         /* Commit once on release; the working copy remains visible while dragging. */
         static int settings_was_mouse_down = 0;
         int settings_is_mouse_down = !!(ctx->mouse_down & MU_MOUSE_LEFT);
-        int settings_changed = memcmp(&settings, &settings_tmp, sizeof(struct RENDER_OPTIONS)) != 0;
-        if((settings_was_mouse_down && !settings_is_mouse_down) || (settings_is_mouse_down && settings_changed))
+        if(settings_was_mouse_down && !settings_is_mouse_down)
                 hud_settings_commit();
         settings_was_mouse_down = settings_is_mouse_down;
 }
@@ -6855,6 +6875,11 @@ static void hud_demolist_init(void) {
            hud_init() and must not be touched from here. */
         if(demo_files) { for(int i = 0; i < demo_file_count; i++) free(demo_files[i]); free(demo_files); demo_files = NULL; }
         demo_file_count = demo_list_files(&demo_files);
+        if(demo_file_count > 0 && !demo_files) {
+                /* demo_list_files reported entries but allocation failed;
+                   treat as empty rather than dereferencing NULL below. */
+                demo_file_count = 0;
+        }
 }
 
 static void hud_demolist_render(mu_Context* ctx, float scalex, float scaley) {

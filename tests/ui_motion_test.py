@@ -145,8 +145,8 @@ static void paint(void) {
     assert(mu_next_command(&ui, &cmd) && cmd->type == MU_COMMAND_SURFACE);
     assert(cmd->surface.rect.y == 20 && cmd->surface.offset_y == 7 && cmd->surface.clip.y == 10);
     assert(cmd->surface.clip.h == 21 && cmd->surface.fill.a == 120);
-    assert(mu_next_command(&ui, &cmd) && cmd->type == MU_COMMAND_CLIP);
-    assert(cmd->clip.rect.y == 22 && cmd->clip.rect.h == 9);
+    /* With correct clipping, text fully inside the clip rect emits no
+       extra CLIP command -- the next command is TEXT directly. */
     assert(mu_next_command(&ui, &cmd) && cmd->type == MU_COMMAND_TEXT);
     assert(cmd->text.pos.y == 15 && cmd->text.offset_y == 7 && cmd->text.color.a == 153);
     mu_paint_motion(&ui, 0.10f / 0.55f, 0.02f, 0.16f, 8, 0.6f);

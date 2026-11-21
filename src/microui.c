@@ -297,15 +297,21 @@ void mu_end(mu_Context *ctx) {
     /* if this is the first container then make the first command jump to it.
     ** otherwise set the previous container's tail to jump to this one */
     if (i == 0) {
-      mu_Command *cmd = (mu_Command*) ctx->command_list.items;
-      cmd->jump.dst = (char*) cnt->head + sizeof(mu_JumpCommand);
+      if (cnt->head) {
+        mu_Command *cmd = (mu_Command*) ctx->command_list.items;
+        cmd->jump.dst = (char*) cnt->head + sizeof(mu_JumpCommand);
+      }
     } else {
       mu_Container *prev = ctx->root_list.items[i - 1];
-      prev->tail->jump.dst = (char*) cnt->head + sizeof(mu_JumpCommand);
+      if (prev->tail && cnt->head) {
+        prev->tail->jump.dst = (char*) cnt->head + sizeof(mu_JumpCommand);
+      }
     }
     /* make the last container's tail jump to the end of command list */
     if (i == n - 1) {
-      cnt->tail->jump.dst = ctx->command_list.items + ctx->command_list.idx;
+      if (cnt->tail) {
+        cnt->tail->jump.dst = ctx->command_list.items + ctx->command_list.idx;
+      }
     }
   }
 }
@@ -365,18 +371,12 @@ mu_Rect mu_get_clip_rect(mu_Context *ctx) {
 
 
 int mu_check_clip(mu_Context *ctx, mu_Rect r) {
-  // Well, this is a hack and not actually a fix.
-  // For some reason the clip calculations are wrong, couldn't figure out why.
-  return MU_CLIP_PART;
-
-#if 0
   mu_Rect cr = mu_get_clip_rect(ctx);
   if (r.x > cr.x + cr.w || r.x + r.w < cr.x ||
       r.y > cr.y + cr.h || r.y + r.h < cr.y   ) { return MU_CLIP_ALL; }
   if (r.x >= cr.x && r.x + r.w <= cr.x + cr.w &&
       r.y >= cr.y && r.y + r.h <= cr.y + cr.h ) { return 0; }
   return MU_CLIP_PART;
-#endif
 }
 
 
@@ -551,8 +551,12 @@ void mu_input_text(mu_Context *ctx, const char *text) {
 **============================================================================*/
 
 mu_Command* mu_push_command(mu_Context *ctx, int type, int size) {
+  if (ctx->command_list.idx + size >= MU_COMMANDLIST_SIZE) {
+    /* Command list exhausted: refuse to overflow instead of aborting.
+       Callers must handle a NULL return by skipping the command. */
+    return NULL;
+  }
   mu_Command *cmd = (mu_Command*) (ctx->command_list.items + ctx->command_list.idx);
-  expect(ctx->command_list.idx + size < MU_COMMANDLIST_SIZE);
   cmd->base.type = type;
   cmd->base.size = size;
   ctx->command_list.idx += size;
@@ -577,6 +581,7 @@ int mu_next_command(mu_Context *ctx, mu_Command **cmd) {
 static mu_Command* push_jump(mu_Context *ctx, mu_Command *dst) {
   mu_Command *cmd;
   cmd = mu_push_command(ctx, MU_COMMAND_JUMP, sizeof(mu_JumpCommand));
+  if (!cmd) { return NULL; }
   cmd->jump.dst = dst;
   return cmd;
 }
@@ -585,6 +590,7 @@ static mu_Command* push_jump(mu_Context *ctx, mu_Command *dst) {
 void mu_set_clip(mu_Context *ctx, mu_Rect rect) {
   mu_Command *cmd;
   cmd = mu_push_command(ctx, MU_COMMAND_CLIP, sizeof(mu_ClipCommand));
+  if (!cmd) { return; }
   cmd->clip.rect = rect;
 }
 
@@ -628,6 +634,7 @@ void mu_draw_rect(mu_Context *ctx, mu_Rect rect, mu_Color color) {
   rect = intersect_rects(rect, paint_clip(ctx));
   if (rect.w > 0 && rect.h > 0) {
     cmd = mu_push_command(ctx, MU_COMMAND_RECT, sizeof(mu_RectCommand));
+    if (!cmd) { return; }
     cmd->rect.rect = rect;
     cmd->rect.color = color;
   }
@@ -644,8 +651,10 @@ void mu_draw_surface(mu_Context *ctx, mu_Rect rect, mu_Color fill,
   if (rect.w <= 0 || rect.h <= 0 || clip.w <= 0 || clip.h <= 0 ||
       y >= clip.y + clip.h || y + rect.h <= clip.y ||
       rect.x >= clip.x + clip.w || rect.x + rect.w <= clip.x || (!fill.a && !border.a)) { return; }
-  mu_SurfaceCommand *surface = &mu_push_command(ctx, MU_COMMAND_SURFACE,
-    sizeof(mu_SurfaceCommand))->surface;
+  mu_Command *_cmd = mu_push_command(ctx, MU_COMMAND_SURFACE,
+    sizeof(mu_SurfaceCommand));
+  if (!_cmd) { return; }
+  mu_SurfaceCommand *surface = &_cmd->surface;
   surface->rect = rect;
   surface->clip = clip;
   surface->fill = fill;
@@ -727,6 +736,10 @@ void mu_draw_text(mu_Context *ctx, mu_Font font, const char *str, int len,
   /* add command */
   if (len < 0) { len = strlen(str); }
   cmd = mu_push_command(ctx, MU_COMMAND_TEXT, sizeof(mu_TextCommand) + len);
+  if (!cmd) {
+    if (clipped) { mu_set_clip(ctx, unclipped_rect); }
+    return;
+  }
   memcpy(cmd->text.str, str, len);
   cmd->text.str[len] = '\0';
   cmd->text.offset_y = ctx->paint_offset_y;
@@ -746,6 +759,10 @@ void mu_draw_icon(mu_Context *ctx, int id, mu_Rect rect, mu_Color color) {
   if (clipped == MU_CLIP_PART) { mu_set_clip(ctx, paint_clip(ctx)); }
   /* do icon command */
   cmd = mu_push_command(ctx, MU_COMMAND_ICON, sizeof(mu_IconCommand));
+  if (!cmd) {
+    if (clipped) { mu_set_clip(ctx, unclipped_rect); }
+    return;
+  }
   cmd->icon.id = id;
   cmd->icon.offset_y = ctx->paint_offset_y;
   cmd->icon.rect = rect;
@@ -1078,7 +1095,9 @@ int mu_textbox_raw(mu_Context *ctx, char *buf, int bufsz, mu_Id id, mu_Rect r,
   int opt)
 {
   int res = 0;
-  int len = (int)strlen(buf);
+  size_t len_raw = strlen(buf);
+  int len = (int)len_raw;
+  if (len < 0 || len > bufsz) len = bufsz; /* guard against size_t->int overflow */
   mu_Font font = ctx->style->font;
   mu_update_control(ctx, id, r, opt | MU_OPT_HOLDFOCUS);
 
@@ -1125,9 +1144,9 @@ int mu_textbox_raw(mu_Context *ctx, char *buf, int bufsz, mu_Id id, mu_Rect r,
         copy[hi - lo] = '\0';
         ctx->set_clipboard(copy);
         free(copy);
-      }
-      if (ctx->key_pressed & MU_KEY_CUT) {
-        if (textbox_delete_selection(ctx, buf, &len)) { res |= MU_RES_CHANGE; }
+        if (ctx->key_pressed & MU_KEY_CUT) {
+          if (textbox_delete_selection(ctx, buf, &len)) { res |= MU_RES_CHANGE; }
+        }
       }
     }
 
@@ -1298,7 +1317,8 @@ int mu_slider_ex(mu_Context *ctx, mu_Real *value, mu_Real low, mu_Real high,
   if (ctx->focus == id &&
       (ctx->mouse_down | ctx->mouse_pressed) == MU_MOUSE_LEFT)
   {
-    v = low + (ctx->mouse_pos.x - base.x) * (high - low) / base.w;
+    if (base.w > 0 && high > low)
+      v = low + (ctx->mouse_pos.x - base.x) * (high - low) / base.w;
     if (step) { v = (((v + step / 2) / step)) * step; }
   }
   /* clamp and store value, update res */
@@ -1309,7 +1329,7 @@ int mu_slider_ex(mu_Context *ctx, mu_Real *value, mu_Real low, mu_Real high,
   mu_draw_control_frame(ctx, id, base, MU_COLOR_BASE, opt);
   /* draw thumb */
   w = ctx->style->thumb_size;
-  x = (v - low) * (base.w - w) / (high - low);
+  x = (base.w > 0 && high > low) ? (int)((v - low) * (base.w - w) / (high - low)) : 0;
   thumb = mu_rect(base.x + x, base.y, w, base.h);
   mu_draw_control_frame(ctx, id, thumb, MU_COLOR_BUTTON, opt);
   /* draw text  */
@@ -1435,7 +1455,8 @@ void mu_end_treenode(mu_Context *ctx) {
       mu_update_control(ctx, id, base, 0);                                  \
       if (ctx->hover == id) { ctx->hover_is_draggable = 1; }                \
       if (ctx->focus == id && ctx->mouse_down == MU_MOUSE_LEFT) {           \
-        cnt->scroll.y += ctx->mouse_delta.y * cs.y / base.h;                \
+        if (base.h > 0)                                                     \
+          cnt->scroll.y += ctx->mouse_delta.y * cs.y / base.h;              \
       }                                                                     \
       /* clamp scroll to limits */                                          \
       cnt->scroll.y = mu_clamp(cnt->scroll.y, 0, maxscroll);                \
@@ -1447,8 +1468,10 @@ void mu_end_treenode(mu_Context *ctx) {
       /* draw base and thumb */                                             \
       ctx->draw_frame(ctx, base, MU_COLOR_SCROLLBASE);                      \
       thumb = base;                                                         \
-      thumb.h = mu_min(base.h, mu_max(ctx->style->thumb_size, base.h * b->h / cs.y)); \
-      thumb.y += cnt->scroll.y * (base.h - thumb.h) / maxscroll;            \
+      thumb.h = mu_min(base.h, mu_max(ctx->style->thumb_size,               \
+                                      cs.y > 0 ? base.h * b->h / cs.y : 0)); \
+      thumb.y += (maxscroll > 0 && base.h > 0)                              \
+          ? cnt->scroll.y * (base.h - thumb.h) / maxscroll : 0;             \
       ctx->draw_frame(ctx, thumb, MU_COLOR_SCROLLTHUMB);                    \
                                                                             \
       /* set this as the scroll_target (will get scrolled on mousewheel) */ \
@@ -1491,6 +1514,12 @@ static void begin_root_container(mu_Context *ctx, mu_Container *cnt) {
   /* push container to roots list and push head command */
   push(ctx->root_list, cnt);
   cnt->head = push_jump(ctx, NULL);
+  if (!cnt->head) {
+    /* command list exhausted: undo the container push and bail */
+    pop(ctx->root_list);
+    pop(ctx->container_stack);
+    return;
+  }
   /* set as hover root if the mouse is overlapping this container and it has a
   ** higher zindex than the current hover root */
   if (rect_overlaps_vec2(cnt->rect, ctx->mouse_pos) &&
@@ -1510,7 +1539,9 @@ static void end_root_container(mu_Context *ctx) {
   ** on initing these are done in mu_end() */
   mu_Container *cnt = mu_get_current_container(ctx);
   cnt->tail = push_jump(ctx, NULL);
-  cnt->head->jump.dst = ctx->command_list.items + ctx->command_list.idx;
+  if (cnt->head) {
+    cnt->head->jump.dst = ctx->command_list.items + ctx->command_list.idx;
+  }
   /* pop base clip rect and container */
   mu_pop_clip_rect(ctx);
   pop_container(ctx);
