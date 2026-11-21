@@ -514,6 +514,7 @@ if(NOT ANDROID)
         # when the archive changes so its post-build extraction runs again.
         set_property(TARGET ${KS_TARGET} APPEND PROPERTY LINK_DEPENDS
                 "${KyroSpades_SOURCE_DIR}/bsresources.zip"
+                "${KyroSpades_SOURCE_DIR}/resources/maps/shot0560.vxl"
                 "${KyroSpades_SOURCE_DIR}/resources.override/kv6/grenade(Baseball Penguano).kv6"
                 "${KyroSpades_SOURCE_DIR}/resources.override/kv6/semi(Desert Eagle Asiimov).kv6"
                 "${KyroSpades_SOURCE_DIR}/resources.override/kv6/semi(Desert Eagle Blaze).kv6"

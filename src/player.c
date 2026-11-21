@@ -928,7 +928,7 @@ void player_update(float dt, int locked) {
 	for(int k = 0; k < PLAYERS_MAX; k++) {
 		if(players[k].connected) {
 			if(locked) {
-				if(!aimtrainer_active())
+				if(!aimtrainer_active() || k == local_player_id)
 					player_move(&players[k], dt, k);
 			} else {
 				if(k != local_player_id) {

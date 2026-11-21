@@ -2470,13 +2470,16 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
 
                 if(camera_mode == CAMERAMODE_BODYVIEW
                    || (camera_mode == CAMERAMODE_SPECTATOR && cameracontroller_bodyview_mode)) {
-                        if(cameracontroller_bodyview_player != local_player_id) {
+                        const bool show_spectating_name = cameracontroller_bodyview_player != local_player_id;
+                        const float name_height = 22.0F;
+                        const float name_top = 4.0F + name_height;
+                        if(show_spectating_name) {
                                 font_select(FONT_FIXEDSYS);
                                 char bv_buf[64];
                                 snprintf(bv_buf, sizeof(bv_buf), "Spectating %s", players[cameracontroller_bodyview_player].name);
-                                float bv_nh = 22.F;
+                                float bv_nh = name_height;
                                 float bv_nx = settings.window_width / 2.0F - font_length(bv_nh, bv_buf) / 2.0F;
-                                float bv_ny = 4.F + bv_nh;
+                                float bv_ny = name_top;
                                 unsigned char bv_r = 255, bv_g = 255, bv_b = 255;
                                 switch(players[cameracontroller_bodyview_player].team) {
                                         case TEAM_1: bv_r = gamestate.team_1.red; bv_g = gamestate.team_1.green; bv_b = gamestate.team_1.blue; break;
@@ -2500,8 +2503,11 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 int cnt = local_player_respawn_time - (int)(window_time() - local_player_death_time);
                                 char coin[16];
                                 sprintf(coin, "INSERT COIN:%i", cnt);
-                                font_centered(settings.window_width / 2.0F,
-                                                          53.0F * scalef * (cameracontroller_bodyview_mode ? 2.0F : 1.0F), 53.0F * scalef, coin);
+                                float coin_height = 53.0F * scalef;
+                                float coin_top = coin_height * (cameracontroller_bodyview_mode ? 2.0F : 1.0F);
+                                if(show_spectating_name)
+                                        coin_top = fmaxf(coin_top, name_top + 8.0F + coin_height);
+                                font_centered(settings.window_width / 2.0F, coin_top, coin_height, coin);
                                 if(local_player_respawn_cnt_last != cnt) {
                                         if(cnt < 4) {
                                                 sound_create(SOUND_LOCAL, (cnt == 1) ? &sound_beep1 : &sound_beep2, 0.0F, 0.0F, 0.0F);
