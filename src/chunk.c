@@ -1100,9 +1100,6 @@ void chunk_generate_naive(struct libvxl_chunk_copy* blocks, struct tesselator* t
                 }
         }
 
-        if(baked_shadows)
-                map_read_unlock();
-
         /* max_height bounds vertex positions, not block indices: the highest
            block's top face is at y + 1. Match the greedy/textured meshers. */
         (*max_height)++;
@@ -1288,9 +1285,6 @@ void chunk_generate_textured(struct libvxl_chunk_copy* blocks, struct tesselator
                 }
         }
 
-        if(baked_shadows)
-                map_read_unlock();
-
         (*max_height)++;
 }
 
@@ -1410,9 +1404,10 @@ struct chunk_queue_ctx {
         int cap;
 };
 
-static bool collect_chunk_update(void* key, void* value, void* user) {
+static bool take_chunk_update(void* key, void* value, void* user) {
         struct chunk_queue_ctx* ctx = (struct chunk_queue_ctx*)user;
-        if(*ctx->count >= ctx->cap) { return true; } /* overflow: retry next frame */
+        if(*ctx->count >= ctx->cap)
+                return false; /* Leave this entry pending for the next frame. */
         ctx->items[*ctx->count] = *(struct chunk_work_packet*)value;
         (*ctx->count)++;
         return true;
@@ -1428,8 +1423,7 @@ void chunk_queue_blocks() {
         struct chunk_queue_ctx ctx = { pending, &count, CHUNK_QUEUE_MAX_PENDING };
 
         chunk_lock_lock(&chunk_block_queue_lock);
-        ht_iterate(&chunk_block_queue, &ctx, collect_chunk_update);
-        ht_clear(&chunk_block_queue);
+        ht_iterate_remove(&chunk_block_queue, &ctx, take_chunk_update);
         chunk_lock_unlock(&chunk_block_queue_lock);
 
         for(int k = 0; k < count; k++) {
