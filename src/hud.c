@@ -6457,8 +6457,12 @@ static void hud_settings_render(mu_Context* ctx, float scalex, float scaley) {
         }
 
         /* Commit once on release; the working copy remains visible while dragging. */
-        if(!(ctx->mouse_down & MU_MOUSE_LEFT))
+        static int settings_was_mouse_down = 0;
+        int settings_is_mouse_down = !!(ctx->mouse_down & MU_MOUSE_LEFT);
+        int settings_changed = memcmp(&settings, &settings_tmp, sizeof(struct RENDER_OPTIONS)) != 0;
+        if((settings_was_mouse_down && !settings_is_mouse_down) || (settings_is_mouse_down && settings_changed))
                 hud_settings_commit();
+        settings_was_mouse_down = settings_is_mouse_down;
 }
 
 static void hud_settings_keyboard(int key, int action, int mods, int internal) {
@@ -7132,6 +7136,13 @@ static void hud_macros_touch(void* finger, int action, float x, float y, float d
 }
 
 static void hud_macros_keyboard(int key, int action, int mods, int internal) {
+        if(key == WINDOW_KEY_ESCAPE && action == WINDOW_PRESS) {
+                if(macro_edit_index >= 0) {
+                        macro_edit_index = -1;
+                        return;
+                }
+                hud_change(&hud_serverlist);
+        }
         if(macro_edit_index >= 0 && action == WINDOW_PRESS
            && hud_macros.ctx && hud_macros.ctx->focus == 0) {
                 struct config_macro* m = list_get(&config_macros, macro_edit_index);
@@ -7139,9 +7150,6 @@ static void hud_macros_keyboard(int key, int action, int mods, int internal) {
                 macro_edit_index = -1;
                 config_save();
                 return;
-        }
-        if(key == WINDOW_KEY_ESCAPE && action == WINDOW_PRESS) {
-                hud_change(&hud_serverlist);
         }
 }
 
@@ -7223,6 +7231,10 @@ static void hud_recording_keyboard(int key, int action, int mods, int internal) 
         (void)mods;
         (void)internal;
         if(key == WINDOW_KEY_ESCAPE && action == WINDOW_PRESS) {
+                if(hud_recording_waiting_for_key) {
+                        hud_recording_waiting_for_key = false;
+                        return;
+                }
                 hud_change(&hud_serverlist);
         }
         if(hud_recording_waiting_for_key && action == WINDOW_PRESS) {
@@ -7308,6 +7320,10 @@ static void hud_replay_init(void) {
 
 static void hud_replay_keyboard(int key, int action, int mods, int internal) {
         if(key == WINDOW_KEY_ESCAPE && action == WINDOW_PRESS) {
+                if(hud_replay_waiting_for_key) {
+                        hud_replay_waiting_for_key = false;
+                        return;
+                }
                 hud_change(&hud_serverlist);
         }
         if(hud_replay_waiting_for_key && action == WINDOW_PRESS) {
