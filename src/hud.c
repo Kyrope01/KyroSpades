@@ -2090,7 +2090,8 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
         }
 
         if(network_map_transfer || daytime_weather_awaiting_sky()) {
-                hud_common_render(ctx);
+                if(ctx)
+                        hud_common_render(ctx);
                 glColor3ub(255, 255, 255);
 
                 texture_draw(&texture_splash_icon,
@@ -2140,9 +2141,9 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                 if(screen_current == SCREEN_TEAM_SELECT) {
                         glColor3f(1.0F, 1.0F, 1.0F);
                         char join_str[48];
-                        sprintf(join_str, "Press 1 to join %s", gamestate.team_1.name);
+                        snprintf(join_str, sizeof(join_str), "Press 1 to join %s", gamestate.team_1.name);
                         font_centered(settings.window_width / 4.0F, 61 * scalef, 16.F, join_str);
-                        sprintf(join_str, "Press 2 to join %s", gamestate.team_2.name);
+                        snprintf(join_str, sizeof(join_str), "Press 2 to join %s", gamestate.team_2.name);
                         font_centered(settings.window_width / 4.0F * 3.0F, 61 * scalef, 16.F, join_str);
                         font_centered(settings.window_width / 2.0F, 61 * scalef, 16.F, "Press 3 to spectate");
                         if(!network_logged_in)

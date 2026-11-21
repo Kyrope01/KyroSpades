@@ -1711,7 +1711,6 @@ void display() {
                 }
 
                 hud_active->render_2D(ctx, scalex, scalef);
-
                 if(ctx) {
                         mu_end(ctx);
                         hud_ime_update();

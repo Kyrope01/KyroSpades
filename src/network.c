@@ -480,8 +480,8 @@ void read_PacketStateData(void* data, int len) {
         gamestate.team_1.green = p->team_1_green;
         gamestate.team_1.blue = p->team_1_blue;
 
-        memcpy(gamestate.team_2.name, p->team_2_name, sizeof(p->team_1_name));
-        gamestate.team_2.name[sizeof(p->team_1_name)] = 0;
+        memcpy(gamestate.team_2.name, p->team_2_name, sizeof(p->team_2_name));
+        gamestate.team_2.name[sizeof(p->team_2_name)] = 0;
 
         gamestate.team_2.red = p->team_2_red;
         gamestate.team_2.green = p->team_2_green;
@@ -851,6 +851,8 @@ void read_PacketWorldUpdate(void* data, int len) {
                         for(int k = 0; k < (len / sizeof(struct PacketWorldUpdate076)); k++) {
                                 struct PacketWorldUpdate076* p
                                         = (struct PacketWorldUpdate076*)((const unsigned char*)data + k * sizeof(struct PacketWorldUpdate076));
+                                if(p->player_id >= PLAYERS_MAX)
+                                        continue;
                                 if(players[p->player_id].connected && players[p->player_id].alive
                                    && p->player_id != local_player_id) {
                                         if(distance3D(players[p->player_id].pos.x, players[p->player_id].pos.y, players[p->player_id].pos.z, p->x, 63.0F - p->z, p->y)
@@ -1552,7 +1554,10 @@ void read_PacketVersionGet(void* data, int len) {
 #elif defined(OS_HAIKU)
         os = "KyroSpades (Haiku)";
                 #endif
-        memcpy(ver.operatingsystem, os, sizeof(ver.operatingsystem));
+        size_t oslen = strlen(os) + 1;
+        if(oslen > sizeof(ver.operatingsystem))
+                oslen = sizeof(ver.operatingsystem);
+        memcpy(ver.operatingsystem, os, oslen);
         ver.operatingsystem[sizeof(ver.operatingsystem) - 1] = '\0';
         network_send(PACKET_VERSIONSEND_ID, &ver, sizeof(ver) - sizeof(ver.operatingsystem) + strlen(os));
 }
