@@ -730,6 +730,12 @@ void mu_draw_text(mu_Context *ctx, mu_Font font, const char *str, int len,
   mu_Command *cmd;
   mu_Rect rect = mu_rect(
     pos.x, pos.y, ctx->text_width(font, str, len), ctx->text_height(font));
+  /* Clipping must use the painted (offset-adjusted) position so that content
+     animated into the clip region is visible and content animated out of it is
+     culled, matching how mu_draw_surface handles paint_offset_y. */
+  if (ctx->paint_offset_y) {
+    rect.y += (int)roundf(ctx->paint_offset_y);
+  }
   int clipped = mu_check_clip(ctx, rect);
   if (clipped == MU_CLIP_ALL ) { return; }
   if (clipped == MU_CLIP_PART) { mu_set_clip(ctx, paint_clip(ctx)); }
@@ -753,7 +759,11 @@ void mu_draw_text(mu_Context *ctx, mu_Font font, const char *str, int len,
 
 void mu_draw_icon(mu_Context *ctx, int id, mu_Rect rect, mu_Color color) {
   mu_Command *cmd;
-  /* do clip command if the rect isn't fully contained within the cliprect */
+  /* Clip against the painted (offset-adjusted) position so animated icons
+     crossing the panel edge are correctly culled or kept. */
+  if (ctx->paint_offset_y) {
+    rect.y += (int)roundf(ctx->paint_offset_y);
+  }
   int clipped = mu_check_clip(ctx, rect);
   if (clipped == MU_CLIP_ALL ) { return; }
   if (clipped == MU_CLIP_PART) { mu_set_clip(ctx, paint_clip(ctx)); }
@@ -1509,7 +1519,7 @@ static void push_container_body(
 }
 
 
-static void begin_root_container(mu_Context *ctx, mu_Container *cnt) {
+static int begin_root_container(mu_Context *ctx, mu_Container *cnt) {
   push(ctx->container_stack, cnt);
   /* push container to roots list and push head command */
   push(ctx->root_list, cnt);
@@ -1518,7 +1528,7 @@ static void begin_root_container(mu_Context *ctx, mu_Container *cnt) {
     /* command list exhausted: undo the container push and bail */
     pop(ctx->root_list);
     pop(ctx->container_stack);
-    return;
+    return 0;
   }
   /* set as hover root if the mouse is overlapping this container and it has a
   ** higher zindex than the current hover root */
@@ -1531,6 +1541,7 @@ static void begin_root_container(mu_Context *ctx, mu_Container *cnt) {
   ** another root-containers's begin/end block; this prevents the inner
   ** root-container being clipped to the outer */
   push(ctx->clip_stack, unclipped_rect);
+  return 1;
 }
 
 
@@ -1556,7 +1567,11 @@ int mu_begin_window_ex(mu_Context *ctx, const char *title, mu_Rect rect, int opt
   push(ctx->id_stack, id);
 
   if (cnt->rect.w == 0) { cnt->rect = rect; }
-  begin_root_container(ctx, cnt);
+  if (!begin_root_container(ctx, cnt)) {
+    /* command buffer exhausted: unwind the id stack and refuse to open */
+    pop(ctx->id_stack);
+    return 0;
+  }
   rect = body = cnt->rect;
 
   /* draw frame */

@@ -145,8 +145,10 @@ static void paint(void) {
     assert(mu_next_command(&ui, &cmd) && cmd->type == MU_COMMAND_SURFACE);
     assert(cmd->surface.rect.y == 20 && cmd->surface.offset_y == 7 && cmd->surface.clip.y == 10);
     assert(cmd->surface.clip.h == 21 && cmd->surface.fill.a == 120);
-    /* With correct clipping, text fully inside the clip rect emits no
-       extra CLIP command -- the next command is TEXT directly. */
+    /* With animated offset, the painted text rect crosses the clip edge, so a
+       CLIP command is emitted with the offset-adjusted intersection. */
+    assert(mu_next_command(&ui, &cmd) && cmd->type == MU_COMMAND_CLIP);
+    assert(cmd->clip.rect.y == 22 && cmd->clip.rect.h == 9);
     assert(mu_next_command(&ui, &cmd) && cmd->type == MU_COMMAND_TEXT);
     assert(cmd->text.pos.y == 15 && cmd->text.offset_y == 7 && cmd->text.color.a == 153);
     mu_paint_motion(&ui, 0.10f / 0.55f, 0.02f, 0.16f, 8, 0.6f);
@@ -163,6 +165,48 @@ static void paint(void) {
     ui.reduced_motion = 1;
     mu_paint_motion(&ui, 0.0f, 0.02f, 0.16f, 8, 0.6f);
     assert(ui.paint_offset_y == 0 && ui.paint_alpha == 1.0f);
+}
+
+/* Text clipped by unanimated position but painted into view (and vice versa)
+   must use the offset-adjusted rect for clipping. */
+static void animated_clipping(void) {
+    init();
+    mu_begin(&ui);
+    assert(mu_begin_window_ex(&ui, "enter", mu_rect(0, 0, 100, 100), PLAIN));
+    mu_push_clip_rect(&ui, mu_rect(0, 0, 100, 50));
+    /* unanimated at y=-20 (above clip), paint_offset_y=27 moves it to y=7 (inside) */
+    mu_paint_motion(&ui, 0.01f, 0.0f, 0.16f, 30.0f, 0.0f);
+    mu_draw_text(&ui, NULL, "enter", -1, mu_vec2(5, -20), mu_color(255, 255, 255, 255));
+    mu_paint_reset(&ui);
+    mu_pop_clip_rect(&ui);
+    mu_end_window(&ui);
+    mu_end(&ui);
+
+    mu_Command *cmd = NULL;
+    int found = 0;
+    while (mu_next_command(&ui, &cmd))
+        if (cmd->type == MU_COMMAND_TEXT && strcmp(cmd->text.str, "enter") == 0)
+            found = 1;
+    assert(found); /* animated into view: must be emitted */
+
+    init();
+    mu_begin(&ui);
+    assert(mu_begin_window_ex(&ui, "leave", mu_rect(0, 0, 100, 100), PLAIN));
+    mu_push_clip_rect(&ui, mu_rect(0, 0, 100, 50));
+    /* unanimated at y=40 (inside clip), paint_offset_y=27 moves it to y=67 (outside) */
+    mu_paint_motion(&ui, 0.01f, 0.0f, 0.16f, 30.0f, 0.0f);
+    mu_draw_text(&ui, NULL, "leave", -1, mu_vec2(5, 40), mu_color(255, 255, 255, 255));
+    mu_paint_reset(&ui);
+    mu_pop_clip_rect(&ui);
+    mu_end_window(&ui);
+    mu_end(&ui);
+
+    cmd = NULL; /* reset iterator: init() zeroed the buffer */
+    found = 0;
+    while (mu_next_command(&ui, &cmd))
+        if (cmd->type == MU_COMMAND_TEXT && strcmp(cmd->text.str, "leave") == 0)
+            found = 1;
+    assert(!found); /* animated out of view: must be culled */
 }
 
 static int sections(float time, int click_y) {
@@ -204,7 +248,7 @@ static void restore_sections(void) {
     assert(sections(1.2f, -1) == 6); /* A new section must not evict restored ones. */
 }
 
-int main(void) { paint(); scrolling(); restore_sections(); }
+int main(void) { paint(); animated_clipping(); scrolling(); restore_sections(); }
 '''
 
 with TemporaryDirectory() as tmp:
