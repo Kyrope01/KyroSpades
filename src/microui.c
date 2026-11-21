@@ -760,11 +760,14 @@ void mu_draw_text(mu_Context *ctx, mu_Font font, const char *str, int len,
 void mu_draw_icon(mu_Context *ctx, int id, mu_Rect rect, mu_Color color) {
   mu_Command *cmd;
   /* Clip against the painted (offset-adjusted) position so animated icons
-     crossing the panel edge are correctly culled or kept. */
+     crossing the panel edge are correctly culled or kept. The original rect is
+     stored in the command with offset_y applied at render time, so do not
+     mutate rect here -- use a separate copy for clipping. */
+  mu_Rect clip_rect = rect;
   if (ctx->paint_offset_y) {
-    rect.y += (int)roundf(ctx->paint_offset_y);
+    clip_rect.y += (int)roundf(ctx->paint_offset_y);
   }
-  int clipped = mu_check_clip(ctx, rect);
+  int clipped = mu_check_clip(ctx, clip_rect);
   if (clipped == MU_CLIP_ALL ) { return; }
   if (clipped == MU_CLIP_PART) { mu_set_clip(ctx, paint_clip(ctx)); }
   /* do icon command */
