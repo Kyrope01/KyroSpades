@@ -33,6 +33,7 @@
 #include <math.h>
 #include <limits.h>
 
+#include "color_correction.h"
 #include "aimtrainer.h"
 #include "lodepng/lodepng.h"
 #include "common.h"
@@ -102,17 +103,15 @@ static struct {
         unsigned int depth_tex;
         int w;
         int h;
-        int hdr;
-        int hdr_requested;
         int target_failed;
         int uni_pp_sat;
         int uni_pp_scale;
         int uni_pp_bias;
         int uni_pp_vig;
         /* New post-proc uniforms: chromatic aberration strength,
-           filmic tone-mapping flag */
+           neutral color correction */
         int uni_pp_ca_strength;
-        int uni_pp_filmic;
+        int uni_pp_cc_enabled;
         int uni_pp_texel;
         int uni_pp_dmg; /* damage feedback: red edge vignette (0..1) */
         int uni_pp_outlines;
@@ -183,8 +182,6 @@ static void postproc_release_targets(void) {
         postproc.flare_tex = 0;
         postproc.w = 0;
         postproc.h = 0;
-        postproc.hdr = 0;
-        postproc.hdr_requested = 0;
         postproc.target_failed = 0;
         postproc.flare_applied = 0;
 }
@@ -597,9 +594,7 @@ void display() {
            always land exactly on 0 (touch precision), and a visually-nil
            post-process pass would otherwise keep running. */
         /* damagefx_vignette() keeps the pass alive for the ~1 s the damage
-           vignette fades out, even when every other post-process is off. HDR
-           alone must not force a no-op pass on non-Core or 2.1 fallback paths. */
-        int hdr_postproc = settings.hdr_rendering && postprocess_hdr_supported();
+           vignette fades out, even when every other post-process is off. */
         float outline_fog_range = camera_mode == CAMERAMODE_SPECTATOR
                 ? settings.spectator_fog_distance : settings.render_distance;
         if(outline_fog_range < 1.0F)
@@ -614,16 +609,13 @@ void display() {
                                   || settings.saturation < -0.5F || settings.saturation > 0.5F
                                   || settings.contrast < -0.5F || settings.contrast > 0.5F
                                   || settings.vignette > 0.5F
-                                  || settings.lens_flare || settings.chromatic_aberration || settings.filmic_tonemapping
-                                  || hdr_postproc || outlines_postproc
+                                  || settings.lens_flare || settings.chromatic_aberration || settings.color_correction
+                                  || outlines_postproc
                                   || damagefx_vignette() > 0.003F));
-        int desired_hdr = postprocess_hdr_supported()
-                && settings.hdr_rendering;
         if(needs_postproc && postproc.target_failed) {
-                if(postproc.w == settings.window_width && postproc.h == settings.window_height
-                   && postproc.hdr_requested == desired_hdr) {
+                if(postproc.w == settings.window_width && postproc.h == settings.window_height) {
                         /* Do not hammer a driver with the same failed allocation
-                           every frame. Resize or a mode change permits one retry. */
+                           every frame. Resizing permits one retry. */
                         needs_postproc = 0;
                 } else {
                         postproc_release_targets();
@@ -665,26 +657,17 @@ void display() {
 #endif
 
                 if(needs_postproc) {
-                        if(postproc.texture && (postproc.w != settings.window_width || postproc.h != settings.window_height
-                                                || postproc.hdr_requested != desired_hdr))
+                        if(postproc.texture && (postproc.w != settings.window_width || postproc.h != settings.window_height))
                                 postproc_release_targets();
 
-                        GLint scene_internal_format = GL_RGBA;
-                        GLenum scene_pixel_type = GL_UNSIGNED_BYTE;
-#ifdef OPENGL_CORE
-                        if(desired_hdr) {
-                                scene_internal_format = GL_RGBA16F;
-                                scene_pixel_type = GL_FLOAT;
-                        }
-#endif
+                        const GLint scene_internal_format = GL_RGBA;
+                        const GLenum scene_pixel_type = GL_UNSIGNED_BYTE;
                         if(!postproc.texture) {
                                 glGenTextures(1, &postproc.texture);
                                 glBindTexture(GL_TEXTURE_2D, postproc.texture);
                                 glTexImage2D(GL_TEXTURE_2D, 0, scene_internal_format,
                                              settings.window_width, settings.window_height, 0,
                                              GL_RGBA, scene_pixel_type, NULL);
-                                postproc.hdr = desired_hdr;
-                                postproc.hdr_requested = desired_hdr;
                                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
                                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
                                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -727,31 +710,6 @@ void display() {
                                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
                                 glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, postproc.depth_tex, 0);
                                 GLenum scene_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-#ifdef OPENGL_CORE
-                                if(scene_status != GL_FRAMEBUFFER_COMPLETE && desired_hdr) {
-                                        /* Some nominally Core drivers expose float textures but
-                                           cannot render to them. Retry the exact same pipeline with
-                                           RGBA8 rather than dropping the entire post-process pass. */
-                                        log_warn("HDR scene target is incomplete (0x%x); retrying with the compatibility target",
-                                                 scene_status);
-                                        glDeleteTextures(1, &postproc.texture);
-                                        glGenTextures(1, &postproc.texture);
-                                        glBindTexture(GL_TEXTURE_2D, postproc.texture);
-                                        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
-                                                     settings.window_width, settings.window_height, 0,
-                                                     GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-                                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-                                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-                                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-                                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-                                        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-                                                               GL_TEXTURE_2D, postproc.texture, 0);
-                                        postproc.hdr = 0;
-                                        scene_internal_format = GL_RGBA;
-                                        scene_pixel_type = GL_UNSIGNED_BYTE;
-                                        scene_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-                                }
-#endif
                                 if(scene_status != GL_FRAMEBUFFER_COMPLETE) {
                                         log_error("Post-process framebuffer is incomplete (0x%x); rendering without post-processing",
                                                   scene_status);
@@ -769,15 +727,6 @@ void display() {
                                 glBindRenderbuffer(GL_RENDERBUFFER, 0);
 #endif
                         }
-
-#ifdef OPENGL_CORE
-                        /* Follow the format that actually succeeded, which may
-                           be RGBA8 after the guarded HDR allocation fallback. */
-                        if(!postproc.hdr) {
-                                scene_internal_format = GL_RGBA;
-                                scene_pixel_type = GL_UNSIGNED_BYTE;
-                        }
-#endif
 
                         /* Window MSAA does not cover an off-screen scene. Render
                            into a matching multisampled target when available,
@@ -845,7 +794,6 @@ void display() {
                                                 "uniform float pp_bias;\n"
                                                 "uniform float pp_vig;\n"
                                                 "uniform float pp_ca_strength;\n"
-                                                "uniform float pp_filmic;\n"
                                                 "uniform vec2 pp_texel;\n"
                                                 "uniform float pp_dmg;\n"
                                                 "uniform float pp_outlines;\n"
@@ -855,11 +803,7 @@ void display() {
                                                 "uniform float pp_depth_far;\n"
                                                 "uniform sampler2D depthmap;\n"
                                                 "uniform sampler2D tex;\n"
-                                                "vec3 acesFilm(vec3 x){\n"
-                                                "    const float a=2.51; const float b=0.03;\n"
-                                                "    const float c=2.43; const float d=0.59; const float e=0.14;\n"
-                                                "    return clamp((x*(a*x+b))/(x*(c*x+d)+e),0.0,1.0);\n"
-                                                "}\n"
+                                                COLOR_CORRECTION_GLSL
                                                 "void main(){\n"
                                                 "    vec2 uv = v_TexCoord;\n"
                                                 "    vec2 dd = uv - 0.5;\n"
@@ -873,10 +817,10 @@ void display() {
                                                 "    } else {\n"
                                                 "        c = texture2D(tex, uv).rgb;\n"
                                                 "    }\n"
+                                                "    c = colorCorrect(c);\n"
                                                 "    float g = dot(c, vec3(0.299, 0.587, 0.114));\n"
                                                 "    c = mix(vec3(g), c, pp_sat);\n"
                                                 "    c = c * pp_scale + pp_bias;\n"
-                                                "    if(pp_filmic > 0.5) c = acesFilm(c);\n"
                                                 "    c *= clamp(1.0 - pp_vig * r2, 0.0, 1.0);\n"
                                                 "    if(pp_dmg > 0.001){\n"
                                                 "        float dm = smoothstep(0.04, 0.45, r2) * pp_dmg;\n"
@@ -915,7 +859,6 @@ void display() {
                                         "uniform float pp_bias;"
                                         "uniform float pp_vig;"
                                         "uniform float pp_ca_strength;"
-                                        "uniform float pp_filmic;"
                                         "uniform vec2 pp_texel;"
                                         "uniform float pp_dmg;"
                                         "uniform float pp_outlines;"
@@ -925,11 +868,7 @@ void display() {
                                         "uniform float pp_depth_far;"
                                         "uniform sampler2D depthmap;"
                                         "uniform sampler2D tex;"
-                                        "vec3 acesFilm(vec3 x){"
-                                        "const float a=2.51;const float b=0.03;"
-                                        "const float c=2.43;const float d=0.59;const float e=0.14;"
-                                        "return clamp((x*(a*x+b))/(x*(c*x+d)+e),0.0,1.0);"
-                                        "}"
+                                        COLOR_CORRECTION_GLSL
                                         "void main(){"
                                         "vec2 uv=gl_TexCoord[0].xy;"
                                         "vec2 dd=uv-0.5;"
@@ -941,10 +880,10 @@ void display() {
                                         "c.g=texture2D(tex,uv).g;"
                                         "c.b=texture2D(tex,uv-off).b;"
                                         "}else{c=texture2D(tex,uv).rgb;}"
+                                        "c=colorCorrect(c);"
                                         "float g=dot(c,vec3(0.299,0.587,0.114));"
                                         "c=mix(vec3(g),c,pp_sat);"
                                         "c=c*pp_scale+pp_bias;"
-                                        "if(pp_filmic>0.5)c=acesFilm(c);"
                                         "c*=clamp(1.0-pp_vig*r2,0.0,1.0);"
                                         "if(pp_dmg>0.001){float dm=smoothstep(0.04,0.45,r2)*pp_dmg;c=mix(c,vec3(0.55,0.04,0.04),dm*0.22);c+=vec3(0.42,0.03,0.03)*dm;}"
                                         "if(pp_outlines>0.5){float thick=clamp(pp_outline_thickness,0.5,8.0);float radius=max(thick*0.5,1.0);vec2 st=pp_texel*radius;float d=texture2D(depthmap,uv).r;"
@@ -966,7 +905,7 @@ void display() {
                                         postproc.uni_pp_bias = glx_uniform_location(postproc.shader, "pp_bias");
                                         postproc.uni_pp_vig = glx_uniform_location(postproc.shader, "pp_vig");
                                         postproc.uni_pp_ca_strength = glx_uniform_location(postproc.shader, "pp_ca_strength");
-                                        postproc.uni_pp_filmic = glx_uniform_location(postproc.shader, "pp_filmic");
+                                        postproc.uni_pp_cc_enabled = glx_uniform_location(postproc.shader, "pp_cc_enabled");
                                         postproc.uni_pp_texel = glx_uniform_location(postproc.shader, "pp_texel");
                                         postproc.uni_pp_dmg = glx_uniform_location(postproc.shader, "pp_dmg");
                                         postproc.uni_pp_outlines = glx_uniform_location(postproc.shader, "pp_outlines");
@@ -978,7 +917,7 @@ void display() {
                                         GLint scene_sampler = glx_uniform_location(postproc.shader, "tex");
                                         if(postproc.uni_pp_sat < 0 || postproc.uni_pp_scale < 0 || postproc.uni_pp_bias < 0
                                            || postproc.uni_pp_vig < 0 || postproc.uni_pp_ca_strength < 0
-                                           || postproc.uni_pp_filmic < 0
+                                           || postproc.uni_pp_cc_enabled < 0
                                            || postproc.uni_pp_texel < 0 || postproc.uni_pp_dmg < 0
                                            || postproc.uni_pp_outlines < 0 || postproc.uni_pp_depthmap < 0
                                            || postproc.uni_pp_outline_thickness < 0 || postproc.uni_pp_fog_range < 0
@@ -1252,9 +1191,7 @@ void display() {
                                 float w = (float)settings.window_width;
                                 float horizon = h * 0.5F;
                                 float intensity = settings.sky_gradient_intensity;
-                                /* Use the render-time fog color (darkened 10%
-                                   when filmic is on) so the sky gradient
-                                   horizon matches the actual fog color. */
+                                /* Match the sky gradient horizon to the rendered fog. */
                                 float fc[3];
                                 fog_color_render(fc);
                                 float sun = lighting_sunlight_scale();
@@ -1346,7 +1283,8 @@ void display() {
                                 if(is_local && local_player_drag_active && players[local_player_id].input.buttons.rmb
                                    && players[local_player_id].held_item == TOOL_BLOCK) {
                                         amount = map_cube_line(local_player_drag_x, local_player_drag_z, 63 - local_player_drag_y, pos[0],
-                                                                                   pos[2], 63 - pos[1], cubes);
+                                                                       pos[2], 63 - pos[1], cubes);
+                                        if(amount > 64) amount = 64; /* guard against cubes[64] overflow */
                                         local_player_drag_amount = amount;
                                 } else {
                                         amount = 1;
@@ -1641,7 +1579,11 @@ void display() {
                                            the un-graded world is already visible — no more freeze. */
                                         glActiveTexture(GL_TEXTURE0);
                                         glBindTexture(GL_TEXTURE_2D, postproc.texture);
+                                        /* Ensure we read from the screen/drawable, not a stale
+                                           read framebuffer (iOS copy mode). */
+                                        glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)live_screen_fbo);
                                         glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, settings.window_width, settings.window_height);
+                                        glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)live_screen_fbo);
                                 }
                                 if(postproc.depth_tex && postproc.fbo) {
                                         glActiveTexture(GL_TEXTURE2);
@@ -1651,16 +1593,19 @@ void display() {
 
                                 if(postproc.shader) {
                                         // derive final shader factors on CPU once per frame
-                                        float e = 1.0F + settings.exposure / 100.0F;
-                                        float ct = 1.0F + settings.contrast / 100.0F;
+                                        /* Do not stack manual color adjustments on top of the neutral grade. */
+                                        const bool use_cc = settings.color_correction != 0;
+                                        float e = use_cc ? 1.0F : 1.0F + settings.exposure / 100.0F;
+                                        float ct = use_cc ? 1.0F : 1.0F + settings.contrast / 100.0F;
                                         glx_use_program(postproc.shader);
-                                        glUniform1f(postproc.uni_pp_sat, 1.0F + settings.saturation / 100.0F); // pp_sat
+                                        glUniform1f(postproc.uni_pp_sat, use_cc ? 1.0F : 1.0F + settings.saturation / 100.0F); // pp_sat
                                         glUniform1f(postproc.uni_pp_scale, e * ct);                            // pp_scale
                                         glUniform1f(postproc.uni_pp_bias, 0.5F * (1.0F - ct));                  // pp_bias
                                         glUniform1f(postproc.uni_pp_vig, (settings.vignette / 100.0F) * 4.0F); // pp_vig
                                         glUniform1f(postproc.uni_pp_ca_strength,
                                                     settings.chromatic_aberration ? settings.chromatic_aberration_strength * 0.01F : 0.0F);
-                                        glUniform1f(postproc.uni_pp_filmic, settings.filmic_tonemapping ? 1.0F : 0.0F);
+                                        glUniform1f(postproc.uni_pp_cc_enabled,
+                                                    use_cc ? 1.0F : 0.0F);
                                         glUniform2f(postproc.uni_pp_texel, 1.0F / settings.window_width, 1.0F / settings.window_height);
                                         glUniform1f(postproc.uni_pp_dmg, damagefx_vignette()); // pp_dmg
                                         glUniform1f(postproc.uni_pp_outlines,
@@ -1771,7 +1716,6 @@ void display() {
                 }
 
                 hud_active->render_2D(ctx, scalex, scalef);
-
                 if(ctx) {
                         mu_end(ctx);
                         hud_ime_update();
@@ -2073,16 +2017,20 @@ void keys(struct window_instance* window, int key, int scancode, int action, int
                         return;
                 }
 
-                if(config_key(key)->toggle) {
+                const struct config_key_pair* ck = config_key(key);
+                if(ck && ck->toggle) {
                         if(chat_input_mode == CHAT_NO_INPUT) {
                                 window_pressed_keys[key] = !window_pressed_keys[key];
                         }
-                } else {
+                } else if(ck) {
                         window_pressed_keys[key] = 1;
                 }
         }
-        if(action == WINDOW_RELEASE && !config_key(key)->toggle)
-                window_pressed_keys[key] = 0;
+        if(action == WINDOW_RELEASE) {
+                const struct config_key_pair* ck = config_key(key);
+                if(ck && !ck->toggle)
+                        window_pressed_keys[key] = 0;
+        }
 
         /* One toggle path for every backend: latch the new state and let
            window_apply() carry out the transition at the start of the next frame.
@@ -2409,10 +2357,9 @@ static void main_apply_perf_preset_bs(void) {
         settings.saturation = 0.0F;
         settings.contrast = 0.0F;
         settings.vignette = 0.0F;
-        settings.filmic_tonemapping = 0;
+        settings.color_correction = 0;
         settings.chromatic_aberration = 0;
         settings.object_outlines = 0;
-        settings.hdr_rendering = 0;
         settings.lens_flare = 0;
         settings.sky_gradient = 0;
         settings.sky_clouds = 0;
@@ -2557,7 +2504,7 @@ int main(int argc, char** argv) {
         /* Default colour settings; saved user preferences override these. */
         settings.lighten_colors = 120;
         settings.exposure = 3.0F;
-        settings.saturation = -22.42F;
+        settings.saturation = 1.0F;
         settings.contrast = 0.0F;
         settings.vignette = 0.0F;
         /* ── Post-processing ───────────────────────────────────────────────── */
@@ -2565,9 +2512,8 @@ int main(int argc, char** argv) {
         settings.object_outline_thickness = 0.7F; /* kept for anyone who turns outlines back on */
         settings.chromatic_aberration = 0; /* off by default; user can enable it */
         settings.chromatic_aberration_strength = 1.5F;
-        /* Keep filmic tone mapping opt-in as well. */
-        settings.filmic_tonemapping = 0;
-        settings.hdr_rendering = 0;
+        /* Use the neutral grade by default. */
+        settings.color_correction = 1;
         settings.dynamic_lights = 1;
         settings.all_player_flashlights = 0; /* Opt-in: never alter remote visuals on upgrade. */
         settings.flash_lights = 1;
@@ -2766,10 +2712,16 @@ int main(int argc, char** argv) {
         }
 #endif
 
-        log_info("Vendor: %s", glGetString(GL_VENDOR));
-        log_info("Renderer: %s", glGetString(GL_RENDERER));
-        log_info("Version: %s", glGetString(GL_VERSION));
-        log_debug("GLSL: %s", glGetString(GL_SHADING_LANGUAGE_VERSION));
+        {
+                const char* vendor = (const char*)glGetString(GL_VENDOR);
+                const char* renderer = (const char*)glGetString(GL_RENDERER);
+                const char* version = (const char*)glGetString(GL_VERSION);
+                const char* glsl = (const char*)glGetString(GL_SHADING_LANGUAGE_VERSION);
+                log_info("Vendor: %s", vendor ? vendor : "(null)");
+                log_info("Renderer: %s", renderer ? renderer : "(null)");
+                log_info("Version: %s", version ? version : "(null)");
+                log_debug("GLSL: %s", glsl ? glsl : "(null)");
+        }
 
         if(settings.multisamples > 0) {
                 glEnable(GL_MULTISAMPLE);

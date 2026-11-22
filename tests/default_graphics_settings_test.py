@@ -25,9 +25,9 @@ assert "contrast                       = 0.0" in config
 assert "vignette                       = 0.0" in config
 assert main.index("settings.exposure = 3.0F;") < main.index("        config_reload();")
 assert "settings.exposure = 3.0F;" in main
-assert "settings.saturation = -22.42F;" in main
+assert "settings.saturation = 1.0F;" in main
 assert "exposure                       = 3.00" in config
-assert "saturation                     = -22.42" in config
+assert "saturation                     = 1.00" in config
 assert "settings.camera_fov = 90.0F;" in main
 assert "camera_fov                     = 90.00000" in config
 assert main.index("settings.camera_fov = 90.0F;") < main.index("        config_reload();")
@@ -37,11 +37,10 @@ for weapon in ("rifle", "shotgun", "smg"):
 assert "settings.ads_zoom_animation = 0;" in main
 assert "ads_zoom_animation             = 0" in config
 
-assert "settings.filmic_tonemapping = 0;" in main
-assert "settings.filmic_tonemapping = 1;" not in main
+assert "settings.color_correction = 1;" in main[main.index("int main(int argc"):]
 assert "settings.chromatic_aberration = 0;" in main
 assert "settings.chromatic_aberration = 1;" not in main
-assert "filmic_tonemapping             = 0" in config
+assert "color_correction               = 1" in config
 assert "chromatic_aberration           = 0" in config
 
 print("Default graphics settings passed")

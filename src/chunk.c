@@ -904,9 +904,12 @@ void chunk_generate_naive(struct libvxl_chunk_copy* blocks, struct tesselator* t
         float baked_sunlight = lighting_world_supported() ? 1.0F : sun;
         bool baked_shadows = shadow_baked_enabled() && sun > 0.0F;
         float baked_shadow_intensity = settings.shadow_intensity * sun;
-        if(baked_shadows)
-                map_read_lock();
 
+        /* NOTE: deliberately do NOT hold map_read_lock() here. blocks is a
+           local snapshot taken under the map lock earlier (map_copy_blocks),
+           and map_sun_shadow() self-locks when it reads the live map. Taking
+           the rwlock here would self-deadlock because map_sun_shadow() is
+           non-recursive. */
         for(size_t k = 0; k < blocks->blocks_sorted_count; k++) {
                 struct libvxl_block* blk = blocks->blocks_sorted + k;
 
@@ -1097,9 +1100,6 @@ void chunk_generate_naive(struct libvxl_chunk_copy* blocks, struct tesselator* t
                 }
         }
 
-        if(baked_shadows)
-                map_read_unlock();
-
         /* max_height bounds vertex positions, not block indices: the highest
            block's top face is at y + 1. Match the greedy/textured meshers. */
         (*max_height)++;
@@ -1148,8 +1148,12 @@ void chunk_generate_textured(struct libvxl_chunk_copy* blocks, struct tesselator
         float baked_sunlight = lighting_world_supported() ? 1.0F : sun;
         bool baked_shadows = shadow_baked_enabled() && sun > 0.0F;
         float baked_shadow_intensity = settings.shadow_intensity * sun;
-        if(baked_shadows)
-                map_read_lock();
+
+        /* NOTE: deliberately do NOT hold map_read_lock() here. blocks is a
+           local snapshot taken under the map lock earlier (map_copy_blocks),
+           and map_sun_shadow() self-locks when it reads the live map. Taking
+           the rwlock here would self-deadlock because map_sun_shadow() is
+           non-recursive. */
 
         for(size_t k = 0; k < blocks->blocks_sorted_count; k++) {
                 struct libvxl_block* blk = blocks->blocks_sorted + k;
@@ -1281,9 +1285,6 @@ void chunk_generate_textured(struct libvxl_chunk_copy* blocks, struct tesselator
                 }
         }
 
-        if(baked_shadows)
-                map_read_unlock();
-
         (*max_height)++;
 }
 
@@ -1292,6 +1293,7 @@ void chunk_update_all() {
         float budget = (chunk_bulk_pending > 0) ? 0.050F : 0.006F;
 
         struct chunk_result_packet result;
+        bool shadow_dirty = false;
         /* Bind the minimap atlas once for the whole batch instead of doing a
            bind/unbind pair per uploaded chunk (two driver round-trips each). */
         bool minimap_bound = false;
@@ -1327,8 +1329,9 @@ void chunk_update_all() {
 
                         tesselator_glx(&result.tesselator, &result.chunk->display_list);
                         /* The depth map caches terrain-only geometry; rebuild it
-                           after an updated chunk reaches the GPU. */
-                        shadow_invalidate();
+                           after an updated chunk reaches the GPU. Deferred to
+                           once per frame after the result-drain loop. */
+                        shadow_dirty = true;
 
                         if(!minimap_bound) {
                                 glBindTexture(GL_TEXTURE_2D, texture_minimap.texture_id);
@@ -1347,9 +1350,14 @@ void chunk_update_all() {
                 tesselator_free(&result.tesselator);
                 free(result.minimap_data);
 
-                if(elapsed > budget)
-                        break;
+        if(elapsed > budget)
+                break;
         }
+
+        /* Invalidate the shadow map once per frame if any chunk was updated,
+           not once per chunk. */
+        if(shadow_dirty)
+                shadow_invalidate();
 
         if(minimap_bound)
                 glBindTexture(GL_TEXTURE_2D, 0);
@@ -1395,20 +1403,39 @@ void chunk_block_update(int x, int y, int z) {
         chunk_lock_unlock(&chunk_block_queue_lock);
 }
 
-static bool iterate_chunk_updates(void* key, void* value, void* user) {
-        /* Assign the current generation on the main thread when enqueuing;
-           pending block edits may have been collected before a rebuild. */
-        struct chunk_work_packet work = *(struct chunk_work_packet*)value;
-        work.gen = chunk_gen;
-        work.bulk = false;
-        channel_put(&chunk_work_queue, &work);
+#define CHUNK_QUEUE_MAX_PENDING 64
 
+struct chunk_queue_ctx {
+        struct chunk_work_packet* items;
+        int* count;
+        int cap;
+};
+
+static bool take_chunk_update(void* key, void* value, void* user) {
+        struct chunk_queue_ctx* ctx = (struct chunk_queue_ctx*)user;
+        if(*ctx->count >= ctx->cap)
+                return false; /* Leave this entry pending for the next frame. */
+        ctx->items[*ctx->count] = *(struct chunk_work_packet*)value;
+        (*ctx->count)++;
         return true;
 }
 
 void chunk_queue_blocks() {
+        /* Snapshot pending chunk rebuilds under the spinlock, then enqueue
+           outside it: channel_put() can take the channel mutex and grow the
+           queue (realloc/memmove), which must not happen while holding a
+           spinlock (deadlock / priority-inversion risk on single-core). */
+        struct chunk_work_packet pending[CHUNK_QUEUE_MAX_PENDING];
+        int count = 0;
+        struct chunk_queue_ctx ctx = { pending, &count, CHUNK_QUEUE_MAX_PENDING };
+
         chunk_lock_lock(&chunk_block_queue_lock);
-        ht_iterate(&chunk_block_queue, NULL, iterate_chunk_updates);
-        ht_clear(&chunk_block_queue);
+        ht_iterate_remove(&chunk_block_queue, &ctx, take_chunk_update);
         chunk_lock_unlock(&chunk_block_queue_lock);
+
+        for(int k = 0; k < count; k++) {
+                pending[k].gen = chunk_gen;
+                pending[k].bulk = false;
+                channel_put(&chunk_work_queue, &pending[k]);
+        }
 }

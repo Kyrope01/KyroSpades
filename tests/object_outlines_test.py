@@ -28,7 +28,7 @@ assert "IMPORT_SETTING(settings.object_outlines, object_outlines, atoi(value));"
 assert '.value = &settings_tmp.object_outlines' in config
 assert '.name = "Object outlines"' in config
 assert "int outlines_postproc = settings.object_outlines;" in main
-assert "|| hdr_postproc || outlines_postproc" in main
+assert "|| outlines_postproc" in main
 assert "outlines_postproc = 0;" in main
 assert main.count('"uniform sampler2D depthmap;') >= 2
 assert main.count('"uniform float pp_outlines;') == 2

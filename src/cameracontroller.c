@@ -230,7 +230,7 @@ void cameracontroller_fps(float dt) {
 
 	last_cy = players[local_player_id].physics.eye.y - players[local_player_id].physics.velocity.y * 0.4F;
 
-	if(!aimtrainer_active() && chat_input_mode == CHAT_NO_INPUT && hud_active && hud_active->render_world) {
+	if(chat_input_mode == CHAT_NO_INPUT && hud_active && hud_active->render_world) {
 		players[local_player_id].input.keys.up = window_key_down(WINDOW_KEY_UP);
 		players[local_player_id].input.keys.down = window_key_down(WINDOW_KEY_DOWN);
 		players[local_player_id].input.keys.left = window_key_down(WINDOW_KEY_LEFT);
@@ -252,13 +252,8 @@ void cameracontroller_fps(float dt) {
 		}
 	}
 
-	if(aimtrainer_active()) {
-		struct Player* trainee = &players[local_player_id];
-		trainee->input.keys.packed = 0;
-		trainee->physics.jump = 0;
-		if(trainee->held_item != TOOL_GUN)
-			trainee->held_item = TOOL_GUN;
-	}
+	if(aimtrainer_active())
+		players[local_player_id].held_item = TOOL_GUN;
 
 	/* View-only offset decays. The fast loop runs in substeps whose dts
 	   sum to the frame time, and exp() composes exactly across them. */

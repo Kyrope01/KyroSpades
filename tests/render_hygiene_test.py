@@ -82,7 +82,7 @@ for field, cap in (('depth', 'GL_DEPTH_TEST'), ('blend', 'GL_BLEND'), ('cull', '
 assert 'glDepthFunc' not in sky and 'glColorMask' not in sky and 'glActiveTexture' not in sky
 
 # --- settings that could never change are gone ------------------------------
-for dead in ('opengl14', 'color_correction', 'shadow_entities'):
+for dead in ('opengl14', 'shadow_entities'):
     assert f'int {dead};' not in config_h, dead
     assert f'settings.{dead}' not in main, dead
     assert f'settings.{dead}' not in sky, dead
@@ -102,7 +102,7 @@ for line in client.splitlines()[1:]:
         key, value = line.split('=', 1)
         ini[key.strip()] = value.strip()
 
-for key in ('filmic_tonemapping', 'chromatic_aberration', 'healthbar', 'camera_fov'):
+for key in ('color_correction', 'chromatic_aberration', 'healthbar', 'camera_fov'):
     match = re.search(rf'settings\.{re.escape(key)}\s*=\s*([^;]+);', body)
     assert match, key
     default = match.group(1).strip().rstrip('Ff')

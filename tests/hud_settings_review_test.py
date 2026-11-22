@@ -24,7 +24,7 @@ int main(void){settings.window_width=1920;settings.window_height=1080;settings.f
 '''
 with tempfile.TemporaryDirectory() as d:
  p=Path(d);(p/'x.c').write_text(h);subprocess.run(['cc','-std=c11','-fsanitize=undefined','-fno-sanitize-recover=all',str(p/'x.c'),'-o',str(p/'x')],check=True);subprocess.run([str(p/'x')],check=True)
-assert 'if(!(ctx->mouse_down & MU_MOUSE_LEFT))\n                hud_settings_commit();' in s
+assert 'settings_was_mouse_down' in s and 'hud_settings_commit();' in s
 assert 'if(hud_active == &hud_settings && new != &hud_settings)\n                hud_settings_commit();' in s
 cfg=(root/'src/config.c').read_text();assert '.value = &settings_windowed_width' in cfg and '.value = &settings_windowed_height' in cfg
 assert 'window_windowed_size(&xres, &yres);' in cfg

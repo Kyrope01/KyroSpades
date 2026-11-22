@@ -193,6 +193,25 @@ void hud_init() {
         hud_recording.ctx = malloc(sizeof(mu_Context));
         hud_replay.ctx = malloc(sizeof(mu_Context));
 
+        if(!hud_serverlist.ctx || !hud_settings.ctx || !hud_controls.ctx ||
+           !hud_chatlog.ctx || !hud_demolist.ctx || !hud_skins.ctx ||
+           !hud_macros.ctx || !hud_recording.ctx || !hud_replay.ctx) {
+                log_error("hud_init: failed to allocate microui contexts");
+                free(hud_serverlist.ctx);
+                free(hud_settings.ctx);
+                free(hud_controls.ctx);
+                free(hud_chatlog.ctx);
+                free(hud_demolist.ctx);
+                free(hud_skins.ctx);
+                free(hud_macros.ctx);
+                free(hud_recording.ctx);
+                free(hud_replay.ctx);
+                hud_serverlist.ctx = hud_settings.ctx = hud_controls.ctx = NULL;
+                hud_chatlog.ctx = hud_demolist.ctx = hud_skins.ctx = NULL;
+                hud_macros.ctx = hud_recording.ctx = hud_replay.ctx = NULL;
+                return;
+        }
+
         hud_change(&hud_serverlist);
 }
 
@@ -246,12 +265,18 @@ float hud_ui_scale(void) {
         /* Enlarge touch targets on physically small, high-resolution screens.
            Android-only for now: the >=1920 heuristic would otherwise also double
            the UI on ordinary 1080p desktop monitors. Proper DPI-based scaling for
-           desktop can be added later. Recompute every call (no caching): the
-           surface rotates at runtime and the real resolution isn't known yet when
-           hud_init runs, so a cached value would lock in the wrong scale. */
+           desktop can be added later. Cached; invalidated on window resize via
+           hud_ui_scale_invalidate(). */
+        static float cached_scale = 0.0F;
+        static int cached_w = 0, cached_h = 0;
+        if(cached_scale > 0.0F && settings.window_width == cached_w && settings.window_height == cached_h)
+                return cached_scale;
         int big = settings.window_width > settings.window_height
                 ? settings.window_width : settings.window_height;
-        return (big >= 1920) ? 2.0F : 1.0F;
+        cached_scale = (big >= 1920) ? 2.0F : 1.0F;
+        cached_w = settings.window_width;
+        cached_h = settings.window_height;
+        return cached_scale;
 #else
         return 1.0F;
 #endif
@@ -590,7 +615,12 @@ static void hud_colorpicker_close(int restore_cursor);
 static int pie_attack_suppressed[2];
 static int pie_key_down;
 static float teamplay_last_tick;
+static float join_displayed_progress;
+static double join_progress_time = -1.0;
+
 static void hud_ingame_init() {
+        join_displayed_progress = 0.0F;
+        join_progress_time = -1.0;
         pie_menu_close(false);
         pie_attack_suppressed[0] = pie_attack_suppressed[1] = 0;
         pie_key_down = 0;
@@ -1905,9 +1935,58 @@ static void hud_colorpicker_render(void) {
         glColor3f(1.0F, 1.0F, 1.0F);
 }
 
+/* The sweep only highlights the completed portion; it never fakes progress. */
+static void hud_join_loading_bar(float height, float progress) {
+        float width = settings.window_width;
+        float target = fmaxf(0.0F, fminf(1.0F, progress));
+        bool reduced = settings.ui_reduced_motion;
+        double now = window_time();
+        float dt = join_progress_time < 0.0 ? 0.016F
+                   : fmaxf(0.0F, fminf(0.1F, (float)(now - join_progress_time)));
+        join_progress_time = now;
+        if(reduced || target < join_displayed_progress) {
+                join_displayed_progress = target;
+        } else {
+                /* Same exponential response as the health bar when healing. */
+                join_displayed_progress += (target - join_displayed_progress) * (1.0F - expf(-12.0F * dt));
+                if(target - join_displayed_progress < 0.0005F)
+                        join_displayed_progress = target;
+        }
+        float fill = width * join_displayed_progress;
+        mu_Color accent = reduced ? mu_color(settings.ui_accent_r, settings.ui_accent_g, settings.ui_accent_b, 255)
+                                  : mu_accent_color(1.0F, 255);
+        bool batched = glx_batch2d_enabled();
+        glx_batch2d_enable(true);
+        glColor3ub(46, 46, 46);
+        glx_draw_quad_2d(0.0F, height, width, height);
+        if(fill > 0.0F) {
+                glColor3ub(accent.r, accent.g, accent.b);
+                glx_draw_quad_2d(0.0F, height, fill, height);
+        }
+        if(!reduced && fill > 0.0F) {
+                enum { SEGMENTS = 24 };
+                float span = fmaxf(32.0F, width * 0.16F);
+                float sweep = -span + fmodf((float)now, 1.65F) / 1.65F * (width + span);
+                for(int i = 0; i < SEGMENTS; ++i) {
+                        float x0 = fmaxf(0.0F, sweep + span * i / SEGMENTS);
+                        float x1 = fminf(fill, sweep + span * (i + 1) / SEGMENTS);
+                        if(x1 <= x0)
+                                continue;
+                        float crest = sinf(3.14159265F * (i + 0.5F) / SEGMENTS);
+                        float light = 0.38F * crest * crest;
+                        glColor3ub(accent.r + (255 - accent.r) * light,
+                                   accent.g + (255 - accent.g) * light,
+                                   accent.b + (255 - accent.b) * light);
+                        glx_draw_quad_2d(x0, height, x1 - x0, height);
+                }
+        }
+        glx_batch2d_flush();
+        glx_batch2d_enable(batched);
+}
+
 static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
         if(local_player_id < 0 || local_player_id >= PLAYERS_MAX)
-                local_player_id = PLAYERS_MAX - 1;
+                return; /* no valid local player to render a HUD for */
         // window_mousemode(camera_mode==CAMERAMODE_SELECTION?WINDOW_CURSOR_ENABLED:WINDOW_CURSOR_DISABLED);
 
         /* Fixed-function world/model rendering can leave the texture combiner
@@ -2002,6 +2081,7 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                 for(int k = 0; k < 40; k++) {
                         max = max(max, network_stats[k].ingoing + network_stats[k].outgoing);
                 }
+                if(max == 0) max = 1; /* avoid division by zero when idle */
                 for(int k = 0; k < 40; k++) {
                         float in_h = (float)(network_stats[39 - k].ingoing) / max * 160.0F;
                         float out_h = (float)(network_stats[39 - k].ingoing + network_stats[39 - k].outgoing) / max * 160.0F;
@@ -2035,7 +2115,8 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
         }
 
         if(network_map_transfer || daytime_weather_awaiting_sky()) {
-                hud_common_render(ctx);
+                if(ctx)
+                        hud_common_render(ctx);
                 glColor3ub(255, 255, 255);
 
                 texture_draw(&texture_splash_icon,
@@ -2048,8 +2129,7 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                 float p = (compressed_chunk_data_estimate > 0) ?
                         ((float)compressed_chunk_data_offset / (float)compressed_chunk_data_estimate) :
                         0.0F;
-                glColor3ub(68, 68, 68);
-                texture_draw(&texture_loader, 0, texture_loader.height, settings.window_width, texture_loader.height);
+                float bar_height = fmaxf(8.0F, roundf(8.0F * scalef));
 
                 glColor3ub(255, 255, 255);
                 texture_draw(&texture_splash,
@@ -2058,15 +2138,7 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                          settings.window_height * 4.0F / 3.0F * 0.7F,
                          settings.window_height * 0.7F);
 
-                mu_Color color = mu_accent_color(1.F, 255);
-                glColor3ub(color.r, color.g, color.b);
-                texture_draw(
-                        &texture_loader,
-                        0,
-                        texture_loader.height,
-                        fmin(1.F, p) * settings.window_width,
-                        texture_white.height
-                );
+                hud_join_loading_bar(bar_height, network_map_transfer ? p : 1.0F);
 
                 glColor3f(1.0F, 1.0F, 1.0F);
                 char str[128];
@@ -2076,10 +2148,12 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                 else
                         sprintf(str, "Loading Map %iKB/%iKB", compressed_chunk_data_offset / 1024,
                                         compressed_chunk_data_estimate / 1024);
-                font_render(4.F, texture_loader.height + 16.F + 4.F, 16, str);
+                font_render(4.F, bar_height + 16.F + 4.F, 16, str);
 
                 font_select(FONT_FIXEDSYS);
         } else {
+                join_displayed_progress = 0.0F;
+                join_progress_time = -1.0;
                 if(window_key_down(WINDOW_KEY_HIDEHUD)) {
                         hud_colorpicker_render(); /* still usable with the HUD hidden */
                         return;
@@ -2092,9 +2166,9 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                 if(screen_current == SCREEN_TEAM_SELECT) {
                         glColor3f(1.0F, 1.0F, 1.0F);
                         char join_str[48];
-                        sprintf(join_str, "Press 1 to join %s", gamestate.team_1.name);
+                        snprintf(join_str, sizeof(join_str), "Press 1 to join %s", gamestate.team_1.name);
                         font_centered(settings.window_width / 4.0F, 61 * scalef, 16.F, join_str);
-                        sprintf(join_str, "Press 2 to join %s", gamestate.team_2.name);
+                        snprintf(join_str, sizeof(join_str), "Press 2 to join %s", gamestate.team_2.name);
                         font_centered(settings.window_width / 4.0F * 3.0F, 61 * scalef, 16.F, join_str);
                         font_centered(settings.window_width / 2.0F, 61 * scalef, 16.F, "Press 3 to spectate");
                         if(!network_logged_in)
@@ -2130,22 +2204,22 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 g = team.green / 255.F;
                                 b = team.blue / 255.F;
 
-                                char score_str[8];
+                                char score_str[16];
                                 glColor3ub(team.red, team.green, team.blue);
 
                                 switch(gamestate.gamemode_type) {
                                         case GAMEMODE_CTF:
-                                                sprintf(score_str, "%i-%i",
-                                                                i == 0 ? gamestate.gamemode.ctf.team_1_score:
-                                                                                                                           gamestate.gamemode.ctf.team_2_score,
-                                                                gamestate.gamemode.ctf.capture_limit);
+                                                snprintf(score_str, sizeof(score_str), "%i-%i",
+                                                                 i == 0 ? gamestate.gamemode.ctf.team_1_score:
+                                                                                                                            gamestate.gamemode.ctf.team_2_score,
+                                                                 gamestate.gamemode.ctf.capture_limit);
                                                 break;
                                         case GAMEMODE_TC: {
                                                 int t = 0;
                                                 for(int k = 0; k < gamestate.gamemode.tc.territory_count; k++)
                                                         if(gamestate.gamemode.tc.territory[k].team == TEAM_1)
                                                                 t++;
-                                                sprintf(score_str, "%i-%i", t, gamestate.gamemode.tc.territory_count);
+                                                snprintf(score_str, sizeof(score_str), "%i-%i", t, gamestate.gamemode.tc.territory_count);
                                                 break;
                                         }
                                 }
@@ -2174,7 +2248,7 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                 if(scoreboard_open) {
                         if(network_connected && network_logged_in) {
                                 char ping_str[16];
-                                sprintf(ping_str, "PING: %ums", network_ping());
+                                snprintf(ping_str, sizeof(ping_str), "PING: %ums", network_ping());
                                 glColor3f(1.0F, 0.0F, 0.0F);
                                 font_centered(settings.window_width / 2.0F, settings.window_height - 4.F, 16.F, ping_str);
                         }
@@ -2243,14 +2317,14 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                         b = 0.1F;
                                 }
 
-                                char score_str[8];
+                                char score_str[16];
 
                                 if(i != 2) {
                                         switch(gamestate.gamemode_type) {
                                                 case GAMEMODE_CTF:
-                                                        sprintf(score_str, "%i-%i",
+                                                        snprintf(score_str, sizeof(score_str), "%i-%i",
                                                                         i == 0 ? gamestate.gamemode.ctf.team_1_score:
-                                                                                                                           gamestate.gamemode.ctf.team_2_score,
+                                                                                                                                gamestate.gamemode.ctf.team_2_score,
                                                                         gamestate.gamemode.ctf.capture_limit);
                                                         break;
                                                 case GAMEMODE_TC: {
@@ -2258,7 +2332,7 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                                         for(int k = 0; k < gamestate.gamemode.tc.territory_count; k++)
                                                                 if(gamestate.gamemode.tc.territory[k].team == TEAM_1)
                                                                         t++;
-                                                        sprintf(score_str, "%i-%i", t, gamestate.gamemode.tc.territory_count);
+                                                        snprintf(score_str, sizeof(score_str), "%i-%i", t, gamestate.gamemode.tc.territory_count);
                                                         break;
                                                 }
                                         }
@@ -2423,13 +2497,16 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
 
                 if(camera_mode == CAMERAMODE_BODYVIEW
                    || (camera_mode == CAMERAMODE_SPECTATOR && cameracontroller_bodyview_mode)) {
-                        if(cameracontroller_bodyview_player != local_player_id) {
+                        const bool show_spectating_name = cameracontroller_bodyview_player != local_player_id;
+                        const float name_height = 22.0F;
+                        const float name_top = 4.0F + name_height;
+                        if(show_spectating_name) {
                                 font_select(FONT_FIXEDSYS);
                                 char bv_buf[64];
                                 snprintf(bv_buf, sizeof(bv_buf), "Spectating %s", players[cameracontroller_bodyview_player].name);
-                                float bv_nh = 22.F;
+                                float bv_nh = name_height;
                                 float bv_nx = settings.window_width / 2.0F - font_length(bv_nh, bv_buf) / 2.0F;
-                                float bv_ny = 4.F + bv_nh;
+                                float bv_ny = name_top;
                                 unsigned char bv_r = 255, bv_g = 255, bv_b = 255;
                                 switch(players[cameracontroller_bodyview_player].team) {
                                         case TEAM_1: bv_r = gamestate.team_1.red; bv_g = gamestate.team_1.green; bv_b = gamestate.team_1.blue; break;
@@ -2451,10 +2528,13 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                         if(window_time() - local_player_death_time <= local_player_respawn_time) {
                                 glColor3f(1.0F, 0.0F, 0.0F);
                                 int cnt = local_player_respawn_time - (int)(window_time() - local_player_death_time);
-                                char coin[16];
-                                sprintf(coin, "INSERT COIN:%i", cnt);
-                                font_centered(settings.window_width / 2.0F,
-                                                          53.0F * scalef * (cameracontroller_bodyview_mode ? 2.0F : 1.0F), 53.0F * scalef, coin);
+                                char coin[24];
+                                snprintf(coin, sizeof(coin), "INSERT COIN:%i", cnt);
+                                float coin_height = 53.0F * scalef;
+                                float coin_top = coin_height * (cameracontroller_bodyview_mode ? 2.0F : 1.0F);
+                                if(show_spectating_name)
+                                        coin_top = fmaxf(coin_top, name_top + 8.0F + coin_height);
+                                font_centered(settings.window_width / 2.0F, coin_top, coin_height, coin);
                                 if(local_player_respawn_cnt_last != cnt) {
                                         if(cnt < 4) {
                                                 sound_create(SOUND_LOCAL, (cnt == 1) ? &sound_beep1 : &sound_beep2, 0.0F, 0.0F, 0.0F);
@@ -2570,8 +2650,8 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 glColor3f(1, 1, 1);
 
                         font_select(FONT_FANTASY);
-                        char hp[4];
-                        sprintf(hp, "%i", health);
+                        char hp[8];
+                        snprintf(hp, sizeof(hp), "%i", health);
                         float health_top = settings.healthbar ? 60.0F : 40.0F;
                         hud_texture_draw(&texture_health, 8.F, health_top, 36.0F, 32.F);
                         hud_font_render(48.F, health_top - 2.0F, 30.F, hp, 1.F);
@@ -3268,7 +3348,7 @@ texture_draw_empty_rotated(settings.window_width - 143 * scalef + tent2_x * map_
                 camera_hit_fromplayer(&hit, local_player_id, 128.0F);
 
                 if(hit.type == CAMERA_HITTYPE_PLAYER
-                   && player_intersection_type >= 0
+                   && player_intersection_type >= 0 && player_intersection_type < 4
                    && (players[local_player_id].team == TEAM_SPECTATOR
                            || players[player_intersection_player].team == players[local_player_id].team)) {
                         font_select(FONT_FIXEDSYS);
@@ -3457,17 +3537,22 @@ static void hud_ingame_scroll(double yoffset) {
                 int h = players[local_player_id].held_item;
                 if(!players[local_player_id].items_show)
                         local_player_lasttool = h;
-                h += (yoffset < 0) ? 1 : -1;
-                if(h < 0)
-                        h = 3;
-                if(h == TOOL_BLOCK && local_player_blocks == 0)
-                        h += (yoffset < 0) ? 1 : -1;
-                if(h == TOOL_GUN && local_player_ammo + local_player_ammo_reserved == 0)
-                        h += (yoffset < 0) ? 1 : -1;
-                if(h == TOOL_GRENADE && local_player_grenades == 0)
-                        h += (yoffset < 0) ? 1 : -1;
-                if(h > 3)
-                        h = 0;
+                int dir = (yoffset < 0) ? 1 : -1;
+                /* Cycle through tools, skipping empty ones. Spade (0) is always
+                   valid, so this loop is guaranteed to terminate. The old code
+                   applied skip adjustments in a single pass without re-clamping
+                   or re-checking emptiness, which could land on an empty tool
+                   or step outside [0,3]. */
+                for(int i = 0; i < 4; i++) {
+                        h += dir;
+                        if(h < 0) h = 3;
+                        if(h > 3) h = 0;
+                        int empty = 0;
+                        if(h == TOOL_BLOCK && local_player_blocks == 0) empty = 1;
+                        if(h == TOOL_GUN && local_player_ammo + local_player_ammo_reserved == 0) empty = 1;
+                        if(h == TOOL_GRENADE && local_player_grenades == 0) empty = 1;
+                        if(!empty) break;
+                }
                 players[local_player_id].held_item = h;
                 sound_create(SOUND_LOCAL, &sound_switch, 0.0F, 0.0F, 0.0F);
                 player_on_held_item_change(players + local_player_id);
@@ -3904,8 +3989,13 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
                 char* space = strrchr(chat[0][0], ' ');
                 char* incomplete = space ? space + 1 : chat[0][0];
                 const char* match = hud_ingame_completeword(incomplete);
-                if(match && strlen(match) + strlen(chat[0][0]) < 128)
-                        strcpy(incomplete, match);
+                if(match) {
+                        size_t remaining = sizeof(chat[0][0]) - (size_t)(incomplete - chat[0][0]) - 1;
+                        size_t mlen = strlen(match);
+                        if(mlen > remaining) mlen = remaining;
+                        memcpy(incomplete, match, mlen);
+                        incomplete[mlen] = '\0';
+                }
         }
 
         if(chat_input_mode == CHAT_NO_INPUT) {
@@ -4045,8 +4135,8 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
                         if((key == WINDOW_KEY_CURSOR_UP || key == WINDOW_KEY_CURSOR_DOWN || key == WINDOW_KEY_CURSOR_LEFT
                                 || key == WINDOW_KEY_CURSOR_RIGHT)
                            && camera_mode == CAMERAMODE_FPS && players[local_player_id].held_item == TOOL_BLOCK) {
-                                int y;
-                                for(y = 0; y < 8; y++) {
+                                int found = 0;
+                                for(int y = 0; y < 8 && !found; y++) {
                                         for(int x = 0; x < 8; x++) {
                                                 if(texture_block_color(x, y) == players[local_player_id].block.packed) {
                                                         switch(key) {
@@ -4073,21 +4163,21 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
                                                         }
                                                         players[local_player_id].block.packed = texture_block_color(x, y);
                                                         network_updateColor();
-                                                        y = 10;
+                                                        found = 1;
                                                         break;
                                                 }
                                         }
                                 }
-                if(y < 10) {
+                if(!found) {
                                 players[local_player_id].block.packed = texture_block_color(3, 0);
                                 network_updateColor();
                         }
                 } else if((key == WINDOW_KEY_CURSOR_UP || key == WINDOW_KEY_CURSOR_DOWN || key == WINDOW_KEY_CURSOR_LEFT
                                    || key == WINDOW_KEY_CURSOR_RIGHT)
                                   && camera_mode == CAMERAMODE_SPECTATOR) {
-                        int py;
+                        int found = 0;
                         unsigned int cur = rgb((int)(fog_color[0] * 255.0F + 0.5F), (int)(fog_color[1] * 255.0F + 0.5F), (int)(fog_color[2] * 255.0F + 0.5F));
-                        for(py = 0; py < 8; py++) {
+                        for(int py = 0; py < 8 && !found; py++) {
                                 for(int px = 0; px < 8; px++) {
                                         if(texture_block_color(px, py) == cur) {
                                                 switch(key) {
@@ -4113,12 +4203,12 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
                                                 fog_color[1] = ((cur >> 8) & 0xFF) / 255.0F;
                                                 fog_color[2] = ((cur >> 16) & 0xFF) / 255.0F;
                                                 spec_color_palette_time = window_time() + 2.0;
-                                                py = 10;
+                                                found = 1;
                                                 break;
                                         }
                                 }
                         }
-                        if(py < 10) {
+                        if(!found) {
                                 cur = texture_block_color(3, 0);
                                 fog_color[0] = (cur & 0xFF) / 255.0F;
                                 fog_color[1] = ((cur >> 8) & 0xFF) / 255.0F;
@@ -4236,7 +4326,8 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
                                                         login.green = players[local_player_id].block.green;
                                                         login.red = players[local_player_id].block.red;
                                                         const char* join_name = anonymous_spectator ? "Anonymous" : settings.name;
-                                                        strcpy(login.name, join_name);
+                                                        strncpy(login.name, join_name, sizeof(login.name) - 1);
+                                                        login.name[sizeof(login.name) - 1] = '\0';
                                                         network_send(PACKET_EXISTINGPLAYER_ID, &login,
                                                                                  sizeof(login) - sizeof(login.name) + strlen(join_name) + 1);
                                                         screen_current = SCREEN_NONE;
@@ -4275,7 +4366,8 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
                                                 login.blue = players[local_player_id].block.blue;
                                                 login.green = players[local_player_id].block.green;
                                                 login.red = players[local_player_id].block.red;
-                                                strcpy(login.name, settings.name);
+                                                strncpy(login.name, settings.name, sizeof(login.name) - 1);
+                                                login.name[sizeof(login.name) - 1] = '\0';
                                                 network_send(PACKET_EXISTINGPLAYER_ID, &login,
                                                                          sizeof(login) - sizeof(login.name) + strlen(settings.name) + 1);
                                         }
@@ -4399,7 +4491,8 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
                                 chat_cursor_to_rowcol(rs, rl, rows, &cr, &cc);
                                 if(cr == 0) {
                                         if(chat_history_pos < 127) {
-                                                strcpy(chat[0][0], chat[2][++chat_history_pos]);
+                                                strncpy(chat[0][0], chat[2][++chat_history_pos], sizeof(chat[0][0]) - 1);
+                                                chat[0][0][sizeof(chat[0][0]) - 1] = '\0';
                                                 chat_cursor = (int)strlen(chat[0][0]);
                                                 chat_sel_clear();
                                         }
@@ -4418,7 +4511,8 @@ static void hud_ingame_keyboard(int key, int action, int mods, int internal) {
                                 chat_cursor_to_rowcol(rs, rl, rows, &cr, &cc);
                                 if(cr >= rows - 1) {
                                         if(chat_history_pos > 0) {
-                                                strcpy(chat[0][0], chat[2][--chat_history_pos]);
+                                                strncpy(chat[0][0], chat[2][--chat_history_pos], sizeof(chat[0][0]) - 1);
+                                                chat[0][0][sizeof(chat[0][0]) - 1] = '\0';
                                                 chat_cursor = (int)strlen(chat[0][0]);
                                                 chat_sel_clear();
                                         }
@@ -5123,6 +5217,11 @@ static int hud_serverlist_sort_ping(const void* a, const void* b) {
 static void hud_serverlist_pingupdate(void* e, float time_delta, char* aos) {
         pthread_mutex_lock(&serverlist_lock);
         if(!e) {
+                /* Ping update for an existing entry: bail if the list is empty. */
+                if(!serverlist || server_count <= 0) {
+                        pthread_mutex_unlock(&serverlist_lock);
+                        return;
+                }
                 for(int k = 0; k < server_count; k++)
                         if(!strcmp(serverlist[k].identifier, aos)) {
                                 serverlist[k].ping = ceil(time_delta * 1000.0F);
@@ -5141,7 +5240,8 @@ static void hud_serverlist_pingupdate(void* e, float time_delta, char* aos) {
                 server_count++;
         }
 
-        qsort(serverlist, server_count, sizeof(struct serverlist_entry), hud_serverlist_sort);
+        if(serverlist && server_count > 0)
+                qsort(serverlist, server_count, sizeof(struct serverlist_entry), hud_serverlist_sort);
         pthread_mutex_unlock(&serverlist_lock);
 }
 
@@ -6358,7 +6458,7 @@ static void hud_settings_render(mu_Context* ctx, float scalex, float scaley) {
                         ctx->style->colors[MU_COLOR_BORDER] = accent;
                         ctx->style->colors[MU_COLOR_TEXT] = white;
 
-                        int expanded = mu_begin_treenode(ctx, a->subcategory);
+                        int expanded = mu_begin_treenode_ex(ctx, a->subcategory, MU_OPT_EXPANDED);
 
                         ctx->style->colors[MU_COLOR_TEXT] = old_text;
                         ctx->style->colors[MU_COLOR_BORDER] = old_border;
@@ -6410,8 +6510,11 @@ static void hud_settings_render(mu_Context* ctx, float scalex, float scaley) {
         }
 
         /* Commit once on release; the working copy remains visible while dragging. */
-        if(!(ctx->mouse_down & MU_MOUSE_LEFT))
+        static int settings_was_mouse_down = 0;
+        int settings_is_mouse_down = !!(ctx->mouse_down & MU_MOUSE_LEFT);
+        if(settings_was_mouse_down && !settings_is_mouse_down)
                 hud_settings_commit();
+        settings_was_mouse_down = settings_is_mouse_down;
 }
 
 static void hud_settings_keyboard(int key, int action, int mods, int internal) {
@@ -6798,6 +6901,11 @@ static void hud_demolist_init(void) {
            hud_init() and must not be touched from here. */
         if(demo_files) { for(int i = 0; i < demo_file_count; i++) free(demo_files[i]); free(demo_files); demo_files = NULL; }
         demo_file_count = demo_list_files(&demo_files);
+        if(demo_file_count > 0 && !demo_files) {
+                /* demo_list_files reported entries but allocation failed;
+                   treat as empty rather than dereferencing NULL below. */
+                demo_file_count = 0;
+        }
 }
 
 static void hud_demolist_render(mu_Context* ctx, float scalex, float scaley) {
@@ -7085,6 +7193,13 @@ static void hud_macros_touch(void* finger, int action, float x, float y, float d
 }
 
 static void hud_macros_keyboard(int key, int action, int mods, int internal) {
+        if(key == WINDOW_KEY_ESCAPE && action == WINDOW_PRESS) {
+                if(macro_edit_index >= 0) {
+                        macro_edit_index = -1;
+                        return;
+                }
+                hud_change(&hud_serverlist);
+        }
         if(macro_edit_index >= 0 && action == WINDOW_PRESS
            && hud_macros.ctx && hud_macros.ctx->focus == 0) {
                 struct config_macro* m = list_get(&config_macros, macro_edit_index);
@@ -7092,9 +7207,6 @@ static void hud_macros_keyboard(int key, int action, int mods, int internal) {
                 macro_edit_index = -1;
                 config_save();
                 return;
-        }
-        if(key == WINDOW_KEY_ESCAPE && action == WINDOW_PRESS) {
-                hud_change(&hud_serverlist);
         }
 }
 
@@ -7176,6 +7288,10 @@ static void hud_recording_keyboard(int key, int action, int mods, int internal) 
         (void)mods;
         (void)internal;
         if(key == WINDOW_KEY_ESCAPE && action == WINDOW_PRESS) {
+                if(hud_recording_waiting_for_key) {
+                        hud_recording_waiting_for_key = false;
+                        return;
+                }
                 hud_change(&hud_serverlist);
         }
         if(hud_recording_waiting_for_key && action == WINDOW_PRESS) {
@@ -7261,6 +7377,10 @@ static void hud_replay_init(void) {
 
 static void hud_replay_keyboard(int key, int action, int mods, int internal) {
         if(key == WINDOW_KEY_ESCAPE && action == WINDOW_PRESS) {
+                if(hud_replay_waiting_for_key) {
+                        hud_replay_waiting_for_key = false;
+                        return;
+                }
                 hud_change(&hud_serverlist);
         }
         if(hud_replay_waiting_for_key && action == WINDOW_PRESS) {

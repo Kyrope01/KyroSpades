@@ -41,7 +41,7 @@
 #include "config.h"
 #include "daytime_weather.h"
 #include "lighting.h"
-#include "aimtrainer.h"
+#include "file.h"
 #include "water.h"
 #include "glowing_blocks.h"
 #include "channel.h"
@@ -59,16 +59,11 @@ float fog_color[4] = {0.5F, 0.9098F, 1.0F, 1.0F};
 float sun_dir[3] = {-0.5F, 0.8F, -0.3F};
 
 void fog_color_render(float out[3]) {
-        /* When filmic tone mapping is enabled, ACES lifts midtones and can
-           make distant fog read brighter than intended.  Darken the fog
-           color by 10% at render time so the visible fog stays at the same
-           perceived brightness the user picked in the color picker. */
         /* The server's fog color is the daylight sky. Scale only its render
            value, not fog_color itself (used by the color picker and packets). */
         /* Sky brightness already lives in the stored fog colour. Multiplying
            by its derived daylight level here would darken dusk twice. */
-        float scale = (settings.filmic_tonemapping ? 0.9F : 1.0F)
-                      * settings.sunlight_intensity * 0.01F
+        float scale = settings.sunlight_intensity * 0.01F
                       * daytime_weather_sunlight();
         out[0] = fog_color[0] * scale;
         out[1] = fog_color[1] * scale;
@@ -319,8 +314,14 @@ static bool map_update_physics_sub(struct map_collapsing* collapsing, int x, int
         if(y <= 1)
                 return false;
 
-        if(map_isair_locked(x, y, z))
+        /* Hold a single read lock for the entire flood fill instead of
+           acquiring/releasing per-neighbor (6N lock ops for N blocks). */
+        map_read_lock();
+
+        if(map_isair_nolock(x, y, z)) {
+                map_read_unlock();
                 return false;
+        }
 
         struct minheap openlist;
         minheap_create(&openlist);
@@ -334,17 +335,19 @@ static bool map_update_physics_sub(struct map_collapsing* collapsing, int x, int
                 .pos = pos_key(x, y, z),
         };
 
-        uint32_t start_color = map_get_locked(x, y, z);
+        uint32_t start_color = map_get_nolock(x, y, z);
 
         minheap_put(&openlist, &start);
         ht_insert(&closedlist, &start.pos, &start_color);
 
+        bool result = false;
         while(!minheap_isempty(&openlist)) { // find all connected blocks
                 struct minheap_block current = minheap_extract(&openlist);
 
                 if(pos_keyy(current.pos) <= 1) { // stop at indestructible ground layer
                         minheap_destroy(&openlist);
                         ht_destroy(&closedlist);
+                        map_read_unlock();
                         return false;
                 }
 
@@ -361,13 +364,14 @@ static bool map_update_physics_sub(struct map_collapsing* collapsing, int x, int
 
                         if(dir_block[0] >= 0 && dir_block[1] >= 0 && dir_block[2] >= 0 && dir_block[0] < map_size_x
                            && dir_block[1] < map_size_y && dir_block[2] < map_size_z && !ht_contains(&closedlist, &block.pos)
-                           && !map_isair_locked(dir_block[0], dir_block[1], dir_block[2])) {
+                           && !map_isair_nolock(dir_block[0], dir_block[1], dir_block[2])) {
                                 minheap_put(&openlist, &block);
-                                uint32_t color = map_get_locked(dir_block[0], dir_block[1], dir_block[2]);
+                                uint32_t color = map_get_nolock(dir_block[0], dir_block[1], dir_block[2]);
                                 ht_insert(&closedlist, &block.pos, &color);
                         }
                 }
         }
+        result = true;
 
         minheap_destroy(&openlist);
 
@@ -389,7 +393,8 @@ static bool map_update_physics_sub(struct map_collapsing* collapsing, int x, int
         tesselator_create(&collapsing->mesh_geometry, VERTEX_FLOAT, 0, 0);
         ht_iterate(&collapsing->voxels, (void*[]) {collapsing, &collapsing->mesh_geometry}, falling_blocks_meshing);
 
-        return true;
+        map_read_unlock();
+        return result;
 }
 
 /*int map_collapsing_cmp(const void* a, const void* b) {
@@ -795,7 +800,7 @@ int map_cube_line(int x1, int y1, int z1, int x2, int y2, int z2, struct Point* 
 
                 if(dz <= dx && dz <= dy) {
                         c.z += izi;
-                        if(c.z < 0 || c.z >= map_size_y)
+                        if(c.z < 0 || c.z >= map_size_z)
                                 return count;
                         dz += dzi;
                 } else {
@@ -806,7 +811,7 @@ int map_cube_line(int x1, int y1, int z1, int x2, int y2, int z2, struct Point* 
                                 dx += dxi;
                         } else {
                                 c.y += iyi;
-                                if((unsigned long)c.y >= (unsigned long)map_size_z)
+                                if((unsigned long)c.y >= (unsigned long)map_size_y)
                                         return count;
                                 dy += dyi;
                         }
@@ -869,32 +874,12 @@ void map_vxl_load(void* v, size_t size) {
 }
 
 bool map_load_aimtrainer(void) {
-        /* A final VXL span per column: air above, colored solid below. */
-        const int side = AIMTRAINER_MAP_SIZE;
-        unsigned char* bytes = malloc((size_t)side * side * (AIMTRAINER_GROUND + 2) * 4);
-        if(!bytes)
+        size_t size;
+        unsigned char* data = file_load_sized("maps/shot0560.vxl", &size);
+        if(!data)
                 return false;
-        unsigned char* out = bytes;
-        for(int z = 0; z < side; ++z) {
-                for(int x = 0; x < side; ++x) {
-                        int d = aimtrainer_column_distance(x, z);
-                        bool moat = d > AIMTRAINER_PLATFORM_RADIUS
-                                && d <= AIMTRAINER_PLATFORM_RADIUS + AIMTRAINER_MOAT_WIDTH;
-                        int y = moat ? 0 : AIMTRAINER_GROUND;
-                        *out++ = 0;
-                        *out++ = 63 - y;
-                        *out++ = 63;
-                        *out++ = 0;
-                        for(int level = y; level >= 0; --level) {
-                                *out++ = moat ? 180 : (d == 0 && level == y ? 0 : 50); /* B */
-                                *out++ = moat ? 95 : (d == 0 && level == y ? 0 : 50); /* G */
-                                *out++ = d == 0 && level == y ? 255 : 50; /* R */
-                                *out++ = 127;
-                        }
-                }
-        }
-        bool loaded = map_replace_vxl(bytes, (size_t)(out - bytes));
-        free(bytes);
+        bool loaded = size > 0 && map_replace_vxl(data, size);
+        free(data);
         return loaded;
 }
 

@@ -477,8 +477,9 @@ void player_render_corpses(void) {
 		struct CorpseEntry* c = &corpses[k];
 
 		float l = sqrt(distance3D(c->orientation_smooth.x, c->orientation_smooth.y, c->orientation_smooth.z, 0, 0, 0));
-		float ox = c->orientation_smooth.x / l;
-		float oz = c->orientation_smooth.z / l;
+		float ox, oz;
+		if(l <= 0.0001F) { ox = 1.0F; oz = 0.0F; }
+		else { ox = c->orientation_smooth.x / l; oz = c->orientation_smooth.z / l; }
 
 		matrix_push(matrix_model);
 		matrix_translate(matrix_model, c->pos.x, c->pos.y + 0.25F, c->pos.z);
@@ -539,6 +540,7 @@ void player_on_held_item_change(struct Player* p) {
 }
 
 int player_can_spectate(struct Player* p) {
+	if(!p) return 0;
 	// Validate local_player_id before accessing players array
 	if(local_player_id >= PLAYERS_MAX) {
 		return 0;
@@ -742,6 +744,7 @@ void player_snapshot_prev(void) {
 }
 
 void player_prev_snap(int id) {
+	if(id < 0 || id >= PLAYERS_MAX) return;
 	struct Player* p = &players[id];
 	p->prev_pos = p->pos;
 	p->prev_eye = p->physics.eye;
@@ -794,6 +797,7 @@ void player_render_interpolate_end(void) {
    input-driven prediction stays truthful; only the rendered position is
    kept continuous via net_offset. */
 void player_net_correct(int k, float nx, float ny, float nz) {
+	if(k < 0 || k >= PLAYERS_MAX) return;
 	struct Player* p = &players[k];
 	float dx = nx - p->pos.x, dy = ny - p->pos.y, dz = nz - p->pos.z;
 	float d2 = dx * dx + dy * dy + dz * dz;
@@ -928,7 +932,7 @@ void player_update(float dt, int locked) {
 	for(int k = 0; k < PLAYERS_MAX; k++) {
 		if(players[k].connected) {
 			if(locked) {
-				if(!aimtrainer_active())
+				if(!aimtrainer_active() || k == local_player_id)
 					player_move(&players[k], dt, k);
 			} else {
 				if(k != local_player_id) {
@@ -1139,9 +1143,7 @@ void player_render_all() {
 			}
 
 			if(players[k].alive && players[k].held_item == TOOL_GUN && players[k].input.buttons.lmb) {
-				if(game_time() - players[k].gun_shoot_timer > weapon_delay(players[k].weapon)
-				   && players[k].ammo > 0) {
-					players[k].ammo--;
+				if(game_time() - players[k].gun_shoot_timer > weapon_delay(players[k].weapon)) {
 					sound_create_sticky(weapon_sound(players[k].weapon), players + k, k);
 
 					float o[3] = {players[k].orientation.x, players[k].orientation.y, players[k].orientation.z};
@@ -1168,13 +1170,6 @@ void player_render_all() {
 					}
 					switch(hit.type) {
 						case CAMERA_HITTYPE_PLAYER: {
-							if(k == local_player_id) {
-								if(hit.player_section == HITTYPE_HEAD) {
-									sound_create(SOUND_LOCAL, &sound_headshot, 0.0F, 0.0F, 0.0F);
-								} else {
-									sound_create(SOUND_LOCAL, &sound_hitbody, 0.0F, 0.0F, 0.0F);
-								}
-							}
 							float hit_x = players[hit.player_id].physics.eye.x;
 							float hit_y = players[hit.player_id].physics.eye.y
 								+ player_section_height(hit.player_section);
@@ -1229,7 +1224,7 @@ void player_render_all() {
 		int team = players[local_player_id].team;
 		bool teammates = camera_mode == CAMERAMODE_FPS && team != TEAM_SPECTATOR
 			&& teamplay_overlay_opacity() > 0.f;
-		for(int k = 0; k < PLAYERS_MAX - 1; ++k) {
+		for(int k = 0; k < PLAYERS_MAX; ++k) {
 			struct Player* p = &players[k];
 			if(k == local_player_id || !p->connected || !p->alive || p->team == TEAM_SPECTATOR)
 				continue;
@@ -2131,16 +2126,16 @@ void player_render(struct Player* p, int id) {
 int player_clipbox(float x, float y, float z) {
 	int sz;
 
-	if(x < 0 || x >= 512 || y < 0 || y >= 512)
+	if(x < 0 || x >= map_size_x || y < 0 || y >= map_size_z)
 		return 1;
 	else if(z < 0)
 		return 0;
 	sz = (int)z;
-	if(sz == 63)
-		sz = 62;
-	else if(sz >= 64)
+	if(sz == map_size_y - 1)
+		sz = map_size_y - 2;
+	else if(sz >= map_size_y)
 		return 1;
-	return !map_isair((int)x, 63 - sz, (int)y);
+	return !map_isair((int)x, map_size_y - 1 - sz, (int)y);
 }
 
 void player_reposition(struct Player* p) {
@@ -2381,7 +2376,7 @@ int player_move(struct Player* p, float fsynctics, int id) {
 
 	int ret = 0;
 
-	if(!p->physics.velocity.z && (f2 > FALL_SLOW_DOWN)) {
+	if(fabsf(p->physics.velocity.z) < 0.0001F && (f2 > FALL_SLOW_DOWN)) {
 		// slow down on landing
 		p->physics.velocity.x *= 0.5F;
 		p->physics.velocity.y *= 0.5F;

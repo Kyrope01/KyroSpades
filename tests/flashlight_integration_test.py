@@ -66,9 +66,9 @@ for reach in (1, 20, 60, 255):
 print('Flashlight cone angle and reach boundary checks passed')
 
 # Server RGB channels are linear light levels; negotiated spotlights must not
-# receive the legacy warm tint, HDR boost, or local dynamic-light multiplier.
+# receive the legacy warm tint or local dynamic-light multiplier.
 assert 'source.intensity = flashlight_ext_negotiated() ? 1.0F : 1.5F;' in lighting
-assert 'if(!flashlight_ext_negotiated() && settings.hdr_rendering)' in lighting
+assert 'hdr_rendering' not in lighting
 assert 'frame_lights[i].spotlight && flashlight_ext_negotiated()' in lighting
 assert '(flashlight_ext_negotiated() ? 1.0F : intensity_multiplier)' in lighting
 assert 'float brightness = flashlight_ext_negotiated() ? 1.0F : 1.5F;' in lighting

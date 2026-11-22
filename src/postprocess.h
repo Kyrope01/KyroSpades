@@ -33,9 +33,6 @@ unsigned int postprocess_msaa_target(void);
 void postprocess_msaa_resolve(unsigned int resolve_fbo);
 void postprocess_msaa_reset(void);
 
-/* Floating-point HDR scene targets are supported on desktop Core. */
-bool postprocess_hdr_supported(void);
-
 void postprocess_deinit(void);
 
 #endif

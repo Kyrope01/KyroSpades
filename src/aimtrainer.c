@@ -30,8 +30,8 @@ static const struct DifficultyConfig {
 static enum Difficulty difficulty;
 static struct Target {
     int hp;
-    float respawn, vertical_speed, move_timer, strafe;
-    bool falling;
+    float respawn, move_timer;
+    int strafe;
 } targets[AIMTRAINER_MAX_TARGETS + 1];
 static struct Challenge {
     enum { PRACTICE, COUNTDOWN, RUNNING } phase;
@@ -41,17 +41,15 @@ static struct Challenge {
 
 static float random_unit(void) { return (float)rand() / (float)RAND_MAX; }
 
-static const float center = AIMTRAINER_CENTER + 0.5F;
+/* Start on the open field north of the moat, not on the isolated island. */
+static const float spawn_x = 256.5F, spawn_z = 242.5F;
 /* Match the standing collision hull in player_boxclipmove (0.9 + 1.35). */
 #define STANDING_CLEARANCE 2.25F
-static const float standing_y = AIMTRAINER_GROUND + 1.0F + STANDING_CLEARANCE;
+static float standing_y(float x, float z) {
+    return map_height_at((int)x, (int)z) + 1.0F + STANDING_CLEARANCE;
+}
 
 bool aimtrainer_active(void) { return active; }
-
-int aimtrainer_column_distance(int x, int z) {
-    int dx = abs(x - AIMTRAINER_CENTER), dz = abs(z - AIMTRAINER_CENTER);
-    return dx > dz ? dx : dz;
-}
 
 static void place_player(struct Player* p, float x, float y, float z) {
     p->pos.x = p->physics.eye.x = x;
@@ -64,9 +62,10 @@ static void spawn_target(int id, float angle) {
     player_reset(p);
     targets[id] = (struct Target){.hp = 100, .move_timer = random_unit()};
     p->input.keys.sprint = difficulty >= MEDIUM;
-    float radius = fminf(250.0F, fmaxf(14.0F, settings.render_distance - 0.75F));
+    float radius = fminf(240.0F, fmaxf(14.0F, settings.render_distance - 0.75F));
     float x = cosf(angle), z = sinf(angle);
-    place_player(p, center + x * radius, standing_y, center + z * radius);
+    float sx = spawn_x + x * radius, sz = spawn_z + z * radius;
+    place_player(p, sx, standing_y(sx, sz), sz);
     p->orientation.x = -x;
     p->orientation.y = 0;
     p->orientation.z = -z;
@@ -109,7 +108,7 @@ bool aimtrainer_start(void) {
     local_player_lasttool = TOOL_GUN;
     memset(button_map, 0, sizeof(button_map));
     struct Player* p = &players[0];
-    place_player(p, center, standing_y, center);
+    place_player(p, spawn_x, standing_y(spawn_x, spawn_z), spawn_z);
     p->connected = p->alive = 1;
     p->team = TEAM_1;
     p->weapon = WEAPON_RIFLE;
@@ -127,9 +126,9 @@ bool aimtrainer_start(void) {
     camera_rot_y = 1.57079633F;
     camera_crosshair_rot_x = camera_muzzle_rot_x = camera_rot_x;
     camera_crosshair_rot_y = camera_muzzle_rot_y = camera_rot_y;
-    camera_x = center;
-    camera_y = standing_y + player_height(p);
-    camera_z = center;
+    camera_x = spawn_x;
+    camera_y = p->pos.y + player_height(p);
+    camera_z = spawn_z;
 
     challenge = (struct Challenge){0};
     reset_targets(EASY);
@@ -253,7 +252,7 @@ void aimtrainer_record_shot(bool hit) {
 void aimtrainer_tick(float dt) {
     if(!active || challenge.phase == COUNTDOWN)
         return;
-    float now = game_time();
+    const struct Position trainee = players[local_player_id].pos;
     for(int id = 1; id <= modes[difficulty].targets; ++id) {
         struct Player* p = &players[id];
         struct Target* bot = &targets[id];
@@ -264,67 +263,28 @@ void aimtrainer_tick(float dt) {
             continue;
         }
         bot->move_timer -= dt;
-        if(difficulty >= HARD && bot->move_timer <= 0.0F && !bot->falling) {
+        if(difficulty >= HARD && bot->move_timer <= 0.0F) {
             bot->move_timer = 0.35F + random_unit() * 0.9F;
-            bot->strafe = (random_unit() < 0.5F ? -1.0F : 1.0F) * (0.5F + random_unit() * 0.7F);
+            bot->strafe = random_unit() < 0.5F ? -1 : 1;
             if(difficulty == PRO && !p->physics.airborne) {
                 p->input.keys.crouch = random_unit() < 0.30F;
-                if(!p->input.keys.crouch && random_unit() < 0.45F) {
-                    bot->vertical_speed = 8.0F;
-                    p->physics.airborne = 1;
-                }
+                p->physics.jump = !p->input.keys.crouch && random_unit() < 0.45F;
             }
         }
-        p->input.keys.sprint = difficulty >= MEDIUM && !p->input.keys.crouch;
-        /* Classic movement: 32 units/s conversion with 4x ground drag;
-           sprint is 1.3x and crouch is 0.3x normal walking speed. */
-        float speed = p->input.keys.crouch ? 2.4F : (p->input.keys.sprint ? 10.4F : 8.0F);
-        float dx = center - p->pos.x, dz = center - p->pos.z;
+        float dx = trainee.x - p->pos.x, dz = trainee.z - p->pos.z;
         float distance = hypotf(dx, dz);
         if(distance > 0.001F) {
-            dx /= distance;
-            dz /= distance;
-            p->orientation.x = dx;
-            p->orientation.z = dz;
-        } else {
-            dx = dz = 0.0F;
+            p->orientation.x = dx / distance;
+            p->orientation.z = dz / distance;
         }
-        float strafe = bot->falling ? 0.0F : bot->strafe;
-        float scale = speed / sqrtf(1.0F + strafe * strafe);
-        float vx = (dx - dz * strafe) * scale;
-        float vz = (dz + dx * strafe) * scale;
-        float x = p->pos.x + vx * dt, z = p->pos.z + vz * dt;
-        if(bot->falling && aimtrainer_column_distance((int)x, (int)z) <= AIMTRAINER_PLATFORM_RADIUS) {
-            x = p->pos.x;
-            z = p->pos.z;
-            vx = vz = 0.0F;
-        }
-        float y = p->pos.y;
-        p->physics.velocity.x = vx / 32.0F;
-        p->physics.velocity.z = vz / 32.0F;
-        if(now - p->sound.feet_started_cycle >= (p->input.keys.sprint ? 0.5F / 1.3F : 0.5F)) {
-            p->sound.feet_started_cycle = now;
-            p->sound.feet_cylce = !p->sound.feet_cylce;
-        }
-        if(aimtrainer_column_distance((int)x, (int)z) <= AIMTRAINER_PLATFORM_RADIUS + AIMTRAINER_MOAT_WIDTH) {
-            bot->falling = true;
-            p->physics.airborne = 1;
-        }
-        if(p->physics.airborne) {
-            bot->vertical_speed -= 32.0F * dt;
-            y += bot->vertical_speed * dt;
-        }
+        p->input.keys.up = distance > 2.0F;
+        p->input.keys.left = p->input.keys.up && bot->strafe < 0;
+        p->input.keys.right = p->input.keys.up && bot->strafe > 0;
+        p->input.keys.sprint = difficulty >= MEDIUM && !p->input.keys.crouch;
+        player_move(p, dt, id);
+        /* Use the map's real water, not the old generated moat footprint. */
         float clearance = p->input.keys.crouch ? 1.35F : STANDING_CLEARANCE;
-        float floor_y = AIMTRAINER_GROUND + 1.0F + clearance;
-        if(!bot->falling && y <= floor_y && bot->vertical_speed <= 0.0F) {
-            y = floor_y;
-            bot->vertical_speed = 0.0F;
-            p->physics.airborne = 0;
-        } else if(!p->physics.airborne) {
-            y = floor_y;
-        }
-        place_player(p, x, y, z);
-        if(bot->falling && y <= WATER_LEVEL + clearance) {
+        if(p->pos.y <= WATER_LEVEL + clearance && map_isair((int)p->pos.x, (int)WATER_LEVEL, (int)p->pos.z)) {
             remove_target(id);
             if(challenge.phase == RUNNING)
                 --challenge.points;

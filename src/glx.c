@@ -336,14 +336,16 @@ void glx_set_team_color(float r, float g, float b) {
                 GLint prog;
                 prog = (GLint)glx_current_program();
                 if(prog) {
-                        GLint loc = glx_uniform_location(prog, "u_TeamColor");
-                        if(loc >= 0) {
-                                if(prog == (GLint)default_shader) {
-                                        default_team_color[0] = r;
-                                        default_team_color[1] = g;
-                                        default_team_color[2] = b;
-                                }
-                                glUniform4f(loc, r, g, b, 1.0F);
+                        if(prog == (GLint)default_shader) {
+                                default_team_color[0] = r;
+                                default_team_color[1] = g;
+                                default_team_color[2] = b;
+                                if(loc_u_TeamColor >= 0)
+                                        glUniform4f(loc_u_TeamColor, r, g, b, 1.0F);
+                        } else {
+                                GLint loc = glx_uniform_location(prog, "u_TeamColor");
+                                if(loc >= 0)
+                                        glUniform4f(loc, r, g, b, 1.0F);
                         }
                 }
         }
@@ -1243,7 +1245,7 @@ void glx_draw_screen_quad(void) {
         if(!quad_vbo)
                 return;
 #ifdef OPENGL_CORE
-        if(!quad_vao || !quad_vao)
+        if(!quad_vbo || !quad_vao)
                 return;
         glBindVertexArray(quad_vao);
         glx_stats_draw();
@@ -1404,8 +1406,11 @@ void glx_draw_ring_segment_2d(float cx, float cy, float inner_radius, float oute
         if(steps < 1 || end_angle <= start_angle || outer_radius <= inner_radius)
                 return;
 
-        /* A bounded fixed-size buffer is portable and cannot exhaust the stack. */
+        /* A bounded static buffer is portable and cannot exhaust the stack.
+           The render context is single-threaded (main thread only), so a
+           static buffer is safe here. */
         if(steps > 1024) steps = 1024;
+        static float verts[(1024 + 1) * 6];
         glx_client_state_invalidate();
         glx_batch2d_flush();
         glx_stats_draw();
@@ -1415,7 +1420,6 @@ void glx_draw_ring_segment_2d(float cx, float cy, float inner_radius, float oute
            strip produces a solid annular sector with identical geometry at
            every rotation, unlike thick GL lines whose rasterized width varied
            visibly by screen angle. */
-        float verts[(1024 + 1) * 6];
         for(int i = 0; i <= steps; i++) {
                 float a = start_angle + (end_angle - start_angle) * i / steps;
                 int o = i * 6;
@@ -1793,7 +1797,7 @@ void glx_draw_gradient_quad_2d(float x, float y, float w, float h, float r1, flo
 /* ── Spherical fog ───────────────────────────────────────────────────────── */
 
 void glx_enable_sphericalfog() {
-        /* Effective fog color (darkened 10% when filmic tone mapping is on). */
+        /* Effective render-time fog color. */
         float fc[3];
         fog_color_render(fc);
 #ifdef OPENGL_CORE

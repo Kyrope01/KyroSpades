@@ -127,11 +127,10 @@ extern struct RENDER_OPTIONS {
         int   lens_flare;
         int   object_outlines;                 /* depth-edge outlines for map and players */
         float object_outline_thickness;         /* outline radius in screen pixels */
-        /* ── New visual shaders (chromatic aberration / filmic) ── */
+        /* ── New visual shaders (chromatic aberration / color correction) ── */
         int   chromatic_aberration;           /* 0 = off, 1 = on */
         float chromatic_aberration_strength;  /* 0..10 — pixel offset at screen edge */
-        int   filmic_tonemapping;             /* 0 = off, 1 = ACES filmic curve */
-        int   hdr_rendering;                   /* floating-point scene target on OpenGL Core */
+        int   color_correction;               /* 0 = off, 1 = ZeroSpades grade */
         int dynamic_lights;                   /* forward point lights and terrain material shading */
         int all_player_flashlights;           /* locally show lamps for living remote players */
         int flash_lights;                     /* muzzle-flash and grenade-explosion point lights */

@@ -374,8 +374,7 @@ void config_save() {
         config_setf("client", "object_outline_thickness", settings.object_outline_thickness);
         config_seti("client", "chromatic_aberration", settings.chromatic_aberration);
         config_setf("client", "chromatic_aberration_strength", settings.chromatic_aberration_strength);
-        config_seti("client", "filmic_tonemapping", settings.filmic_tonemapping);
-        config_seti("client", "hdr_rendering", settings.hdr_rendering);
+        config_seti("client", "color_correction", settings.color_correction);
         config_seti("client", "dynamic_lights", settings.dynamic_lights);
         config_seti("client", "all_player_flashlights", settings.all_player_flashlights);
         config_seti("client", "flash_lights", settings.flash_lights);
@@ -467,6 +466,8 @@ void config_save() {
                         if(strcmp(e->section, "client") == 0
                            && (!strcmp(e->name, "height_fog_density")
                                || !strcmp(e->name, "height_fog_top")
+                               || !strcmp(e->name, "filmic_tonemapping")
+                               || !strcmp(e->name, "hdr_rendering")
                                || !strcmp(e->name, "bloom")
                                || !strcmp(e->name, "bloom_strength")
                                || !strcmp(e->name, "bloom_threshold")
@@ -580,8 +581,7 @@ IMPORT_SETTING(settings.camera_movement, camera_movement, atoi(value));
                 IMPORT_SETTING(settings.chromatic_aberration, chromatic_aberration, atoi(value));
                 IMPORT_SETTING(settings.chromatic_aberration_strength, chromatic_aberration_strength,
                                fmaxf(0.0F, fminf(10.0F, atof(value))));
-                IMPORT_SETTING(settings.filmic_tonemapping, filmic_tonemapping, atoi(value));
-                IMPORT_SETTING(settings.hdr_rendering, hdr_rendering, atoi(value) ? 1 : 0);
+                IMPORT_SETTING(settings.color_correction, color_correction, atoi(value) ? 1 : 0);
                 IMPORT_SETTING(settings.dynamic_lights, dynamic_lights, atoi(value) ? 1 : 0);
                 IMPORT_SETTING(settings.all_player_flashlights, all_player_flashlights, atoi(value) ? 1 : 0);
                 IMPORT_SETTING(settings.flash_lights, flash_lights, atoi(value) ? 1 : 0);
@@ -1434,23 +1434,12 @@ void config_reload() {
                          });
         list_add(&config_settings,
                          &(struct config_setting) {
-                                 .value = &settings_tmp.filmic_tonemapping,
+                                 .value = &settings_tmp.color_correction,
                                  .type = CONFIG_TYPE_INT,
                                  .min = 0,
                                  .max = 1,
-                                 .help = "Enable ACES filmic tone mapping (cinematic color curve)",
-                                 .name = "Filmic tone mapping",
-                                 .category = "Visual Effects",
-                                 .subcategory = "Post Processing",
-                         });
-        list_add(&config_settings,
-                         &(struct config_setting) {
-                                 .value = &settings_tmp.hdr_rendering,
-                                 .type = CONFIG_TYPE_INT,
-                                 .min = 0,
-                                 .max = 1,
-                                 .help = "Floating-point Core scene rendering with a safe fallback",
-                                 .name = "HDR rendering",
+                                 .help = "Lift shadows and enrich muted colors without a tint; replaces manual color adjustments",
+                                 .name = "Color Correction",
                                  .category = "Visual Effects",
                                  .subcategory = "Post Processing",
                          });
@@ -1544,7 +1533,7 @@ void config_reload() {
                                  .type = CONFIG_TYPE_INT,
                                  .min = 0,
                                  .max = 1,
-                                 .name = "Reduce menu motion",
+                                 .name = "Reduce Motion",
                                  .help = "Disable menu entrance and button movement, and make wheel scrolling immediate",
                                  .category = "HUD/UI Settings",
                          });
@@ -2138,7 +2127,7 @@ void config_reload() {
                                  .type = CONFIG_TYPE_FLOAT,
                                  .min = -100,
                                  .max = 100,
-                                 .help = "Adjust image exposure (-100 to +100)",
+                                 .help = "Adjust image exposure when Color Correction is off (-100 to +100)",
                                  .name = "Exposure",
                                  .category = "Graphic Settings",
                                  .subcategory = "Color",
@@ -2150,7 +2139,7 @@ void config_reload() {
                                  .type = CONFIG_TYPE_FLOAT,
                                  .min = -100,
                                  .max = 100,
-                                 .help = "Adjust image saturation (-100 to +100)",
+                                 .help = "Adjust image saturation when Color Correction is off (-100 to +100)",
                                  .name = "Saturation",
                                  .category = "Graphic Settings",
                                  .subcategory = "Color",
@@ -2162,7 +2151,7 @@ void config_reload() {
                                  .type = CONFIG_TYPE_FLOAT,
                                  .min = -100,
                                  .max = 100,
-                                 .help = "Adjust image contrast (-100 to +100)",
+                                 .help = "Adjust image contrast when Color Correction is off (-100 to +100)",
                                  .name = "Contrast",
                                  .category = "Graphic Settings",
                                  .subcategory = "Color",

@@ -1068,7 +1068,10 @@ void window_init() {
 	   AndroidManifest.xml. */
 	SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
 
-	SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_TIMER);
+	if(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_TIMER) < 0) {
+		log_fatal("SDL_Init failed: %s", SDL_GetError());
+		exit(1);
+	}
 
 	/* GL attributes MUST be set before SDL_CreateWindow. Core builds require a
 	   strict 3.3 Core context; legacy desktop and mobile builds retain their
@@ -1428,6 +1431,7 @@ void window_poll() {
 						break;
 					}
 				}
+				if(!f) break; /* no free touch slot */
 
 				/* While a selection overlay (team/gun select) is open, the whole
 				   screen belongs to the overlay's tap targets: capturing the
@@ -1451,7 +1455,7 @@ void window_poll() {
 												event.tfinger.dx * settings.window_width,
 												event.tfinger.dy * settings.window_height);
 				} else {
-					if(hud_active->ctx)
+					if(hud_active && hud_active->ctx)
 						mu_interrupt_pointer(hud_active->ctx);
 					window_setmouseloc(fx, fy);
 					mouse(hud_window, fx, fy);
@@ -1492,13 +1496,13 @@ void window_poll() {
 					break;
 				}
 
-				if(hud_active == &hud_ingame) {
-					if(hud_active->input_touch)
-						hud_active->input_touch(f, TOUCH_UP, fx, fy,
-												event.tfinger.dx * settings.window_width,
+			if(hud_active == &hud_ingame) {
+				if(f && hud_active->input_touch)
+					hud_active->input_touch(f, TOUCH_UP, fx, fy,
+											event.tfinger.dx * settings.window_width,
 												event.tfinger.dy * settings.window_height);
-					break;
-				}
+				break;
+			}
 
 				window_setmouseloc(fx, fy);
 				mouse(hud_window, fx, fy);
@@ -1553,11 +1557,11 @@ void window_poll() {
 				if(hud_active == &hud_ingame && f == aim_finger2)
 					break;
 
-				if(hud_active == &hud_ingame) {
-					if(hud_active->input_touch)
-						hud_active->input_touch(f, TOUCH_MOVE, fx, fy, fdx, fdy);
-					break;
-				}
+			if(hud_active == &hud_ingame) {
+				if(f && hud_active->input_touch)
+					hud_active->input_touch(f, TOUCH_MOVE, fx, fy, fdx, fdy);
+				break;
+			}
 
 				int just_crossed = 0;
 				if(f && !f->dragged) {
@@ -1587,7 +1591,7 @@ void window_poll() {
 		}
 	}
 
-	if(hud_active != &hud_ingame) {
+	if(hud_active && hud_active != &hud_ingame) {
 		for(int k = 0; k < 8; k++) {
 			struct window_finger* f = fingers + k;
 			if(!f->full || f->dragged || f->long_pressed) continue;
