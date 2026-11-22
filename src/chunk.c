@@ -1293,6 +1293,7 @@ void chunk_update_all() {
         float budget = (chunk_bulk_pending > 0) ? 0.050F : 0.006F;
 
         struct chunk_result_packet result;
+        bool shadow_dirty = false;
         /* Bind the minimap atlas once for the whole batch instead of doing a
            bind/unbind pair per uploaded chunk (two driver round-trips each). */
         bool minimap_bound = false;
@@ -1328,8 +1329,9 @@ void chunk_update_all() {
 
                         tesselator_glx(&result.tesselator, &result.chunk->display_list);
                         /* The depth map caches terrain-only geometry; rebuild it
-                           after an updated chunk reaches the GPU. */
-                        shadow_invalidate();
+                           after an updated chunk reaches the GPU. Deferred to
+                           once per frame after the result-drain loop. */
+                        shadow_dirty = true;
 
                         if(!minimap_bound) {
                                 glBindTexture(GL_TEXTURE_2D, texture_minimap.texture_id);
@@ -1348,9 +1350,14 @@ void chunk_update_all() {
                 tesselator_free(&result.tesselator);
                 free(result.minimap_data);
 
-                if(elapsed > budget)
-                        break;
+        if(elapsed > budget)
+                break;
         }
+
+        /* Invalidate the shadow map once per frame if any chunk was updated,
+           not once per chunk. */
+        if(shadow_dirty)
+                shadow_invalidate();
 
         if(minimap_bound)
                 glBindTexture(GL_TEXTURE_2D, 0);

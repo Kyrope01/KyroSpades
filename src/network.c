@@ -325,10 +325,14 @@ void read_PacketBlockAction(void* data, int len) {
                         }
                         break;
                 case ACTION_GRENADE:
-                        for(int y = (63 - (p->z)) - 1; y <= (63 - (p->z)) + 1; y++) {
-                                for(int z = (p->y) - 1; z <= (p->y) + 1; z++) {
-                                        for(int x = (p->x) - 1; x <= (p->x) + 1; x++) {
-                                                if(y > 1) {
+                        {
+                                int gy = 63 - (int)p->z;
+                                for(int y = gy - 1; y <= gy + 1; y++) {
+                                        if(y < 2 || y >= map_size_y) continue;
+                                        for(int z = (int)p->y - 1; z <= (int)p->y + 1; z++) {
+                                                if(z < 0 || z >= map_size_z) continue;
+                                                for(int x = (int)p->x - 1; x <= (int)p->x + 1; x++) {
+                                                        if(x < 0 || x >= map_size_x) continue;
                                                         map_set(x, y, z, 0xFFFFFFFF);
                                                         map_update_physics(x, y, z);
                                                 }
@@ -337,19 +341,18 @@ void read_PacketBlockAction(void* data, int len) {
                         }
                         break;
                 case ACTION_SPADE:
-                        if((63 - p->z - 1) > 1) {
-                                map_set(p->x, 63 - p->z - 1, p->y, 0xFFFFFFFF);
-                                map_update_physics(p->x, 63 - p->z - 1, p->y);
-                        }
-                        if((63 - p->z + 0) > 1) {
-                                int col = map_get(p->x, 63 - p->z, p->y);
-                                map_set(p->x, 63 - p->z + 0, p->y, 0xFFFFFFFF);
-                                map_update_physics(p->x, 63 - p->z + 0, p->y);
-                                if(!demo_mute_effects()) particle_create_block(col, p->x + 0.5F, 63 - p->z + 0.5F, p->y + 0.5F, 2.5F, 1.0F, 8, 0.1F, 0.25F);
-                        }
-                        if((63 - p->z + 1) > 1) {
-                                map_set(p->x, 63 - p->z + 1, p->y, 0xFFFFFFFF);
-                                map_update_physics(p->x, 63 - p->z + 1, p->y);
+                        {
+                                int gy = 63 - (int)p->z;
+                                for(int d = -1; d <= 1; d++) {
+                                        int yy = gy + d;
+                                        if(yy < 2 || yy >= map_size_y) continue;
+                                        map_set(p->x, yy, p->y, 0xFFFFFFFF);
+                                        map_update_physics(p->x, yy, p->y);
+                                        if(d == 0 && !demo_mute_effects()) {
+                                                int col = map_get(p->x, yy, p->y);
+                                                particle_create_block(col, p->x + 0.5F, yy + 0.5F, p->y + 0.5F, 2.5F, 1.0F, 8, 0.1F, 0.25F);
+                                        }
+                                }
                         }
                         break;
                 case ACTION_BUILD:
@@ -406,9 +409,12 @@ void read_PacketBlockLine(void* data, int len) {
                 | (players[p->player_id].block.green << 8)
                 | (players[p->player_id].block.blue << 16);
         if(p->sx == p->ex && p->sy == p->ey && p->sz == p->ez) {
-                map_set(p->sx, 63 - p->sz, p->sy, color);
-                if(p->player_id == local_player_id)
-                        glowing_blocks_confirm_local_build(p->sx, 63 - p->sz, p->sy);
+                int yy = 63 - (int)p->sz;
+                if(yy >= 0 && yy < map_size_y) {
+                        map_set(p->sx, yy, p->sy, color);
+                        if(p->player_id == local_player_id)
+                                glowing_blocks_confirm_local_build(p->sx, yy, p->sy);
+                }
         } else {
                 struct Point blocks[64];
                 int len = map_cube_line(p->sx, p->sy, p->sz, p->ex, p->ey, p->ez, blocks);
@@ -1559,7 +1565,7 @@ void read_PacketVersionGet(void* data, int len) {
                 oslen = sizeof(ver.operatingsystem);
         memcpy(ver.operatingsystem, os, oslen);
         ver.operatingsystem[sizeof(ver.operatingsystem) - 1] = '\0';
-        network_send(PACKET_VERSIONSEND_ID, &ver, sizeof(ver) - sizeof(ver.operatingsystem) + strlen(os));
+        network_send(PACKET_VERSIONSEND_ID, &ver, sizeof(ver) - sizeof(ver.operatingsystem) + oslen - 1);
 }
 
 static void read_PacketPlayerOutfit(void* data, int len) {
@@ -1711,11 +1717,12 @@ void read_PacketExtInfo(void* data, int len) {
 }
 
 void read_PacketPlayerProperties(void* data, int len) {
+        if(!data || len < 1) return;
         struct PacketPlayerProperties* p = (struct PacketPlayerProperties*)data;
 
         if(p->player_id >= PLAYERS_MAX) return;
 
-        if(len >= sizeof(struct PacketPlayerProperties) && p->subID == 0) {
+        if(len >= (int)sizeof(struct PacketPlayerProperties) && p->subID == 0) {
                 players[p->player_id].ammo = p->ammo_clip;
                 players[p->player_id].ammo_reserved = p->ammo_reserved;
                 players[p->player_id].score = p->score;

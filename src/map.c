@@ -314,8 +314,14 @@ static bool map_update_physics_sub(struct map_collapsing* collapsing, int x, int
         if(y <= 1)
                 return false;
 
-        if(map_isair_locked(x, y, z))
+        /* Hold a single read lock for the entire flood fill instead of
+           acquiring/releasing per-neighbor (6N lock ops for N blocks). */
+        map_read_lock();
+
+        if(map_isair_nolock(x, y, z)) {
+                map_read_unlock();
                 return false;
+        }
 
         struct minheap openlist;
         minheap_create(&openlist);
@@ -329,17 +335,19 @@ static bool map_update_physics_sub(struct map_collapsing* collapsing, int x, int
                 .pos = pos_key(x, y, z),
         };
 
-        uint32_t start_color = map_get_locked(x, y, z);
+        uint32_t start_color = map_get_nolock(x, y, z);
 
         minheap_put(&openlist, &start);
         ht_insert(&closedlist, &start.pos, &start_color);
 
+        bool result = false;
         while(!minheap_isempty(&openlist)) { // find all connected blocks
                 struct minheap_block current = minheap_extract(&openlist);
 
                 if(pos_keyy(current.pos) <= 1) { // stop at indestructible ground layer
                         minheap_destroy(&openlist);
                         ht_destroy(&closedlist);
+                        map_read_unlock();
                         return false;
                 }
 
@@ -356,13 +364,14 @@ static bool map_update_physics_sub(struct map_collapsing* collapsing, int x, int
 
                         if(dir_block[0] >= 0 && dir_block[1] >= 0 && dir_block[2] >= 0 && dir_block[0] < map_size_x
                            && dir_block[1] < map_size_y && dir_block[2] < map_size_z && !ht_contains(&closedlist, &block.pos)
-                           && !map_isair_locked(dir_block[0], dir_block[1], dir_block[2])) {
+                           && !map_isair_nolock(dir_block[0], dir_block[1], dir_block[2])) {
                                 minheap_put(&openlist, &block);
-                                uint32_t color = map_get_locked(dir_block[0], dir_block[1], dir_block[2]);
+                                uint32_t color = map_get_nolock(dir_block[0], dir_block[1], dir_block[2]);
                                 ht_insert(&closedlist, &block.pos, &color);
                         }
                 }
         }
+        result = true;
 
         minheap_destroy(&openlist);
 
@@ -384,7 +393,8 @@ static bool map_update_physics_sub(struct map_collapsing* collapsing, int x, int
         tesselator_create(&collapsing->mesh_geometry, VERTEX_FLOAT, 0, 0);
         ht_iterate(&collapsing->voxels, (void*[]) {collapsing, &collapsing->mesh_geometry}, falling_blocks_meshing);
 
-        return true;
+        map_read_unlock();
+        return result;
 }
 
 /*int map_collapsing_cmp(const void* a, const void* b) {
@@ -790,7 +800,7 @@ int map_cube_line(int x1, int y1, int z1, int x2, int y2, int z2, struct Point* 
 
                 if(dz <= dx && dz <= dy) {
                         c.z += izi;
-                        if(c.z < 0 || c.z >= map_size_y)
+                        if(c.z < 0 || c.z >= map_size_z)
                                 return count;
                         dz += dzi;
                 } else {
@@ -801,7 +811,7 @@ int map_cube_line(int x1, int y1, int z1, int x2, int y2, int z2, struct Point* 
                                 dx += dxi;
                         } else {
                                 c.y += iyi;
-                                if((unsigned long)c.y >= (unsigned long)map_size_z)
+                                if((unsigned long)c.y >= (unsigned long)map_size_y)
                                         return count;
                                 dy += dyi;
                         }

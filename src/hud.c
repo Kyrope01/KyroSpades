@@ -193,6 +193,25 @@ void hud_init() {
         hud_recording.ctx = malloc(sizeof(mu_Context));
         hud_replay.ctx = malloc(sizeof(mu_Context));
 
+        if(!hud_serverlist.ctx || !hud_settings.ctx || !hud_controls.ctx ||
+           !hud_chatlog.ctx || !hud_demolist.ctx || !hud_skins.ctx ||
+           !hud_macros.ctx || !hud_recording.ctx || !hud_replay.ctx) {
+                log_error("hud_init: failed to allocate microui contexts");
+                free(hud_serverlist.ctx);
+                free(hud_settings.ctx);
+                free(hud_controls.ctx);
+                free(hud_chatlog.ctx);
+                free(hud_demolist.ctx);
+                free(hud_skins.ctx);
+                free(hud_macros.ctx);
+                free(hud_recording.ctx);
+                free(hud_replay.ctx);
+                hud_serverlist.ctx = hud_settings.ctx = hud_controls.ctx = NULL;
+                hud_chatlog.ctx = hud_demolist.ctx = hud_skins.ctx = NULL;
+                hud_macros.ctx = hud_recording.ctx = hud_replay.ctx = NULL;
+                return;
+        }
+
         hud_change(&hud_serverlist);
 }
 
@@ -246,12 +265,18 @@ float hud_ui_scale(void) {
         /* Enlarge touch targets on physically small, high-resolution screens.
            Android-only for now: the >=1920 heuristic would otherwise also double
            the UI on ordinary 1080p desktop monitors. Proper DPI-based scaling for
-           desktop can be added later. Recompute every call (no caching): the
-           surface rotates at runtime and the real resolution isn't known yet when
-           hud_init runs, so a cached value would lock in the wrong scale. */
+           desktop can be added later. Cached; invalidated on window resize via
+           hud_ui_scale_invalidate(). */
+        static float cached_scale = 0.0F;
+        static int cached_w = 0, cached_h = 0;
+        if(cached_scale > 0.0F && settings.window_width == cached_w && settings.window_height == cached_h)
+                return cached_scale;
         int big = settings.window_width > settings.window_height
                 ? settings.window_width : settings.window_height;
-        return (big >= 1920) ? 2.0F : 1.0F;
+        cached_scale = (big >= 1920) ? 2.0F : 1.0F;
+        cached_w = settings.window_width;
+        cached_h = settings.window_height;
+        return cached_scale;
 #else
         return 1.0F;
 #endif
@@ -2179,22 +2204,22 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 g = team.green / 255.F;
                                 b = team.blue / 255.F;
 
-                                char score_str[8];
+                                char score_str[16];
                                 glColor3ub(team.red, team.green, team.blue);
 
                                 switch(gamestate.gamemode_type) {
                                         case GAMEMODE_CTF:
-                                                sprintf(score_str, "%i-%i",
-                                                                i == 0 ? gamestate.gamemode.ctf.team_1_score:
-                                                                                                                           gamestate.gamemode.ctf.team_2_score,
-                                                                gamestate.gamemode.ctf.capture_limit);
+                                                snprintf(score_str, sizeof(score_str), "%i-%i",
+                                                                 i == 0 ? gamestate.gamemode.ctf.team_1_score:
+                                                                                                                            gamestate.gamemode.ctf.team_2_score,
+                                                                 gamestate.gamemode.ctf.capture_limit);
                                                 break;
                                         case GAMEMODE_TC: {
                                                 int t = 0;
                                                 for(int k = 0; k < gamestate.gamemode.tc.territory_count; k++)
                                                         if(gamestate.gamemode.tc.territory[k].team == TEAM_1)
                                                                 t++;
-                                                sprintf(score_str, "%i-%i", t, gamestate.gamemode.tc.territory_count);
+                                                snprintf(score_str, sizeof(score_str), "%i-%i", t, gamestate.gamemode.tc.territory_count);
                                                 break;
                                         }
                                 }
@@ -2223,7 +2248,7 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                 if(scoreboard_open) {
                         if(network_connected && network_logged_in) {
                                 char ping_str[16];
-                                sprintf(ping_str, "PING: %ums", network_ping());
+                                snprintf(ping_str, sizeof(ping_str), "PING: %ums", network_ping());
                                 glColor3f(1.0F, 0.0F, 0.0F);
                                 font_centered(settings.window_width / 2.0F, settings.window_height - 4.F, 16.F, ping_str);
                         }
@@ -2292,14 +2317,14 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                         b = 0.1F;
                                 }
 
-                                char score_str[8];
+                                char score_str[16];
 
                                 if(i != 2) {
                                         switch(gamestate.gamemode_type) {
                                                 case GAMEMODE_CTF:
-                                                        sprintf(score_str, "%i-%i",
+                                                        snprintf(score_str, sizeof(score_str), "%i-%i",
                                                                         i == 0 ? gamestate.gamemode.ctf.team_1_score:
-                                                                                                                           gamestate.gamemode.ctf.team_2_score,
+                                                                                                                                gamestate.gamemode.ctf.team_2_score,
                                                                         gamestate.gamemode.ctf.capture_limit);
                                                         break;
                                                 case GAMEMODE_TC: {
@@ -2307,7 +2332,7 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                                         for(int k = 0; k < gamestate.gamemode.tc.territory_count; k++)
                                                                 if(gamestate.gamemode.tc.territory[k].team == TEAM_1)
                                                                         t++;
-                                                        sprintf(score_str, "%i-%i", t, gamestate.gamemode.tc.territory_count);
+                                                        snprintf(score_str, sizeof(score_str), "%i-%i", t, gamestate.gamemode.tc.territory_count);
                                                         break;
                                                 }
                                         }
@@ -2625,8 +2650,8 @@ static void hud_ingame_render(mu_Context* ctx, float scalex, float scalef) {
                                 glColor3f(1, 1, 1);
 
                         font_select(FONT_FANTASY);
-                        char hp[4];
-                        sprintf(hp, "%i", health);
+                        char hp[8];
+                        snprintf(hp, sizeof(hp), "%i", health);
                         float health_top = settings.healthbar ? 60.0F : 40.0F;
                         hud_texture_draw(&texture_health, 8.F, health_top, 36.0F, 32.F);
                         hud_font_render(48.F, health_top - 2.0F, 30.F, hp, 1.F);

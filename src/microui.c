@@ -241,7 +241,9 @@ void mu_begin(mu_Context *ctx) {
 
 
 static int compare_zindex(const void *a, const void *b) {
-  return (*(mu_Container**) a)->zindex - (*(mu_Container**) b)->zindex;
+  int za = (*(mu_Container**) a)->zindex;
+  int zb = (*(mu_Container**) b)->zindex;
+  return (za > zb) - (za < zb);
 }
 
 
@@ -604,7 +606,7 @@ static mu_Rect paint_clip(mu_Context *ctx) {
 
 static void push_widget_clip(mu_Context *ctx, mu_Rect rect) {
   mu_push_clip_rect(ctx, rect);
-  if (ctx->paint_offset_y) {
+  if (ctx->paint_offset_y && ctx->clip_stack.idx >= 2) {
     rect.y += (int)roundf(ctx->paint_offset_y);
     ctx->paint_clip = intersect_rects(rect, ctx->clip_stack.items[ctx->clip_stack.idx - 2]);
     ctx->paint_clip_depth = ctx->clip_stack.idx;

@@ -1283,7 +1283,8 @@ void display() {
                                 if(is_local && local_player_drag_active && players[local_player_id].input.buttons.rmb
                                    && players[local_player_id].held_item == TOOL_BLOCK) {
                                         amount = map_cube_line(local_player_drag_x, local_player_drag_z, 63 - local_player_drag_y, pos[0],
-                                                                                   pos[2], 63 - pos[1], cubes);
+                                                                       pos[2], 63 - pos[1], cubes);
+                                        if(amount > 64) amount = 64; /* guard against cubes[64] overflow */
                                         local_player_drag_amount = amount;
                                 } else {
                                         amount = 1;
@@ -1578,7 +1579,11 @@ void display() {
                                            the un-graded world is already visible — no more freeze. */
                                         glActiveTexture(GL_TEXTURE0);
                                         glBindTexture(GL_TEXTURE_2D, postproc.texture);
+                                        /* Ensure we read from the screen/drawable, not a stale
+                                           read framebuffer (iOS copy mode). */
+                                        glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)live_screen_fbo);
                                         glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, settings.window_width, settings.window_height);
+                                        glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)live_screen_fbo);
                                 }
                                 if(postproc.depth_tex && postproc.fbo) {
                                         glActiveTexture(GL_TEXTURE2);
@@ -2012,16 +2017,20 @@ void keys(struct window_instance* window, int key, int scancode, int action, int
                         return;
                 }
 
-                if(config_key(key)->toggle) {
+                const struct config_key_pair* ck = config_key(key);
+                if(ck && ck->toggle) {
                         if(chat_input_mode == CHAT_NO_INPUT) {
                                 window_pressed_keys[key] = !window_pressed_keys[key];
                         }
-                } else {
+                } else if(ck) {
                         window_pressed_keys[key] = 1;
                 }
         }
-        if(action == WINDOW_RELEASE && !config_key(key)->toggle)
-                window_pressed_keys[key] = 0;
+        if(action == WINDOW_RELEASE) {
+                const struct config_key_pair* ck = config_key(key);
+                if(ck && !ck->toggle)
+                        window_pressed_keys[key] = 0;
+        }
 
         /* One toggle path for every backend: latch the new state and let
            window_apply() carry out the transition at the start of the next frame.
@@ -2703,10 +2712,16 @@ int main(int argc, char** argv) {
         }
 #endif
 
-        log_info("Vendor: %s", glGetString(GL_VENDOR));
-        log_info("Renderer: %s", glGetString(GL_RENDERER));
-        log_info("Version: %s", glGetString(GL_VERSION));
-        log_debug("GLSL: %s", glGetString(GL_SHADING_LANGUAGE_VERSION));
+        {
+                const char* vendor = (const char*)glGetString(GL_VENDOR);
+                const char* renderer = (const char*)glGetString(GL_RENDERER);
+                const char* version = (const char*)glGetString(GL_VERSION);
+                const char* glsl = (const char*)glGetString(GL_SHADING_LANGUAGE_VERSION);
+                log_info("Vendor: %s", vendor ? vendor : "(null)");
+                log_info("Renderer: %s", renderer ? renderer : "(null)");
+                log_info("Version: %s", version ? version : "(null)");
+                log_debug("GLSL: %s", glsl ? glsl : "(null)");
+        }
 
         if(settings.multisamples > 0) {
                 glEnable(GL_MULTISAMPLE);
